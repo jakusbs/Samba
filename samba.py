@@ -432,8 +432,6 @@ class MainWindow(QMainWindow):
             dev = self._active_setup().get(key, "")
             if dev: evict_proxy(dev)
         self._load_active_config()
-        # Update calibration FL sensor display
-        self.calib_panel.set_fl_device(self._active_setup().get("focus_averagein", ""))
         # Update setup defaults panel
         self.setup_defaults.load(self._active_setup())
         # Refresh data browser if it was already loaded
@@ -517,6 +515,7 @@ class MainWindow(QMainWindow):
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
             setup.get("act2_label",  "Y"), setup.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
+        self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
         self.traj_panel.load_monitor_settings(cfg)
