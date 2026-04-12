@@ -461,28 +461,37 @@ class CalibrationPanel(QWidget):
         af_l = QGridLayout(af_grp); af_l.setSpacing(4)
         af_l.setContentsMargins(8, 8, 8, 8)
 
-        af_l.addWidget(QLabel("Focus pos:"), 0, 0)
+        af_l.addWidget(QLabel("FL sensor:"), 0, 0)
+        self.fl_dev_lbl = QLineEdit()
+        self.fl_dev_lbl.setReadOnly(True)
+        self.fl_dev_lbl.setPlaceholderText("— set in Setup Defaults —")
+        self.fl_dev_lbl.setStyleSheet(
+            "background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
+            "border-radius:4px;padding:2px 4px;font-size:10px;")
+        af_l.addWidget(self.fl_dev_lbl, 0, 1, 1, 2)
+
+        af_l.addWidget(QLabel("Focus pos:"), 1, 0)
         self.focus_pos_spin = QDoubleSpinBox()
         self.focus_pos_spin.setRange(-1e6, 1e6); self.focus_pos_spin.setDecimals(3)
         self.focus_pos_spin.setValue(0.0); self.focus_pos_spin.setSuffix(" µm")
-        af_l.addWidget(self.focus_pos_spin, 0, 1, 1, 2)
+        af_l.addWidget(self.focus_pos_spin, 1, 1, 1, 2)
 
-        af_l.addWidget(QLabel("Step (dz):"), 1, 0)
+        af_l.addWidget(QLabel("Step (dz):"), 2, 0)
         self.dz_spin = QDoubleSpinBox()
         self.dz_spin.setRange(0.001, 10); self.dz_spin.setDecimals(3)
         self.dz_spin.setValue(0.1); self.dz_spin.setSuffix(" µm")
-        af_l.addWidget(self.dz_spin, 1, 1)
+        af_l.addWidget(self.dz_spin, 2, 1)
 
-        af_l.addWidget(QLabel("Max range:"), 2, 0)
+        af_l.addWidget(QLabel("Max range:"), 3, 0)
         self.dzmax_spin = QDoubleSpinBox()
         self.dzmax_spin.setRange(0.1, 50); self.dzmax_spin.setDecimals(1)
         self.dzmax_spin.setValue(2.0); self.dzmax_spin.setSuffix(" µm")
-        af_l.addWidget(self.dzmax_spin, 2, 1)
+        af_l.addWidget(self.dzmax_spin, 3, 1)
 
-        af_l.addWidget(QLabel("Max tries:"), 3, 0)
+        af_l.addWidget(QLabel("Max tries:"), 4, 0)
         self.tries_spin = QSpinBox()
         self.tries_spin.setRange(1, 200); self.tries_spin.setValue(20)
-        af_l.addWidget(self.tries_spin, 3, 1)
+        af_l.addWidget(self.tries_spin, 4, 1)
 
         af_btn_row = QHBoxLayout()
         self.af_start_btn = QPushButton("▶  Autofocus")
@@ -559,6 +568,10 @@ class CalibrationPanel(QWidget):
         if x is not None: self.jog_x.update_readback(x)
         if y is not None: self.jog_y.update_readback(y)
         if z is not None: self.jog_z.update_readback(z)
+
+    def set_fl_device(self, dev: str):
+        """Update the read-only FL sensor display (called on setup change)."""
+        self.fl_dev_lbl.setText(dev)
 
     # ── Autofocus ─────────────────────────────────────────────────────────────
     def _start_autofocus(self):

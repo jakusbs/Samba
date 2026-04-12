@@ -432,6 +432,8 @@ class MainWindow(QMainWindow):
             dev = self._active_setup().get(key, "")
             if dev: evict_proxy(dev)
         self._load_active_config()
+        # Update calibration FL sensor display
+        self.calib_panel.set_fl_device(self._active_setup().get("focus_averagein", ""))
         # Update setup defaults panel
         self.setup_defaults.load(self._active_setup())
         # Refresh data browser if it was already loaded
@@ -563,6 +565,7 @@ class MainWindow(QMainWindow):
             defaults.get("act1_label", "X"), defaults.get("act1_unit", "nm"),
             defaults.get("act2_label", "Y"), defaults.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
+        self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
 
     def _on_scan_mode_changed(self, mode: str):
         """Called when trajectory panel switches between SPATIAL/FIELD/DC_HYST."""
