@@ -88,8 +88,9 @@ class ScanlistWorker(QThread):
         mag_cur   = self.setup.get("magnet_current_attr", "current_polar")
         mag_fld   = self.setup.get("magnet_field_attr", "field_polar_corr")
 
+        relay_attr = self.setup.get("relay_attr", "switchvar")
         try:
-            self._relay_state = int(relay_p.read_attribute("switchvar").value)
+            self._relay_state = int(relay_p.read_attribute(relay_attr).value)
             self.relay_changed.emit(self._relay_state)
         except Exception:
             self._relay_state = 0
@@ -128,7 +129,7 @@ class ScanlistWorker(QThread):
                 f"field={field_T:+.3f} T")
 
             try:
-                relay_p.write_attribute("switchvar", self._relay_state)
+                relay_p.write_attribute(relay_attr, self._relay_state)
                 self.relay_changed.emit(self._relay_state)
             except Exception as e:
                 self.log_msg.emit(f"⚠ relay: {e}")
