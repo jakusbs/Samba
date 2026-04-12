@@ -268,6 +268,39 @@ Simulation mode activates automatically when `pytango` is not installed, when `T
 
 ---
 
+## TANGO Device Map
+
+| TANGO Path | Purpose | Key Attributes |
+|---|---|---|
+| `smaract2/control/IR-controller` | IR stage positioner | `x`, `y`, `z` (nm) |
+| `hpp-N42/measure/ZI2` | Main lock-in (ZI MFLI) | `x1`, `y1`, `x2`, `y2` |
+| `hpp-N42/measure/ZI1` | Secondary lock-in | `x1`, `y1`, `x2`, `y2` |
+| `hpp-N42/beckhoff/analogIn2` | Focus diode (DC) | `Value` |
+| `hpp-N42/beckhoff/averageIn1` | Averaged balanced diode | `Value` (requires `Start`) |
+| `hpp-N42/beckhoff/magnet` | Field readback | `field_polar_corr`, `field_longitudinal_corr` |
+| `hpp-N42/beckhoff/pyhystlongi` | DC hysteresis (longitudinal) | `result1`–`result6`, `field` |
+| `hpp-N42/beckhoff/pyhystpolar` | DC hysteresis (polar) | `result1`–`result6`, `field` |
+| `hpp-N42/current/PyKeithley` | Keithley 6221 (Green) | `current`, `amplitude`, `frequency`, `range` |
+| `hpp-N42/current/PyKeithley2` | Keithley 6221 (IR/Cryo) | same |
+| `hpp-N42/current/PyRelais` | Optical relay switch | `switchvar` |
+| `hpp-N42/samba/lock` | Setup mutex server | `GreenBusy`, `IrBusy`, `GreenInfo`, `IrInfo` |
+| `intermag/dg645/1` | DG645 delay generator | `DelayA`–`H`, `AmplitudeAB/CD/EF/GH` |
+
+---
+
+## Known Issues
+
+**Zigzag asymmetry**
+2D scans with zigzag enabled can show a small signal asymmetry between forward and reverse rows due to piezo hysteresis. Workaround: increase settle time or disable zigzag.
+
+**Lock-in averaging**
+The ZI MFLI TANGO device uses a software poll-and-average approach rather than the instrument's native hardware filter. This works well at typical integration times (≥ 50 ms) but is suboptimal compared to using the lock-in's built-in time constant.
+
+**TR-MOKE x-axis in HDF5**
+Delay values are stored in the HDF5 file in **seconds** (SI units). The live plot converts to ns/ps/µs for display, but post-processing scripts need to account for the raw seconds stored on disk.
+
+---
+
 ## Troubleshooting
 
 **App starts but no devices respond**
