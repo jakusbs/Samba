@@ -117,12 +117,19 @@ class FieldSegmentList(QWidget):
 
 
 class ActuatorGroup(QGroupBox):
-    def __init__(self, title: str, dev: str, attr: str, lbl: str, unit: str,
+    """Scan-geometry controls for a single actuator axis.
+
+    Device path and attribute are no longer stored here — they live in
+    SetupDefaultsPanel and are injected into the config by MainWindow at
+    scan-start time.  This group only shows start / stop / N and the
+    display-only label / unit that come from the setup defaults.
+    """
+
+    def __init__(self, title: str, lbl: str, unit: str,
                  start: float, stop: float, npts: int, step_prefix: str = "Δ",
-                 enabled: bool = True, registry: list = None, parent=None):
+                 enabled: bool = True, parent=None):
         super().__init__(title, parent)
         self._step_prefix = step_prefix
-        self._registry: List[dict] = registry or []
         g = QGridLayout(self); g.setSpacing(4); g.setContentsMargins(8, 8, 8, 8)
 
         # Row 0: Scan enabled checkbox
@@ -130,28 +137,31 @@ class ActuatorGroup(QGroupBox):
         self.scan_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         g.addWidget(self.scan_cb, 0, 0, 1, 6)
 
-        # Row 1: Device combo (registry-driven, stage type preferred)
-        g.addWidget(QLabel("Device:"), 1, 0)
-        self.dev_combo = NoScrollComboBox()
-        self.dev_combo.setMinimumWidth(150)
-        g.addWidget(self.dev_combo, 1, 1, 1, 5)
+        _ro_style = ("background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
+                     "border-radius:4px;padding:2px 4px;")
 
-        # Row 2: Channel combo + editable Label + Unit
-        g.addWidget(QLabel("Attr:"), 2, 0)
-        self.ch_combo = NoScrollComboBox(); self.ch_combo.setFixedWidth(72)
-        g.addWidget(self.ch_combo, 2, 1)
-        g.addWidget(QLabel("Label:"), 2, 2)
+        # Row 1: Device + Attr (display-only — populated from Setup Defaults)
+        g.addWidget(QLabel("Device:"), 1, 0)
+        self.dev_lbl = QLineEdit(); self.dev_lbl.setReadOnly(True)
+        self.dev_lbl.setPlaceholderText("— set in Setup Defaults —")
+        self.dev_lbl.setStyleSheet(_ro_style + "font-size:10px;")
+        g.addWidget(self.dev_lbl, 1, 1, 1, 4)
+        self.attr_lbl = QLineEdit(); self.attr_lbl.setReadOnly(True)
+        self.attr_lbl.setFixedWidth(44)
+        self.attr_lbl.setStyleSheet(_ro_style + "font-size:10px;")
+        g.addWidget(self.attr_lbl, 1, 5)
+
+        # Row 2: Label + Unit (display-only — populated from Setup Defaults)
+        g.addWidget(QLabel("Label:"), 2, 0)
         self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
         self.lbl.setReadOnly(True)
-        self.lbl.setStyleSheet(
-            "background:#1e1e2e;color:#6c7086;border:1px solid #313244;border-radius:4px;padding:2px 4px;")
-        g.addWidget(self.lbl, 2, 3)
-        g.addWidget(QLabel("Unit:"), 2, 4)
-        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(35)
+        self.lbl.setStyleSheet(_ro_style)
+        g.addWidget(self.lbl, 2, 1)
+        g.addWidget(QLabel("Unit:"), 2, 2)
+        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(40)
         self.unit_edit.setReadOnly(True)
-        self.unit_edit.setStyleSheet(
-            "background:#1e1e2e;color:#6c7086;border:1px solid #313244;border-radius:4px;padding:2px 4px;")
-        g.addWidget(self.unit_edit, 2, 5)
+        self.unit_edit.setStyleSheet(_ro_style)
+        g.addWidget(self.unit_edit, 2, 3)
 
         # Row 3: Start / Stop
         g.addWidget(QLabel("Start:"), 3, 0)
@@ -183,74 +193,15 @@ class ActuatorGroup(QGroupBox):
             w.valueChanged.connect(self._upd)
         self.npts_spin.valueChanged.connect(self._upd)
         self.step_spin.valueChanged.connect(self._upd)
-
-        self.dev_combo.currentIndexChanged.connect(self._on_dev_changed)
-        self.ch_combo.currentIndexChanged.connect(self._on_ch_changed)
-
-        self._populate_dev_combo(initial_dev=dev, initial_attr=attr)
         self._upd()
 
-    # ── Registry helpers ──────────────────────────────────────────────────────
-    def _populate_dev_combo(self, initial_dev: str = "", initial_attr: str = ""):
-        self.dev_combo.blockSignals(True); self.dev_combo.clear()
-        stage_devs = [d for d in self._registry if d.get("type") == "stage"]
-        show = stage_devs if stage_devs else self._registry
-        for d in show:
-            self.dev_combo.addItem(d["name"], d["tango_path"])
-        # Try to select by tango_path
-        found = False
-        if initial_dev:
-            for i in range(self.dev_combo.count()):
-                if self.dev_combo.itemData(i) == initial_dev:
-                    self.dev_combo.setCurrentIndex(i); found = True; break
-            if not found:
-                # Not in registry — add as literal entry so value isn't lost
-                self.dev_combo.addItem(initial_dev, initial_dev)
-                self.dev_combo.setCurrentIndex(self.dev_combo.count() - 1)
-        self.dev_combo.blockSignals(False)
-        self._populate_ch_combo(initial_attr=initial_attr)
-
-    def _populate_ch_combo(self, initial_attr: str = ""):
-        self.ch_combo.blockSignals(True); self.ch_combo.clear()
-        dev_data = self.dev_combo.currentData() or ""
-        dev_text = self.dev_combo.currentText()
-        for d in self._registry:
-            if d.get("tango_path") == dev_data or d.get("name") == dev_text:
-                for ch in d.get("channels", []):
-                    self.ch_combo.addItem(ch.get("attr", "?"), ch.get("attr", ""))
-                break
-        if initial_attr and self.ch_combo.findData(initial_attr) < 0:
-            self.ch_combo.addItem(initial_attr, initial_attr)
-        if initial_attr:
-            idx = self.ch_combo.findData(initial_attr)
-            if idx >= 0: self.ch_combo.setCurrentIndex(idx)
-        self.ch_combo.blockSignals(False)
-
-    def _on_dev_changed(self, _=None):
-        cur_attr = self.ch_combo.currentData() or ""
-        self._populate_ch_combo(initial_attr=cur_attr)
-        self._on_ch_changed()
-
-    def _on_ch_changed(self, _=None):
-        """Auto-fill label and unit from registry channel definition."""
-        attr  = self.ch_combo.currentData() or self.ch_combo.currentText()
-        d_dat = self.dev_combo.currentData() or ""
-        d_txt = self.dev_combo.currentText()
-        for d in self._registry:
-            if d.get("tango_path") == d_dat or d.get("name") == d_txt:
-                for ch in d.get("channels", []):
-                    if ch.get("attr") == attr:
-                        self.lbl.setText(ch.get("label", attr))
-                        self.unit_edit.setText(ch.get("unit", "µm"))
-                        return
-                break
-
-    def set_registry(self, registry: list):
-        """Called after registry edits — repopulate while keeping selection."""
-        cur_dev  = self.dev_combo.currentData() or ""
-        cur_attr = self.ch_combo.currentData()  or ""
-        self._registry = registry
-        self._populate_dev_combo(initial_dev=cur_dev, initial_attr=cur_attr)
+    # ── Update from setup defaults ────────────────────────────────────────────
+    def set_defaults(self, dev: str, attr: str, lbl: str, unit: str):
+        """Called by samba.py when Setup Defaults change."""
+        self.dev_lbl.setText(dev)
+        self.attr_lbl.setText(attr)
+        self.lbl.setText(lbl)
+        self.unit_edit.setText(unit)
 
     # ── Standard helpers ──────────────────────────────────────────────────────
     def _on_mode(self, m):
@@ -274,33 +225,9 @@ class ActuatorGroup(QGroupBox):
 
     def load(self, pfx: str, cfg: dict, enabled: bool = True):
         self.scan_cb.setChecked(enabled)
-        tango_path = cfg.get(f"{pfx}_device", "")
-        dev_name   = cfg.get(f"{pfx}_device_name", "")
-        # Find in combo by tango_path first, then by device_name
-        found = False
-        for i in range(self.dev_combo.count()):
-            if (self.dev_combo.itemData(i) == tango_path
-                    or self.dev_combo.itemText(i) == dev_name):
-                self.dev_combo.blockSignals(True)
-                self.dev_combo.setCurrentIndex(i)
-                self.dev_combo.blockSignals(False)
-                found = True; break
-        if not found and tango_path:
-            # Add as literal entry
-            self.dev_combo.blockSignals(True)
-            self.dev_combo.addItem(tango_path, tango_path)
-            self.dev_combo.setCurrentIndex(self.dev_combo.count() - 1)
-            self.dev_combo.blockSignals(False)
-        ch_attr = cfg.get(f"{pfx}_attr", "")
-        self._populate_ch_combo(initial_attr=ch_attr)
-        if ch_attr:
-            idx = self.ch_combo.findData(ch_attr)
-            if idx >= 0:
-                self.ch_combo.blockSignals(True)
-                self.ch_combo.setCurrentIndex(idx)
-                self.ch_combo.blockSignals(False)
-        self.lbl.setText(cfg.get(f"{pfx}_label", ""))
-        self.unit_edit.setText(cfg.get(f"{pfx}_unit", "µm"))
+        # label and unit come from setup defaults (may be in cfg if already merged)
+        self.lbl.setText(cfg.get(f"{pfx}_label", self.lbl.text()))
+        self.unit_edit.setText(cfg.get(f"{pfx}_unit", self.unit_edit.text()))
         self.start.setValue(cfg.get(f"{pfx}_start",  0.0))
         self.stop.setValue( cfg.get(f"{pfx}_stop",  50000.0))
         self.rb_n.setChecked(True)
@@ -308,18 +235,13 @@ class ActuatorGroup(QGroupBox):
         self._upd()
 
     def get_partial(self, pfx: str) -> dict:
-        dev_path = self.dev_combo.currentData() or self.dev_combo.currentText() or ""
-        dev_name = self.dev_combo.currentText()
-        ch_attr  = self.ch_combo.currentData() or self.ch_combo.currentText() or ""
+        """Return scan-geometry values (no device/attr — injected from defaults)."""
         return {
-            f"{pfx}_device":      dev_path,
-            f"{pfx}_device_name": dev_name,
-            f"{pfx}_attr":        ch_attr,
-            f"{pfx}_label":       self.lbl.text(),
-            f"{pfx}_unit":        self.unit_edit.text().strip() or "µm",
-            f"{pfx}_start":       self.start.value(),
-            f"{pfx}_stop":        self.stop.value(),
-            f"{pfx}_npts":        self.get_npts(),
+            f"{pfx}_label": self.lbl.text(),
+            f"{pfx}_unit":  self.unit_edit.text().strip() or "µm",
+            f"{pfx}_start": self.start.value(),
+            f"{pfx}_stop":  self.stop.value(),
+            f"{pfx}_npts":  self.get_npts(),
         }
 
 
@@ -371,13 +293,11 @@ class TrajectoryPanel(QWidget):
         # ActuatorGroups are now checkable — the title checkbox IS the on/off toggle.
         act_row = QHBoxLayout(); act_row.setSpacing(6)
         self.act1_grp = ActuatorGroup(
-            "X axis",
-            "smaract2/control/IR-controller", "x", "X", "nm",
-            0, 50000, 51, step_prefix="Δx", enabled=True, registry=[])
+            "X axis", "X", "nm", 0, 50000, 51,
+            step_prefix="Δx", enabled=True)
         self.act2_grp = ActuatorGroup(
-            "Y axis",
-            "smaract2/control/IR-controller", "y", "Y", "nm",
-            0, 50000, 51, step_prefix="Δy", enabled=False, registry=[])
+            "Y axis", "Y", "nm", 0, 50000, 51,
+            step_prefix="Δy", enabled=False)
         # Zigzag container inside act2_grp — only shown when both X and Y are on
         self.zigzag_w = QWidget()
         zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(2)
@@ -527,11 +447,14 @@ class TrajectoryPanel(QWidget):
         tr_ch_grp = QGroupBox("DG645 Channels"); cg = QGridLayout(tr_ch_grp)
         cg.setSpacing(3); cg.setContentsMargins(6, 6, 6, 6)
 
-        # Device row
+        # Device row — path comes from Setup Defaults; shown read-only here
         cg.addWidget(QLabel("Device:"), 0, 0)
-        self._tr_dev = NoScrollComboBox(); self._tr_dev.setEditable(True)
-        self._tr_dev.addItem("intermag/dg645/1"); self._tr_dev.setMinimumWidth(140)
-        cg.addWidget(self._tr_dev, 0, 1, 1, 5)
+        self._tr_dev_lbl = QLabel("intermag/dg645/1")
+        self._tr_dev_lbl.setStyleSheet(
+            "color:#a6e3a1;font-size:10px;background:#181825;"
+            "border:1px solid #313244;border-radius:4px;padding:2px 6px;")
+        self._tr_dev_lbl.setMinimumWidth(140)
+        cg.addWidget(self._tr_dev_lbl, 0, 1, 1, 5)
         tr_conn = QPushButton("Connect"); tr_conn.setFixedWidth(55)
         tr_conn.clicked.connect(self._tr_connect)
         cg.addWidget(tr_conn, 0, 6)
@@ -931,8 +854,22 @@ class TrajectoryPanel(QWidget):
         return max(2, int(round(span / max(1e-9, self.fd.value()))) + 1)
 
     # ── Field / Hc convergence monitor ───────────────────────────────────────
+    # ── Setup-defaults helpers (called from samba.py) ─────────────────────────
+    def set_actuator_defaults(self, act1_dev: str, act1_attr: str,
+                               act1_lbl: str, act1_unit: str,
+                               act2_dev: str, act2_attr: str,
+                               act2_lbl: str, act2_unit: str):
+        """Update ActuatorGroup display fields when setup defaults change."""
+        self.act1_grp.set_defaults(act1_dev, act1_attr, act1_lbl, act1_unit)
+        self.act2_grp.set_defaults(act2_dev, act2_attr, act2_lbl, act2_unit)
+
+    def set_trmoke_device(self, path: str):
+        """Update the TR-MOKE device label from setup defaults."""
+        if path:
+            self._tr_dev_lbl.setText(path)
+
     def populate_monitor_combo(self, registry: list):
-        """Fill AC monitor, DC monitor, DC device, AC device, and actuator combos
+        """Fill AC monitor, DC monitor, DC device, and AC device combos
         from the device registry.  Safe to call multiple times."""
         self._mon_registry = registry
 
@@ -975,10 +912,6 @@ class TrajectoryPanel(QWidget):
                 if self._ac_dev_combo.itemData(i) == prev_ac:
                     self._ac_dev_combo.setCurrentIndex(i); break
         self._ac_dev_combo.blockSignals(False)
-
-        # ── Actuator group registries ─────────────────────────────────────────
-        self.act1_grp.set_registry(registry)
-        self.act2_grp.set_registry(registry)
 
     def _on_mon_dev_changed(self, which: str = "ac"):
         """Populate channel dropdown from the selected device's channels."""
@@ -1128,7 +1061,7 @@ class TrajectoryPanel(QWidget):
     _TR_UNIT_FACTORS = {"ps": 1e-12, "ns": 1e-9, "µs": 1e-6}
 
     def _tr_get_proxy(self):
-        path = self._tr_dev.currentText().strip()
+        path = self._tr_dev_lbl.text().strip()
         if not path: return None, "No device"
         from hardware import fresh_proxy
         p, err = fresh_proxy(path)
@@ -1443,11 +1376,10 @@ class TrajectoryPanel(QWidget):
         self.dc_int_t.setValue(  cfg.get("hyst_int_time", 2.0))
         self.dc_npts.setValue(   cfg.get("hyst_npts",     100))
         self.dc_cycles.setValue( cfg.get("hyst_cycles",   1))
-        # TR-MOKE params
-        tr_dev = cfg.get("trmoke_dg645", "intermag/dg645/1")
-        idx = self._tr_dev.findText(tr_dev)
-        if idx >= 0: self._tr_dev.setCurrentIndex(idx)
-        else: self._tr_dev.setEditText(tr_dev)
+        # TR-MOKE params — device path comes from Setup Defaults, shown read-only
+        tr_dev = cfg.get("trmoke_dg645", "")
+        if tr_dev:
+            self._tr_dev_lbl.setText(tr_dev)
         ch = cfg.get("trmoke_channel", "A")
         idx = self._tr_ch.findText(ch)
         if idx >= 0: self._tr_ch.setCurrentIndex(idx)
@@ -1484,7 +1416,7 @@ class TrajectoryPanel(QWidget):
                 "scan_type":    "TR_MOKE",
                 "scan_x":       True,
                 "scan_y":       False,
-                "act1_device":  self._tr_dev.currentText().strip(),
+                # act1_device / trmoke_dg645 injected from Setup Defaults in samba.py
                 "act1_attr":    f"Delay{ch}",
                 "act1_label":   f"Delay {ch}",
                 "act1_unit":    unit,
@@ -1495,7 +1427,6 @@ class TrajectoryPanel(QWidget):
                 "settle_time":      0.001,   # DG645 updates instantly
                 "move_timeout":     self.timeout.value(),
                 # TR-MOKE persistence keys
-                "trmoke_dg645":     self._tr_dev.currentText().strip(),
                 "trmoke_channel":   ch,
                 "trmoke_unit":      unit,
                 "trmoke_start":     self._tr_start.value(),

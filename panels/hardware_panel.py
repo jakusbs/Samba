@@ -296,13 +296,14 @@ class HardwarePanel(QGroupBox):
         if is_sim_proxy(p):
             self._set_sim(self.relay_status)
         else:
-            err = safe_write(p, "switchvar", self._relay_state)
+            relay_attr = s.get("relay_attr", "switchvar")
+            err = safe_write(p, relay_attr, self._relay_state)
             if err:
                 self._set_err(self.relay_status, err[:60])
                 self._relay_state = 1 - self._relay_state   # revert
                 return
             self._set_ok(self.relay_status,
-                         f"switchvar → {self._relay_state}  "
+                         f"{relay_attr} → {self._relay_state}  "
                          f"({'−1' if self._relay_state else '+1'})")
         self._update_relay_label()
 
