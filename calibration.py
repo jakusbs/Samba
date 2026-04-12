@@ -527,7 +527,7 @@ class CalibrationPanel(QWidget):
         x_attr = cfg.get("act1_attr", "x")
         y_dev  = cfg.get("act2_device", x_dev)
         y_attr = cfg.get("act2_attr", "y")
-        z_dev  = x_dev
+        z_dev  = s.get("z_device", x_dev)
         z_attr = s.get("z_attr", "position0")
         self._dev_lbl.setText(
             f"X: {x_dev}/{x_attr}   Y: {y_dev}/{y_attr}   Z: {z_dev}/{z_attr}")
