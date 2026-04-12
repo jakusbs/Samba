@@ -137,31 +137,41 @@ class ActuatorGroup(QGroupBox):
         self.scan_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         g.addWidget(self.scan_cb, 0, 0, 1, 6)
 
-        # Row 1: Label + Unit (display-only — populated from Setup Defaults)
-        g.addWidget(QLabel("Label:"), 1, 0)
+        _ro_style = ("background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
+                     "border-radius:4px;padding:2px 4px;")
+
+        # Row 1: Device + Attr (display-only — populated from Setup Defaults)
+        g.addWidget(QLabel("Device:"), 1, 0)
+        self.dev_lbl = QLineEdit(); self.dev_lbl.setReadOnly(True)
+        self.dev_lbl.setPlaceholderText("— set in Setup Defaults —")
+        self.dev_lbl.setStyleSheet(_ro_style + "font-size:10px;")
+        g.addWidget(self.dev_lbl, 1, 1, 1, 4)
+        self.attr_lbl = QLineEdit(); self.attr_lbl.setReadOnly(True)
+        self.attr_lbl.setFixedWidth(44)
+        self.attr_lbl.setStyleSheet(_ro_style + "font-size:10px;")
+        g.addWidget(self.attr_lbl, 1, 5)
+
+        # Row 2: Label + Unit (display-only — populated from Setup Defaults)
+        g.addWidget(QLabel("Label:"), 2, 0)
         self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
         self.lbl.setReadOnly(True)
-        self.lbl.setStyleSheet(
-            "background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
-            "border-radius:4px;padding:2px 4px;")
-        g.addWidget(self.lbl, 1, 1)
-        g.addWidget(QLabel("Unit:"), 1, 2)
+        self.lbl.setStyleSheet(_ro_style)
+        g.addWidget(self.lbl, 2, 1)
+        g.addWidget(QLabel("Unit:"), 2, 2)
         self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(40)
         self.unit_edit.setReadOnly(True)
-        self.unit_edit.setStyleSheet(
-            "background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
-            "border-radius:4px;padding:2px 4px;")
-        g.addWidget(self.unit_edit, 1, 3)
+        self.unit_edit.setStyleSheet(_ro_style)
+        g.addWidget(self.unit_edit, 2, 3)
 
-        # Row 2: Start / Stop
-        g.addWidget(QLabel("Start:"), 2, 0)
+        # Row 3: Start / Stop
+        g.addWidget(QLabel("Start:"), 3, 0)
         self.start = NoScrollDoubleSpinBox(); self.start.setRange(-1e9, 1e9); self.start.setDecimals(3)
-        self.start.setValue(start); g.addWidget(self.start, 2, 1, 1, 2)
-        g.addWidget(QLabel("Stop:"), 2, 3)
+        self.start.setValue(start); g.addWidget(self.start, 3, 1, 1, 2)
+        g.addWidget(QLabel("Stop:"), 3, 3)
         self.stop  = NoScrollDoubleSpinBox(); self.stop.setRange(-1e9, 1e9);  self.stop.setDecimals(3)
-        self.stop.setValue(stop);  g.addWidget(self.stop,  2, 4, 1, 2)
+        self.stop.setValue(stop);  g.addWidget(self.stop,  3, 4, 1, 2)
 
-        # Row 3: N / Δ step toggle
+        # Row 4: N / Δ step toggle
         ns_row = QWidget(); ns_lay = QHBoxLayout(ns_row)
         ns_lay.setContentsMargins(0, 0, 0, 0); ns_lay.setSpacing(4)
         self._mode_bg = QButtonGroup(self)
@@ -177,7 +187,7 @@ class ActuatorGroup(QGroupBox):
         self.comp_lbl  = QLabel(); self.comp_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
         for w in [self.rb_n, self.npts_spin, self.rb_step, self.step_spin, self.comp_lbl]:
             ns_lay.addWidget(w)
-        ns_lay.addStretch(); g.addWidget(ns_row, 3, 0, 1, 6)
+        ns_lay.addStretch(); g.addWidget(ns_row, 4, 0, 1, 6)
 
         for w in [self.start, self.stop]:
             w.valueChanged.connect(self._upd)
@@ -185,9 +195,11 @@ class ActuatorGroup(QGroupBox):
         self.step_spin.valueChanged.connect(self._upd)
         self._upd()
 
-    # ── Label / unit update from setup defaults ───────────────────────────────
-    def set_label_unit(self, lbl: str, unit: str):
+    # ── Update from setup defaults ────────────────────────────────────────────
+    def set_defaults(self, dev: str, attr: str, lbl: str, unit: str):
         """Called by samba.py when Setup Defaults change."""
+        self.dev_lbl.setText(dev)
+        self.attr_lbl.setText(attr)
         self.lbl.setText(lbl)
         self.unit_edit.setText(unit)
 
@@ -843,11 +855,13 @@ class TrajectoryPanel(QWidget):
 
     # ── Field / Hc convergence monitor ───────────────────────────────────────
     # ── Setup-defaults helpers (called from samba.py) ─────────────────────────
-    def set_actuator_defaults(self, act1_lbl: str, act1_unit: str,
+    def set_actuator_defaults(self, act1_dev: str, act1_attr: str,
+                               act1_lbl: str, act1_unit: str,
+                               act2_dev: str, act2_attr: str,
                                act2_lbl: str, act2_unit: str):
-        """Update ActuatorGroup display labels when setup defaults change."""
-        self.act1_grp.set_label_unit(act1_lbl, act1_unit)
-        self.act2_grp.set_label_unit(act2_lbl, act2_unit)
+        """Update ActuatorGroup display fields when setup defaults change."""
+        self.act1_grp.set_defaults(act1_dev, act1_attr, act1_lbl, act1_unit)
+        self.act2_grp.set_defaults(act2_dev, act2_attr, act2_lbl, act2_unit)
 
     def set_trmoke_device(self, path: str):
         """Update the TR-MOKE device label from setup defaults."""

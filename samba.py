@@ -512,8 +512,10 @@ class MainWindow(QMainWindow):
         # Load setup defaults and push actuator labels / TR-MOKE device to trajectory
         self.setup_defaults.load(setup)
         self.traj_panel.set_actuator_defaults(
-            setup.get("act1_label", "X"), setup.get("act1_unit", "nm"),
-            setup.get("act2_label", "Y"), setup.get("act2_unit", "nm"))
+            setup.get("act1_device", ""), setup.get("act1_attr", "x"),
+            setup.get("act1_label",  "X"), setup.get("act1_unit", "nm"),
+            setup.get("act2_device", ""), setup.get("act2_attr", "y"),
+            setup.get("act2_label",  "Y"), setup.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
@@ -562,8 +564,10 @@ class MainWindow(QMainWindow):
         save_setup(self._active_setup_name, self._active_setup())
         # Push updated labels and TR-MOKE device to trajectory panel
         self.traj_panel.set_actuator_defaults(
-            defaults.get("act1_label", "X"), defaults.get("act1_unit", "nm"),
-            defaults.get("act2_label", "Y"), defaults.get("act2_unit", "nm"))
+            defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
+            defaults.get("act1_label",  "X"), defaults.get("act1_unit", "nm"),
+            defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
+            defaults.get("act2_label",  "Y"), defaults.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
 
