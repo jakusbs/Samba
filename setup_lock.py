@@ -1,0 +1,128 @@
+"""
+setup_lock.py — Client-side setup locking for Samba
+====================================================
+Provides acquire_lock() / release_lock() that talk to the Setup_lock
+TANGO device server (built with Pogo).
+
+The server just has 6 attributes:
+  GreenBusy, IrBusy, CryoBusy     (DevBoolean, READ_WRITE)
+  GreenInfo,  IrInfo,  CryoInfo   (DevString,  READ_WRITE)
+
+No custom commands needed — we read/write the attributes directly.
+
+If the server is unreachable, locks are silently skipped (fail-open)
+so Samba always works even without the lock server running.
+
+Usage in samba.py:
+    from setup_lock import acquire_lock, release_lock
+
+    ok, msg = acquire_lock("Green")   # (True, "") or (False, "pc3 @ 14:02:31")
+    release_lock("Green")
+"""
+
+import socket
+from datetime import datetime
+from typing import Tuple
+
+try:
+    import tango
+    TANGO_AVAILABLE = True
+except ImportError:
+    TANGO_AVAILABLE = False
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+LOCK_DEVICE = "hpp-N42/samba/lock"       # adjust to match your TANGO DB
+
+# Map setup name → attribute names on the Pogo device
+_ATTR_MAP = {
+    "Green": ("GreenBusy", "GreenInfo"),
+    "IR":    ("IrBusy",    "IrInfo"),
+    "Cryo":  ("CryoBusy",  "CryoInfo"),
+}
+
+
+def _get_proxy():
+    """Return a DeviceProxy to the lock server, or None if unavailable."""
+    if not TANGO_AVAILABLE:
+        return None
+    try:
+        dp = tango.DeviceProxy(LOCK_DEVICE)
+        dp.set_timeout_millis(1000)
+        dp.ping()
+        return dp
+    except Exception:
+        return None
+
+
+def acquire_lock(setup_name: str) -> Tuple[bool, str]:
+    """
+    Try to lock *setup_name* (Green / IR / Cryo).
+
+    Returns:
+        (True, "")              — lock acquired
+        (False, "<who has it>") — already locked by someone else
+        (True, "")              — lock server unreachable (fail-open)
+    """
+    dp = _get_proxy()
+    if dp is None:
+        return True, ""
+
+    busy_attr, info_attr = _ATTR_MAP.get(setup_name, (None, None))
+    if busy_attr is None:
+        return True, ""
+
+    try:
+        # Check if already locked
+        if dp.read_attribute(busy_attr).value:
+            info = dp.read_attribute(info_attr).value
+            return False, info or "unknown"
+
+        # Acquire: write info first, then flip busy
+        stamp = f"{socket.gethostname()} @ {datetime.now().strftime('%H:%M:%S')}"
+        dp.write_attribute(info_attr, stamp)
+        dp.write_attribute(busy_attr, True)
+        return True, ""
+    except Exception:
+        return True, ""
+
+
+def release_lock(setup_name: str):
+    """Release the lock for *setup_name*.  Silently ignores errors."""
+    dp = _get_proxy()
+    if dp is None:
+        return
+
+    busy_attr, info_attr = _ATTR_MAP.get(setup_name, (None, None))
+    if busy_attr is None:
+        return
+
+    try:
+        dp.write_attribute(busy_attr, False)
+        dp.write_attribute(info_attr, "")
+    except Exception:
+        pass
+
+
+def check_lock(setup_name: str) -> Tuple[bool, str]:
+    """
+    Check if a setup is currently locked (without acquiring).
+
+    Returns:
+        (True, "<info>")  — busy
+        (False, "")       — free or server unreachable
+    """
+    dp = _get_proxy()
+    if dp is None:
+        return False, ""
+
+    busy_attr, info_attr = _ATTR_MAP.get(setup_name, (None, None))
+    if busy_attr is None:
+        return False, ""
+
+    try:
+        if dp.read_attribute(busy_attr).value:
+            info = dp.read_attribute(info_attr).value
+            return True, info or "unknown"
+        return False, ""
+    except Exception:
+        return False, ""
