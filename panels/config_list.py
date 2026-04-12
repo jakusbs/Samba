@@ -6,7 +6,8 @@ from typing import Dict
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTabWidget, QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog
+    QTabWidget, QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog,
+    QMessageBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QIcon
@@ -109,7 +110,17 @@ class ConfigListPanel(QWidget):
     def copy_config(self):   self.config_selected.emit(-1)
     def del_config(self):
         lw = self.active_list()
-        if lw.count() > 1: self.config_deleted.emit(lw.currentRow())
+        if lw.count() <= 1:
+            return
+        it = lw.currentItem()
+        name = it.text() if it else "this config"
+        ans = QMessageBox.question(
+            self, "Delete config",
+            f'Delete "{name}"?\nThis cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if ans == QMessageBox.StandardButton.Yes:
+            self.config_deleted.emit(lw.currentRow())
     def rename_config(self):
         lw = self.active_list(); it = lw.currentItem()
         if not it: return
