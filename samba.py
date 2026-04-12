@@ -30,7 +30,7 @@ from hardware import get_proxy, safe_read, evict_proxy
 from scan    import ScanWorker, ScanlistWorker
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
-                     TrajectoryPanel, ScanlistPanel)
+                     TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
 from calibration import CalibrationPanel
@@ -350,6 +350,8 @@ class MainWindow(QMainWindow):
         self.bottom_tabs.addTab(self.script_console, "Script")
         self.dev_registry = DeviceRegistryPanel()
         self.bottom_tabs.addTab(self.dev_registry, "Device Registry")
+        self.setup_defaults = SetupDefaultsPanel()
+        self.bottom_tabs.addTab(self.setup_defaults, "Setup Defaults")
         bw_l.addWidget(self.bottom_tabs, stretch=1)
 
         v_split.addWidget(bottom_w)
@@ -381,6 +383,8 @@ class MainWindow(QMainWindow):
         self.right_panel.plot_config_changed.connect(self._on_plot_config_changed)
         # When registry is saved, update the right panel's registry reference
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
+        # When setup defaults are edited, save them and update trajectory labels
+        self.setup_defaults.defaults_changed.connect(self._on_defaults_changed)
         # When scan mode changes, swap right panel between normal/DC
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
 
@@ -431,6 +435,8 @@ class MainWindow(QMainWindow):
         # Update calibration panel FL sensor default
         fl_dev = self._active_setup().get("focus_averagein", "")
         if fl_dev: self.calib_panel.set_fl_device(fl_dev)
+        # Update setup defaults panel
+        self.setup_defaults.load(self._active_setup())
         # Refresh data browser if it was already loaded
         if self._browser_loaded:
             self.data_browser.refresh()
@@ -496,12 +502,20 @@ class MainWindow(QMainWindow):
             save_setup(self._active_setup_name, self._active_setup())
 
     def _load_active_config(self):
-        configs = self._active_setup().get("configs", [])
+        setup = self._active_setup()
+        configs = setup.get("configs", [])
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1); cfg = configs[idx]
         # Populate all registry-driven combos FIRST so load_config finds the items
         registry = self.dev_registry.get_registry()
         self.traj_panel.populate_monitor_combo(registry)
+        self.setup_defaults.set_registry(registry)
+        # Load setup defaults and push actuator labels / TR-MOKE device to trajectory
+        self.setup_defaults.load(setup)
+        self.traj_panel.set_actuator_defaults(
+            setup.get("act1_label", "X"), setup.get("act1_unit", "nm"),
+            setup.get("act2_label", "Y"), setup.get("act2_unit", "nm"))
+        self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
         self.traj_panel.load_monitor_settings(cfg)
@@ -512,11 +526,12 @@ class MainWindow(QMainWindow):
             self.right_panel.load_dc_channels(hyst_chs)
         self.right_panel.set_dc_mode(cfg.get("scan_type") == "DC_HYST")
         self.sl_panel.set_active_name(cfg.get("name","—"))
-        sd = os.path.expanduser(self._active_setup().get("save_dir", "~/moke_data"))
+        sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
 
     def _save_active_config(self):
-        configs = self._active_setup().get("configs", [])
+        setup   = self._active_setup()
+        configs = setup.get("configs", [])
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1)
         old = configs[idx]; old.update(self.traj_panel.get_config_partial())
@@ -524,10 +539,11 @@ class MainWindow(QMainWindow):
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
         old["hyst_channels"]  = self.right_panel.get_dc_channels()
-        # Sync save_dir from action bar back into setup
-        self._active_setup()["save_dir"] = self.save_dir.text().strip()
+        # Sync save_dir and setup defaults back into setup
+        setup["save_dir"] = self.save_dir.text().strip()
+        setup.update(self.setup_defaults.get_defaults())
         self.cfg_list.sync_name(idx, old["name"])
-        save_setup(self._active_setup_name, self._active_setup())
+        save_setup(self._active_setup_name, setup)
 
     def _explicit_save(self):
         self._save_active_config(); self.status_lbl.setText("Config saved ✓")
@@ -537,7 +553,23 @@ class MainWindow(QMainWindow):
         registry = self.dev_registry.get_registry()
         self.right_panel.set_registry(registry)
         self.traj_panel.populate_monitor_combo(registry)
+        self.setup_defaults.set_registry(registry)
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _on_defaults_changed(self):
+        """Called when Setup Defaults are edited — save to setup dict immediately."""
+        defaults = self.setup_defaults.get_defaults()
+        self._active_setup().update(defaults)
+        save_setup(self._active_setup_name, self._active_setup())
+        # Push updated labels and TR-MOKE device to trajectory panel
+        self.traj_panel.set_actuator_defaults(
+            defaults.get("act1_label", "X"), defaults.get("act1_unit", "nm"),
+            defaults.get("act2_label", "Y"), defaults.get("act2_unit", "nm"))
+        self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
+        # Calibration panel follows the focus sensor
+        fl_dev = defaults.get("focus_averagein", "")
+        if fl_dev:
+            self.calib_panel.set_fl_device(fl_dev)
 
     def _on_scan_mode_changed(self, mode: str):
         """Called when trajectory panel switches between SPATIAL/FIELD/DC_HYST."""
@@ -580,11 +612,26 @@ class MainWindow(QMainWindow):
 
     def _build_full_config(self) -> dict:
         partial  = self.traj_panel.get_config_partial()
-        configs  = self._active_setup().get("configs", [])
+        setup    = self._active_setup()
+        configs  = setup.get("configs", [])
         partial["name"]           = configs[self._active_cfg_idx]["name"] if configs else "scan"
         partial["sensors"]        = self.right_panel.get_sensors()
         partial["display_sensor"] = self.right_panel.get_display_sensor()
         partial["colormap"]       = self.right_panel.get_colormap()
+
+        # ── Inject device paths from Setup Defaults ───────────────────────────
+        scan_type = partial.get("scan_type", "SPATIAL")
+        if scan_type == "TR_MOKE":
+            # TR-MOKE: act1 is the DG645 delay channel
+            dg_path = setup.get("trmoke_dg645", "intermag/dg645/1")
+            partial["act1_device"]  = dg_path
+            partial["trmoke_dg645"] = dg_path
+        else:
+            # Spatial / Field / Time: stage device+attr always from setup defaults
+            partial["act1_device"] = setup.get("act1_device", "")
+            partial["act1_attr"]   = setup.get("act1_attr",   "x")
+            partial["act2_device"] = setup.get("act2_device", "")
+            partial["act2_attr"]   = setup.get("act2_attr",   "y")
         # DC hyst channels live in the right panel now
         if partial.get("scan_type") == "DC_HYST":
             dc_sensors = self.right_panel.get_dc_channels()

@@ -14,3 +14,4 @@ from panels.trajectory import (
     FieldSegmentList, ActuatorGroup, TrajectoryPanel
 )
 from panels.scanlist import ScanlistPanel
+from panels.setup_defaults import SetupDefaultsPanel
