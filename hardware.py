@@ -264,7 +264,8 @@ def reconnect_device(path: str, max_retries: int = 3,
                 if attempt < max_retries - 1:
                     _t.sleep(delay)
                     continue
-                _pcache[path] = p
+                with _pcache_lock:
+                    _pcache[path] = p
                 return p, f"Cannot read state: {e}"
 
         except Exception as e:
@@ -280,8 +281,8 @@ def reconnect_device(path: str, max_retries: int = 3,
 # Demagnetization — alternating-decay routine to bring magnet to zero
 # ─────────────────────────────────────────────────────────────────────────────
 def demagnetize_magnet(proxy, attr: str,
-                       log=None, n_steps: int = 20,
-                       start_A: float =2,
+                       log_fn=None, n_steps: int = 20,
+                       start_A: float = 2,
                        decay: float = 0.80,
                        delay_s: float = 0.10):
     """
@@ -294,27 +295,27 @@ def demagnetize_magnet(proxy, attr: str,
     ----------
     proxy  : Tango DeviceProxy (or SimProxy)
     attr   : current attribute name (e.g. "current_polar")
-    log    : callable(str) for status messages, or None
+    log_fn : callable(str) for status messages, or None
     """
     import time as _t
-    if log is None:
-        log = lambda m: None
-    log("Demagnetization started")
+    if log_fn is None:
+        log_fn = lambda m: None
+    log_fn("Demagnetization started")
     sign = 1
     amp  = start_A
     for step in range(n_steps):
         val = sign * amp
         err = safe_write(proxy, attr, val)
         if err:
-            log(f"⚠ demag step {step}: {err}")
+            log_fn(f"⚠ demag step {step}: {err}")
             break
-        log(f"  demag {step+1}/{n_steps}: {val:+.4f} A")
+        log_fn(f"  demag {step+1}/{n_steps}: {val:+.4f} A")
         _t.sleep(delay_s)
         sign = -sign
         amp  *= decay
     # Final: set exactly 0
     err = safe_write(proxy, attr, 0.0)
     if err:
-        log(f"⚠ demag final zero: {err}")
+        log_fn(f"⚠ demag final zero: {err}")
     else:
-        log("Demagnetization done — current set to 0.000 A")
+        log_fn("Demagnetization done — current set to 0.000 A")

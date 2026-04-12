@@ -279,7 +279,7 @@ class HardwarePanel(QGroupBox):
 
         def _run():
             demagnetize_magnet(p, attr,
-                               log=lambda m: self.mag_status.setText(m))
+                               log_fn=lambda m: self.mag_status.setText(m))
             self.zero_field_btn.setEnabled(True)
 
         threading.Thread(target=_run, daemon=True).start()

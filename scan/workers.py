@@ -117,7 +117,7 @@ class ScanlistWorker(QThread):
                         self.log_msg.emit(f"⚠ field flip write: {err}")
                     else:
                         self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {neg_val:.4f} A")
-                    import time as _t; _t.sleep(0.1)
+                    time.sleep(0.1)
 
             v, _ = safe_read(mag_p, mag_fld)
             field_T = v if v is not None else 0.0
@@ -156,7 +156,7 @@ class ScanlistWorker(QThread):
         if self.field_flip:
             self.log_msg.emit("Auto-demagnetizing magnet after scanlist…")
             demagnetize_magnet(mag_p, mag_cur,
-                               log=lambda m: self.log_msg.emit(m))
+                               log_fn=lambda m: self.log_msg.emit(m))
 
         if results:
             with open(txt_path, "w") as f:
