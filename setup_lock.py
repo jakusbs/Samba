@@ -20,7 +20,9 @@ Usage in samba.py:
     release_lock("Green")
 """
 
+import os
 import socket
+import time as _time
 from datetime import datetime
 from typing import Tuple
 
@@ -77,10 +79,26 @@ def acquire_lock(setup_name: str) -> Tuple[bool, str]:
             info = dp.read_attribute(info_attr).value
             return False, info or "unknown"
 
-        # Acquire: write info first, then flip busy
-        stamp = f"{socket.gethostname()} @ {datetime.now().strftime('%H:%M:%S')}"
+        # Acquire: write info first, then flip busy.
+        # Include pid so the stamp is unique even on the same host.
+        stamp = (f"{socket.gethostname()}:{os.getpid()} "
+                 f"@ {datetime.now().strftime('%H:%M:%S')}")
         dp.write_attribute(info_attr, stamp)
         dp.write_attribute(busy_attr, True)
+
+        # Verify we won the race: wait briefly and re-read the info attribute.
+        # If another client wrote its own stamp in the same window, we lost.
+        _time.sleep(0.05)
+        actual = dp.read_attribute(info_attr).value
+        if actual != stamp:
+            # Another client snuck in — release and report who has it.
+            try:
+                dp.write_attribute(busy_attr, False)
+                dp.write_attribute(info_attr, "")
+            except Exception:
+                pass
+            return False, actual or "unknown"
+
         return True, ""
     except Exception:
         return True, ""
