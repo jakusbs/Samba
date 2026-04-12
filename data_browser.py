@@ -463,13 +463,15 @@ class DataBrowserPanel(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_selection)
+        self.tree.itemSelectionChanged.connect(self._update_overlay_btn)
         left_l.addWidget(self.tree, stretch=1)
 
         # Overlay button
         ov_row = QHBoxLayout()
         self.overlay_btn = QPushButton("📊 Overlay selected")
         self.overlay_btn.clicked.connect(self._overlay_selected)
-        self.overlay_btn.setToolTip("Plot all selected scans on one graph")
+        self.overlay_btn.setEnabled(False)
+        self.overlay_btn.setToolTip("Select one or more scans first")
         ov_row.addWidget(self.overlay_btn)
         left_l.addLayout(ov_row)
 
@@ -514,6 +516,9 @@ class DataBrowserPanel(QWidget):
         base = os.path.expanduser(self._save_dir_getter())
 
         if not os.path.isdir(base):
+            placeholder = QTreeWidgetItem(["No save directory found", "", ""])
+            placeholder.setForeground(0, QColor("#6c7086"))
+            self.tree.addTopLevelItem(placeholder)
             return
 
         # Find date directories (YYYYMMDD pattern)
@@ -561,6 +566,20 @@ class DataBrowserPanel(QWidget):
                     item.setForeground(1, QColor("#6c7086"))
 
                 date_item.addChild(item)
+
+        if self.tree.topLevelItemCount() == 0:
+            placeholder = QTreeWidgetItem(["No scans found", "", ""])
+            placeholder.setForeground(0, QColor("#6c7086"))
+            self.tree.addTopLevelItem(placeholder)
+
+    def _update_overlay_btn(self):
+        """Enable overlay button only when at least one file is selected."""
+        n = sum(1 for i in self.tree.selectedItems()
+                if i.data(0, Qt.ItemDataRole.UserRole))
+        self.overlay_btn.setEnabled(n > 0)
+        self.overlay_btn.setToolTip(
+            f"Plot {n} selected scan(s) on one graph" if n > 0
+            else "Select one or more scans first")
 
     def _open_file(self):
         """Open a specific HDF5 file from anywhere."""
@@ -680,25 +699,32 @@ class DataBrowserPanel(QWidget):
 
     def _plot_current(self):
         """Plot with the user's column selection."""
-        items = self.tree.selectedItems()
-        for item in reversed(items):
-            fp = item.data(0, Qt.ItemDataRole.UserRole)
-            if fp and fp in self._loaded_files:
-                sf = self._loaded_files[fp]
-                x_key = self.x_combo.currentData()
-                y_key = self.y_combo.currentData()
-                if not x_key or not y_key:
-                    return
-                is_dc = sf.meta.get("is_dc_hyst", False)
-                if is_dc:
-                    # For DC_HYST, x_key is ignored (always field_mT); y_key is sensor key
-                    result = sf.read_1d(y_key=y_key)
-                else:
-                    result = sf.read_1d(x_key, y_key)
-                if result:
-                    result["legend"] = sf.basename
-                    self.plot.plot_1d([result], title=sf.meta["scan_name"])
-                return
+        # Find the last selected file
+        fp = None
+        for item in reversed(self.tree.selectedItems()):
+            candidate = item.data(0, Qt.ItemDataRole.UserRole)
+            if candidate and candidate in self._loaded_files:
+                fp = candidate
+                break
+        if not fp:
+            self.meta_text.setPlainText("⚠ Select a scan file first.")
+            return
+        x_key = self.x_combo.currentData()
+        y_key = self.y_combo.currentData()
+        if not x_key or not y_key:
+            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
+            return
+        sf = self._loaded_files[fp]
+        is_dc = sf.meta.get("is_dc_hyst", False)
+        if is_dc:
+            result = sf.read_1d(y_key=y_key)
+        else:
+            result = sf.read_1d(x_key, y_key)
+        if result:
+            result["legend"] = sf.basename
+            self.plot.plot_1d([result], title=sf.meta["scan_name"])
+        else:
+            self.meta_text.append("\n⚠ Could not read selected columns from file.")
 
     def _overlay_selected(self):
         """Overlay all selected scan files on one 1D plot."""

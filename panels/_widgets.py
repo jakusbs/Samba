@@ -3,6 +3,7 @@ panels/_widgets.py — Samba v3
 Shared widget primitives: NoScroll spin/combo boxes, MokeMetadataGroup, validators.
 """
 import os
+from datetime import datetime
 from typing import List
 
 from PyQt6.QtWidgets import (
