@@ -16,7 +16,7 @@ Usage:
 
 DG645 Command Reference (from SRS manual rev 1.1):
     DLAY i,j,t / DLAY?i    Delay channel i rel. to j by t seconds
-    TSRC i / TSRC?          Trigger source (0=Int,1=ExtR,2=ExtF,3=SS,4=Line)
+    TSRC i / TSRC?          Trigger source (0=Int,1=ExtR↑,2=ExtF↓,3=SSExtR↑,4=SSExtF↓,5=SS,6=Line)
     TRAT f / TRAT?          Trigger rate Hz
     TLVL v / TLVL?          Trigger level V
     HOLD t / HOLD?          Trigger holdoff s
@@ -80,7 +80,7 @@ class DG645(Device):
     # -----------------------------------------------------------------
     def init_device(self):
         Device.init_device(self)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()   # reentrant: _reconnect calls _query inside held lock
         self.set_state(DevState.INIT)
         self.set_status("Initializing...")
         try:
@@ -298,7 +298,7 @@ class DG645(Device):
     # -----------------------------------------------------------------
     TriggerSource = attribute(dtype=int, access=AttrWriteType.READ_WRITE,
         label="Trigger Source",
-        doc="0=Int 1=ExtR 2=ExtF 3=SS 4=Line")
+        doc="0=Internal 1=Ext rising 2=Ext falling 3=SS ext rising 4=SS ext falling 5=Single shot 6=Line")
     def read_TriggerSource(self):
         return int(self._query("TSRC?"))
     def write_TriggerSource(self, v):
@@ -481,8 +481,9 @@ class DG645(Device):
     def read_Identity(self): return self._query("*IDN?")
 
     InstrumentStatus = attribute(dtype=int, access=AttrWriteType.READ,
-        label="Status Register")
-    def read_InstrumentStatus(self): return int(self._query("INSE?"))
+        label="Status Register",
+        doc="INSR register: bit0=TRIG, bit1=RATE, bit2=DELAY, bit3=BURST, bit4=STOP")
+    def read_InstrumentStatus(self): return int(self._query("INSR?"))
 
     LastError = attribute(dtype=int, access=AttrWriteType.READ,
         label="Last Error", doc="0 = no error")
@@ -546,10 +547,16 @@ class DG645(Device):
 
     @command
     def GoLocal(self):
-        self._send("LCAL")
+        """Restore front-panel control by closing the TCP connection.
+        Note: LCAL is only valid on telnet/RS-232 (not raw socket). Closing
+        the socket is the correct way to release remote control over Ethernet."""
+        self._disconnect()
+        self.set_state(DevState.FAULT)
+        self.set_status("Disconnected (GoLocal). Call Reconnect to re-connect.")
 
     @command
     def GoRemote(self):
+        """Disable front-panel control (raw socket only)."""
         self._send("REMT")
 
     # -----------------------------------------------------------------
@@ -559,13 +566,15 @@ class DG645(Device):
         if not self._socket:
             return DevState.FAULT
         try:
-            self._query("*IDN?")
+            self._query("LERR?")   # lightweight heartbeat — shorter response than *IDN?
             return DevState.ON
         except Exception:
+            self._socket = None
             return DevState.FAULT
 
     def dev_status(self):
-        if self.dev_state() == DevState.ON:
+        state = self.get_state()   # use cached state, avoids a second query
+        if state == DevState.ON:
             return f"Connected to DG645 at {self.Host}:{self.Port}"
         return f"FAULT: Cannot reach DG645 at {self.Host}:{self.Port}"
 
