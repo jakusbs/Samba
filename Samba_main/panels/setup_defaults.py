@@ -19,6 +19,9 @@ _MAGNET_CUR_ATTRS = [
 _MAGNET_FLD_ATTRS = [
     "field_polar_corr", "field_longitudinal_corr", "field", "field_polar",
 ]
+_LOCKIN_TC_ATTRS     = ["timeconstant"]
+_LOCKIN_ORDER_ATTRS  = ["filterorder"]
+_LOCKIN_SETTLE_ATTRS = ["settlingtime"]
 
 
 class SetupDefaultsPanel(QWidget):
@@ -166,6 +169,30 @@ class SetupDefaultsPanel(QWidget):
 
         hw_row.addWidget(relay_grp)
 
+        # --- Lock-in ---
+        zi_grp = QGroupBox("Lock-in")
+        zig = QGridLayout(zi_grp)
+        zig.setSpacing(4); zig.setContentsMargins(8, 10, 8, 8)
+        zig.setColumnStretch(1, 1)
+
+        zig.addWidget(QLabel("Device:"),         0, 0)
+        self.zi_dev = _combo()
+        zig.addWidget(self.zi_dev,               0, 1)
+
+        zig.addWidget(_label("TC attr:"),        1, 0)
+        self.zi_tc_attr = _attr_combo(_LOCKIN_TC_ATTRS)
+        zig.addWidget(self.zi_tc_attr,           1, 1)
+
+        zig.addWidget(_label("Order attr:"),     2, 0)
+        self.zi_order_attr = _attr_combo(_LOCKIN_ORDER_ATTRS)
+        zig.addWidget(self.zi_order_attr,        2, 1)
+
+        zig.addWidget(_label("Settling attr:"),  3, 0)
+        self.zi_settling_attr = _attr_combo(_LOCKIN_SETTLE_ATTRS)
+        zig.addWidget(self.zi_settling_attr,     3, 1)
+
+        hw_row.addWidget(zi_grp)
+
         hw_wrap = QWidget()
         hw_wrap.setLayout(hw_row)
         cl.addWidget(hw_wrap)
@@ -219,6 +246,7 @@ class SetupDefaultsPanel(QWidget):
             lambda: self._repop_attr_combo(self.relay_dev, self.relay_attr))
         self.focus_dev.currentIndexChanged.connect(
             lambda: self._repop_attr_combo(self.focus_dev, self.focus_attr))
+        self.zi_dev.currentIndexChanged.connect(self._on_changed)
 
         # Attr-change → auto-fill label/unit for stage axes
         self.act1_attr.currentTextChanged.connect(
@@ -243,6 +271,7 @@ class SetupDefaultsPanel(QWidget):
             self.relay_dev, self.relay_attr,
             self.focus_dev, self.focus_attr,
             self.trmoke_dg645,
+            self.zi_tc_attr, self.zi_order_attr, self.zi_settling_attr,
         ]
         for w in _all_combos:
             w.currentTextChanged.connect(self._on_changed)
@@ -265,6 +294,7 @@ class SetupDefaultsPanel(QWidget):
         keithley_entries = _entries({"current", "keithley"})
         focus_entries    = _entries({"sensor", "beckhoff", "averageIn"})
         dg645_entries    = _entries({"dg645"})
+        lockin_entries   = _entries({"lockin"})
 
         for combo, entries in [
             (self.act1_dev,     stage_entries),
@@ -275,6 +305,7 @@ class SetupDefaultsPanel(QWidget):
             (self.keithley_dev, keithley_entries),
             (self.focus_dev,    focus_entries),
             (self.trmoke_dg645, dg645_entries),
+            (self.zi_dev,       lockin_entries),
         ]:
             _fill_dev_combo(combo, entries)
 
@@ -392,6 +423,11 @@ class SetupDefaultsPanel(QWidget):
             _set(self.focus_attr,           setup_data.get("focus_attr",         "Value"))
 
             _set_by_path(self.trmoke_dg645, setup_data.get("trmoke_dg645",     "intermag/dg645/1"))
+
+            _set_by_path(self.zi_dev,       setup_data.get("zi_device",        ""))
+            _set(self.zi_tc_attr,           setup_data.get("zi_tc_attr",       "timeconstant"))
+            _set(self.zi_order_attr,        setup_data.get("zi_order_attr",    "filterorder"))
+            _set(self.zi_settling_attr,     setup_data.get("zi_settling_attr", "settlingtime"))
         finally:
             self._loading = False
 
@@ -433,6 +469,10 @@ class SetupDefaultsPanel(QWidget):
             "focus_averagein":          _get_path(self.focus_dev),
             "focus_attr":               self.focus_attr.currentText(),
             "trmoke_dg645":             _get_path(self.trmoke_dg645),
+            "zi_device":                _get_path(self.zi_dev),
+            "zi_tc_attr":               self.zi_tc_attr.currentText(),
+            "zi_order_attr":            self.zi_order_attr.currentText(),
+            "zi_settling_attr":         self.zi_settling_attr.currentText(),
         }
 
     def _on_changed(self):

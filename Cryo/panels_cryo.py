@@ -272,9 +272,9 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         if conn_err:
             set_err(self.zi_status, conn_err); return
 
-        tc,   e1 = safe_read(p, "timeconstant")
-        ord_, e2 = safe_read(p, "filterorder")
-        st,   e3 = safe_read(p, "settlingtime")
+        tc,   e1 = safe_read(p, s.get("zi_tc_attr",       "timeconstant"))
+        ord_, e2 = safe_read(p, s.get("zi_order_attr",    "filterorder"))
+        st,   e3 = safe_read(p, s.get("zi_settling_attr", "settlingtime"))
         errs = [e for e in [e1, e2, e3] if e]
         if errs:
             set_err(self.zi_status, errs[0][:60]); return

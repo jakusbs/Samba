@@ -275,6 +275,12 @@ KEITHLEY_ATTR_DEFS = [
     ("Current (RB)", "keithley_attr_current",      "current",   "attr"),
 ]
 
+LOCKIN_ATTR_DEFS = [
+    ("TC attr",      "zi_tc_attr",       "timeconstant", "attr"),
+    ("Order attr",   "zi_order_attr",    "filterorder",  "attr"),
+    ("Settling attr","zi_settling_attr", "settlingtime", "attr"),
+]
+
 ATTODRY_ATTR_DEFS = [
     # ── Read/write attributes ─────────────────────────────────────────────
     ("Field set",        "attodry_attr_field_set",      "MagneticField",                "attr"),
@@ -366,6 +372,14 @@ class SetupDefaultsPanel(QWidget):
         # ── Hardware: Keithley + AttoDRY side by side ─────────────────────────
         hw_row = QHBoxLayout(); hw_row.setSpacing(10)
 
+        zi_grp = QGroupBox("Lock-in")
+        zi_l   = QVBoxLayout(zi_grp); zi_l.setContentsMargins(8, 8, 8, 8)
+        self.zi_hw = HardwareDeviceGroup(LOCKIN_ATTR_DEFS, filter_type="lockin",
+                                         registry=self._registry)
+        self.zi_hw.changed.connect(self.defaults_changed)
+        zi_l.addWidget(self.zi_hw)
+        hw_row.addWidget(zi_grp)
+
         ks_grp = QGroupBox("Keithley 6221")
         ks_l   = QVBoxLayout(ks_grp); ks_l.setContentsMargins(8, 8, 8, 8)
         self.ks_hw = HardwareDeviceGroup(KEITHLEY_ATTR_DEFS, registry=self._registry)
@@ -442,6 +456,7 @@ class SetupDefaultsPanel(QWidget):
         self.act1_row.set_registry(registry)
         self.act2_row.set_registry(registry)
         self.actz_row.set_registry(registry)
+        self.zi_hw.set_registry(registry)
         self.ks_hw.set_registry(registry)
         self.ad_hw.set_registry(registry)
         cur_fl = self.fl_dev_combo.currentData() or ""
@@ -454,6 +469,9 @@ class SetupDefaultsPanel(QWidget):
         self.act1_row.load(setup.get("act1_device", ""), setup.get("act1_attr", "x"))
         self.act2_row.load(setup.get("act2_device", ""), setup.get("act2_attr", "y"))
         self.actz_row.load(setup.get("z_device",    ""), setup.get("z_attr",    "z"))
+
+        zi_attrs = {tup[1]: setup.get(tup[1], tup[2]) for tup in LOCKIN_ATTR_DEFS}
+        self.zi_hw.load(setup.get("zi_device", ""), zi_attrs)
 
         ks_attrs = {tup[1]: setup.get(tup[1], tup[2]) for tup in KEITHLEY_ATTR_DEFS}
         self.ks_hw.load(setup.get("keithley_device", ""), ks_attrs)
@@ -469,6 +487,7 @@ class SetupDefaultsPanel(QWidget):
         act1 = self.act1_row.get()
         act2 = self.act2_row.get()
         actz = self.actz_row.get()
+        zi_attrs = self.zi_hw.get_attrs()
         ks_attrs = self.ks_hw.get_attrs()
         ad_attrs = self.ad_hw.get_attrs()
         return {
@@ -478,6 +497,8 @@ class SetupDefaultsPanel(QWidget):
             "act2_label":  act2["label"],  "act2_unit": act2["unit"],
             "z_device":    actz["device"], "z_attr":    actz["attr"],
             "z_label":     actz["label"],  "z_unit":    actz["unit"],
+            "zi_device":   self.zi_hw.dev_combo.currentData() or "",
+            **zi_attrs,
             "keithley_device": self.ks_hw.dev_combo.currentData() or "",
             **ks_attrs,
             "attodry_device":  self.ad_hw.dev_combo.currentData() or "",
