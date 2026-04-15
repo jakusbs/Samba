@@ -161,6 +161,7 @@ class SensorPickerRow(QWidget):
             "plot_visible":    axis != "hidden",
             "trigger_cmd":     dev.get("trigger_cmd", ""),
             "integ_time_attr": dev.get("integ_time_attr", ""),
+            "settling_attr":   dev.get("settling_attr", ""),
             "plot_axis":       axis,
             # Registry keys — used to restore dropdowns on config load
             "device_name":     dev.get("name", ""),
