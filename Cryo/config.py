@@ -167,6 +167,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_current_attr": "current_polar",
         "magnet_field_attr":   "field_polar_corr",
         "relay_device":        "",
+        # AttoDRY uses a superconducting magnet — never demagnetize
+        "demagnetize_after_scan": False,
         "keithley_device":     "hpp-N42/current/PyKeithley2",
         "attodry_device":      "hpp-N42/attoDRY/attoDRY",
         # Stage actuator defaults (editable in Setup Defaults tab)

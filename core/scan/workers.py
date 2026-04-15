@@ -11,7 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import X_TIME
 from hardware import get_proxy, safe_read, safe_write, demagnetize_magnet
-from scan.runner import ScanRunner
+from core.scan.runner import ScanRunner
 
 
 class ScanWorker(QThread):
@@ -153,8 +153,9 @@ class ScanlistWorker(QThread):
 
             if self.relay_flip: self._relay_state = 1 - self._relay_state
 
-        # Auto-demagnetize after scanlist if field flip was active
-        if self.field_flip:
+        # Auto-demagnetize after scanlist — disabled for superconducting magnets
+        # (set "demagnetize_after_scan": false in setup to suppress)
+        if self.field_flip and self.setup.get("demagnetize_after_scan", True):
             self.log_msg.emit("Auto-demagnetizing magnet after scanlist…")
             demagnetize_magnet(mag_p, mag_cur,
                                log_fn=lambda m: self.log_msg.emit(m))

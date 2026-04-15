@@ -450,8 +450,10 @@ class ScanRunner:
                                 x_lbl, x_unit, hdf_scan, cfg)
 
         if count > 0:
-            # Auto-demagnetize after FIELD scans
-            if hdf_scan == "FIELD" and mag_p is not None:
+            # Auto-demagnetize after FIELD scans — disabled for superconducting magnets
+            # (set "demagnetize_after_scan": false in setup to suppress)
+            if (hdf_scan == "FIELD" and mag_p is not None
+                    and setup.get("demagnetize_after_scan", True)):
                 st("Auto-demagnetizing magnet…")
                 demagnetize_magnet(mag_p, mag_cur_attr, log_fn=lg)
             st(("Done ✓" if not self._abort else f"Aborted ({count}/{total} pts)") +
