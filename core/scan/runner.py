@@ -242,6 +242,39 @@ class ScanRunner:
             lg("  (no devices to configure)")
         lg(f"── Integration time configured on {len(configured_devs)} device(s) ──")
 
+        # ── Read lock-in settling times from ZI devices ───────────────────
+        lockin_settling: Dict[str, float] = {}
+        lg("── Lock-in settling times: ──")
+        for s in active:
+            dev_path     = s["device"]
+            settling_attr = s.get("settling_attr", "").strip()
+            if not settling_attr or not dev_path or dev_path in lockin_settling:
+                continue
+            fp = devp.get(dev_path)
+            if fp is None:
+                lockin_settling[dev_path] = 0.0
+                continue
+            st_val, st_err = safe_read(fp, settling_attr)
+            tc_val,  _     = safe_read(fp, "timeconstant")
+            ord_val, _     = safe_read(fp, "filterorder")
+            settling = float(st_val) if st_val is not None else 0.0
+            lockin_settling[dev_path] = settling
+            tc_s  = f"{tc_val:.4f}s"  if tc_val  is not None else "?"
+            ord_s = str(int(ord_val)) if ord_val  is not None else "?"
+            msg   = f"  {dev_path}: TC={tc_s}, order={ord_s}, settling={settling:.3f}s"
+            if st_err:
+                msg += f"  ⚠ ({st_err})"
+            lg(msg)
+        max_lockin_settling = max(lockin_settling.values()) if lockin_settling else 0.0
+        if not lockin_settling:
+            lg("  (no devices with settling_attr configured)")
+        elif max_lockin_settling > 0:
+            lg(f"── Max lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+        try:
+            hfile["metadata"].attrs["lockin_settling_time"] = max_lockin_settling
+        except Exception:
+            pass
+
         # ── Group sensors by device for batch read_attributes ─────────────
         dev_sensors: Dict[str, List[dict]] = defaultdict(list)
         for s in active:
@@ -296,6 +329,12 @@ class ScanRunner:
                             time.sleep(cfg["settle_time"])
 
                     x_actual[iy, ix] = x_read
+
+                    # ── Lock-in filter settling ───────────────────────────────────
+                    if max_lockin_settling > 0:
+                        if count == 0:
+                            lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+                        time.sleep(max_lockin_settling)
 
                     # ── 1. Fire trigger to all sensor devices (near-simultaneous) ──
                     trigger_failed = []
