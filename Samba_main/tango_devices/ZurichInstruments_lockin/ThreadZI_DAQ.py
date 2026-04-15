@@ -28,6 +28,8 @@ class ThreadZI(threading.Thread):
         try:
             daq = self.p.daq
             collect_time = max(self.p.attr_integrationtime_read, MIN_COLLECT)
+            self.p.info_stream('ThreadZI: collect_time={:.3f}s  attr_integrationtime_read={:.3f}s'.format(
+                collect_time, self.p.attr_integrationtime_read))
 
             # ── 1. Flush stale samples from buffer ──────────────────────
             daq.poll(0.01, 10, 0, self.p.flat_dictionary_key)
