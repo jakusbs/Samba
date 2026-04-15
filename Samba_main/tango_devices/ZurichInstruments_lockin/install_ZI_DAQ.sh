@@ -74,7 +74,7 @@ EOF
 # ── 4. pip install ──────────────────────────────────────────────────
 echo "Installing with pip..."
 cd "$SCRIPT_DIR"
-pip install . --quiet
+pip install . --force-reinstall --quiet
 
 echo ""
 echo "========================================="
