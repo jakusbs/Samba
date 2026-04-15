@@ -12,23 +12,29 @@ from PyQt6.QtGui import QPixmap, QFont, QColor, QPainter
 from PyQt6.QtCore import Qt, QTimer, QEventLoop
 
 
-def _asset(name):
-    """Resolve asset path relative to this script."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _asset(name, asset_dir=None):
+    """Resolve asset path relative to asset_dir (or this file's directory)."""
+    return os.path.join(asset_dir or _CORE_DIR, name)
 
 
 _splash_start_time = None
 
 
-def show_splash(app: QApplication) -> QSplashScreen:
+def show_splash(app: QApplication, asset_dir: str = None) -> QSplashScreen:
     """
     Create and display the splash screen.  Returns the QSplashScreen so the
     caller can call finish_splash() once the window is ready.
+
+    *asset_dir* should point to the directory that contains samba_splash.png.
+    When omitted the directory of this module is used (useful for testing).
     """
     global _splash_start_time
     _splash_start_time = time.monotonic()
 
-    pixmap = QPixmap(_asset("samba_splash.png"))
+    pixmap = QPixmap(_asset("samba_splash.png", asset_dir))
     if pixmap.isNull():
         # Fallback: plain coloured splash if PNG missing
         pixmap = QPixmap(720, 480)
