@@ -55,6 +55,10 @@ AUTO_PAUSE_THRESHOLD = 5
 # Guard delay (ms) between device state leaving RUNNING and readout,
 # to let output registers settle with final averaged values
 READOUT_GUARD_MS = 10
+# Guard delay (ms) after async trigger dispatch, before state polling.
+# Gives the device thread time to transition from ON → RUNNING.
+# Without this, the poller sees ON immediately and reads stale values.
+TRIGGER_START_GUARD_MS = 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,6 +379,13 @@ class ScanRunner:
 
                     # ── 2. Wait for ALL triggered devices to finish integration ──
                     if trigger_devs:
+                        # Short guard: give each device's acquisition thread time
+                        # to transition ON → RUNNING before we start polling.
+                        # Without this, async-dispatched devices (e.g. ZI2) are
+                        # still ON when we first check and are immediately marked
+                        # done, causing stale 0.0 values to be read.
+                        time.sleep(TRIGGER_START_GUARD_MS / 1000.0)
+
                         remaining = set(trigger_devs.keys())
                         t_wait = time.time()
                         timeout = cfg["move_timeout"]
