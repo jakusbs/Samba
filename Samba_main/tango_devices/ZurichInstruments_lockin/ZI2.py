@@ -521,7 +521,7 @@ class ZI2Class(PyTango.DeviceClass):
 def main():
     try:
         py = PyTango.Util(sys.argv)
-        py.add_class(ZIClass, ZI, 'ZI2')
+        py.add_class(ZI2Class, ZI2, 'ZI2')
         #----- PROTECTED REGION ID(ZI2.add_classes) ENABLED START -----#
         
         #----- PROTECTED REGION END -----#  //  ZI2.add_classes
