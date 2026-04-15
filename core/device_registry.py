@@ -36,11 +36,12 @@ def _default_registry() -> List[dict]:
     """Built-in device definitions for the Intermag lab."""
     return [
         {
-            "name":            "ZI2",
-            "tango_path":      "hpp-N42/measure/ZI2",
+            "name":            "ZI2_DAQ",
+            "tango_path":      "hpp-N42/measure/ZI2_DAQ",
             "type":            "lockin",
             "trigger_cmd":     "Start",
             "integ_time_attr": "integrationtime",
+            "settling_attr":   "settlingtime",
             "channels": [
                 {"attr": "x1", "label": "ZI2 x1", "unit": "V"},
                 {"attr": "y1", "label": "ZI2 y1", "unit": "V"},
@@ -49,11 +50,40 @@ def _default_registry() -> List[dict]:
             ],
         },
         {
+            "name":            "ZI2",
+            "tango_path":      "hpp-N42/measure/ZI2",
+            "type":            "lockin",
+            "trigger_cmd":     "Start",
+            "integ_time_attr": "integrationtime",
+            "settling_attr":   "settlingtime",
+            "channels": [
+                {"attr": "x1", "label": "ZI2 x1", "unit": "V"},
+                {"attr": "y1", "label": "ZI2 y1", "unit": "V"},
+                {"attr": "x2", "label": "ZI2 x2", "unit": "V"},
+                {"attr": "y2", "label": "ZI2 y2", "unit": "V"},
+            ],
+        },
+        {
+            "name":            "ZI1_DAQ",
+            "tango_path":      "hpp-N42/measure/ZI_DAQ",
+            "type":            "lockin",
+            "trigger_cmd":     "Start",
+            "integ_time_attr": "integrationtime",
+            "settling_attr":   "settlingtime",
+            "channels": [
+                {"attr": "x1", "label": "ZI1 x1", "unit": "V"},
+                {"attr": "y1", "label": "ZI1 y1", "unit": "V"},
+                {"attr": "x2", "label": "ZI1 x2", "unit": "V"},
+                {"attr": "y2", "label": "ZI1 y2", "unit": "V"},
+            ],
+        },
+        {
             "name":            "ZI1",
             "tango_path":      "hpp-N42/measure/ZI1",
             "type":            "lockin",
             "trigger_cmd":     "Start",
             "integ_time_attr": "integrationtime",
+            "settling_attr":   "settlingtime",
             "channels": [
                 {"attr": "x1", "label": "ZI1 x1", "unit": "V"},
                 {"attr": "y1", "label": "ZI1 y1", "unit": "V"},
@@ -219,6 +249,7 @@ def load_registry() -> List[dict]:
                     d.setdefault("channels", [])
                     d.setdefault("trigger_cmd", "")
                     d.setdefault("integ_time_attr", "")
+                    d.setdefault("settling_attr", "")
                     d.setdefault("type", "other")
                 return data
         except Exception as e:
@@ -270,6 +301,7 @@ def registry_to_sensors(registry: List[dict], selections: List[dict]) -> List[di
             "plot_visible":    sel.get("axis", "Y1") != "hidden",
             "trigger_cmd":     dev.get("trigger_cmd", ""),
             "integ_time_attr": dev.get("integ_time_attr", ""),
+            "settling_attr":   dev.get("settling_attr", ""),
         })
     return sensors
 
@@ -415,6 +447,12 @@ class DeviceRegistryPanel(QWidget):
         self.integ_edit.textChanged.connect(self._on_prop_changed)
         gl.addWidget(self.integ_edit, 4, 1)
 
+        gl.addWidget(QLabel("Settling attr:"), 5, 0)
+        self.settling_edit = QLineEdit()
+        self.settling_edit.setPlaceholderText("e.g. settlingtime (ZI lock-ins only)")
+        self.settling_edit.textChanged.connect(self._on_prop_changed)
+        gl.addWidget(self.settling_edit, 5, 1)
+
         right.addWidget(pg)
 
         # Channels
@@ -479,6 +517,7 @@ class DeviceRegistryPanel(QWidget):
         d["type"]            = self.type_combo.currentText()
         d["trigger_cmd"]     = self.trigger_edit.text().strip()
         d["integ_time_attr"] = self.integ_edit.text().strip()
+        d["settling_attr"]   = self.settling_edit.text().strip()
         d["channels"]        = [r.get() for r in self._channel_rows]
         # Update list item text
         item = self.dev_list.item(self._current_idx)
@@ -499,6 +538,7 @@ class DeviceRegistryPanel(QWidget):
                 self.path_edit.clear()
                 self.trigger_edit.clear()
                 self.integ_edit.clear()
+                self.settling_edit.clear()
                 return
 
             d = self._devices[self._current_idx]
@@ -509,6 +549,7 @@ class DeviceRegistryPanel(QWidget):
             self.type_combo.setCurrentIndex(idx if idx >= 0 else len(DEVICE_TYPES) - 1)
             self.trigger_edit.setText(d.get("trigger_cmd", ""))
             self.integ_edit.setText(d.get("integ_time_attr", ""))
+            self.settling_edit.setText(d.get("settling_attr", ""))
 
             for ch in d.get("channels", []):
                 self._insert_channel_row(ch)
