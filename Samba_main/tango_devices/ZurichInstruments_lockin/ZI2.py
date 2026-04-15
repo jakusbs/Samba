@@ -51,7 +51,7 @@ import zhinst
 import zhinst.ziPython as ziPython
 import time
 from ThreadZI2 import*
-#----- PROTECTED REGION END -----#	//	ZI2.additionnal_import
+#----- PROTECTED REGION END -----#  //  ZI2.additionnal_import
 
 # Device States Description
 # No states for this device
@@ -63,7 +63,7 @@ class ZI2 (PyTango.Device_4Impl):
     # -------- Add you global variables here --------------------------
     #----- PROTECTED REGION ID(ZI2.global_variables) ENABLED START -----#
     
-    #----- PROTECTED REGION END -----#	//	ZI2.global_variables
+    #----- PROTECTED REGION END -----#  //  ZI2.global_variables
 
     def __init__(self, cl, name):
         PyTango.Device_4Impl.__init__(self,cl,name)
@@ -71,76 +71,77 @@ class ZI2 (PyTango.Device_4Impl):
         ZI2.init_device(self)
         #----- PROTECTED REGION ID(ZI2.__init__) ENABLED START -----#
 
-        #----- PROTECTED REGION END -----#	//	ZI2.__init__
+        #----- PROTECTED REGION END -----#  //  ZI2.__init__
         
     def delete_device(self):
         self.debug_stream("In delete_device()")
         #----- PROTECTED REGION ID(ZI2.delete_device) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	ZI2.delete_device
+        #----- PROTECTED REGION END -----#  //  ZI2.delete_device
 
     def init_device(self):
-		self.debug_stream("In init_device()")
-		self.get_device_properties(self.get_device_class())
-		self.attr_x1_read = 0.0
-		self.attr_x2_read = 0.0
-		self.attr_Amplitude_read = 0.0
-		self.attr_frequency_read = 0.0
-		self.attr_x3_read = 0.0
-		self.attr_x4_read = 0.0
-		self.attr_y1_read = 0.0
-		self.attr_y2_read = 0.0
-		self.attr_y3_read = 0.0
-		self.attr_y4_read = 0.0
-		self.attr_samplingrate_read = 1674
-		self.attr_integrationtime_read = 1.0
-		self.attr_phase1_read = 0.0
-		self.attr_phase2_read = 0.0
-		self.attr_phase3_read = 0.0
-		self.attr_phase4_read = 0.0
-		self._last_settling_s = 0.0
-		self._last_collect_s  = 0.0
-		self._last_n_samples  = 0
-		self.attr_timeconstant_read = 0.0
-		self.attr_filterorder_read = 1
-		self.attr_settlingtime_read = 0.0
+        self.debug_stream("In init_device()")
+        self.get_device_properties(self.get_device_class())
+        self.attr_x1_read = 0.0
+        self.attr_x2_read = 0.0
+        self.attr_Amplitude_read = 0.0
+        self.attr_frequency_read = 0.0
+        self.attr_x3_read = 0.0
+        self.attr_x4_read = 0.0
+        self.attr_y1_read = 0.0
+        self.attr_y2_read = 0.0
+        self.attr_y3_read = 0.0
+        self.attr_y4_read = 0.0
+        self.attr_samplingrate_read = 1674
+        self.attr_integrationtime_read = 1.0
+        self.attr_phase1_read = 0.0
+        self.attr_phase2_read = 0.0
+        self.attr_phase3_read = 0.0
+        self.attr_phase4_read = 0.0
+        self._last_settling_s = 0.0
+        self._last_collect_s  = 0.0
+        self._last_n_samples  = 0
+        self.attr_timeconstant_read = 0.0
+        self.attr_filterorder_read = 1
+        self.attr_settlingtime_read = 0.0
         #----- PROTECTED REGION ID(ZI2.init_device) ENABLED START -----#
         # set meaningful default values (memorized values are set later)
         #self.attr_samplinginterval_read = 100 # 100 ms
-		self.set_state(PyTango.DevState.ON)
-		self.daq = ziPython.ziDAQServer('192.168.1.144',8004,6)
+        self.set_state(PyTango.DevState.ON)
+        host = getattr(self, 'ZI_Host', '192.168.1.144')
+        self.daq = ziPython.ziDAQServer(host, 8004, 6)
         #set all channel to same oscillator (1)
-		self.daq.setInt('/dev30933/demods/0/oscselect', 0)
-		self.daq.setInt('/dev30933/demods/1/oscselect', 0)
-		self.daq.setInt('/dev30933/demods/2/oscselect', 0)
-		self.daq.setInt('/dev30933/demods/3/oscselect', 0)
-		#set all channel to the right harmonics (demod 0 harmonic 1, demod 1 harmonic 2 etc)
-		self.daq.setDouble('/dev30933/demods/0/harmonic', 1)
-		self.daq.setDouble('/dev30933/demods/1/harmonic', 2)
-		self.daq.setDouble('/dev30933/demods/2/harmonic', 3)
-		self.daq.setDouble('/dev30933/demods/3/harmonic', 1)	# Change from 4 to always have the right harmonic at the start. 04.05.2024 Niklas	
+        self.daq.setInt('/dev30933/demods/0/oscselect', 0)
+        self.daq.setInt('/dev30933/demods/1/oscselect', 0)
+        self.daq.setInt('/dev30933/demods/2/oscselect', 0)
+        self.daq.setInt('/dev30933/demods/3/oscselect', 0)
+        #set all channel to the right harmonics (demod 0 harmonic 1, demod 1 harmonic 2 etc)
+        self.daq.setDouble('/dev30933/demods/0/harmonic', 1)
+        self.daq.setDouble('/dev30933/demods/1/harmonic', 2)
+        self.daq.setDouble('/dev30933/demods/2/harmonic', 3)
+        self.daq.setDouble('/dev30933/demods/3/harmonic', 1)    # Change from 4 to always have the right harmonic at the start. 04.05.2024 Niklas   
         #set all demodulators to be read
-		self.daq.subscribe('/dev30933/demods/0/sample')
-		self.daq.subscribe('/dev30933/demods/1/sample')
-		self.daq.subscribe('/dev30933/demods/2/sample')
-		self.daq.subscribe('/dev30933/demods/3/sample')
-		self.flat_dictionary_key = False
-		# read out all the phases
-		self.attr_phase1_read = self.daq.getDouble('/dev30933/demods/0/phaseshift')
-		self.attr_phase2_read = self.daq.getDouble('/dev30933/demods/1/phaseshift')
-		self.attr_phase3_read = self.daq.getDouble('/dev30933/demods/2/phaseshift')
-		self.attr_phase4_read = self.daq.getDouble('/dev30933/demods/3/phaseshift')
-		# read the sampling rate, frequency and amplitude
-		self.attr_samplingrate_read = self.daq.getDouble('/dev30933/demods/0/rate')
-		self.attr_frequency_read = self.daq.getDouble('/dev30933/oscs/0/freq')
-		self.attr_Amplitude_read = self.daq.getDouble('/dev30933/sigouts/0/amplitudes/0')
-        #----- PROTECTED REGION END -----#	//	ZI2.init_device
+        self.daq.subscribe('/dev30933/demods/0/sample')
+        self.daq.subscribe('/dev30933/demods/1/sample')
+        self.daq.subscribe('/dev30933/demods/2/sample')
+        self.daq.subscribe('/dev30933/demods/3/sample')
+        self.flat_dictionary_key = False
+        # read out all the phases
+        self.attr_phase1_read = self.daq.getDouble('/dev30933/demods/0/phaseshift')
+        self.attr_phase2_read = self.daq.getDouble('/dev30933/demods/1/phaseshift')
+        self.attr_phase3_read = self.daq.getDouble('/dev30933/demods/2/phaseshift')
+        self.attr_phase4_read = self.daq.getDouble('/dev30933/demods/3/phaseshift')
+        # read the sampling rate, frequency and amplitude
+        self.attr_samplingrate_read = self.daq.getDouble('/dev30933/demods/0/rate')
+        self.attr_frequency_read = self.daq.getDouble('/dev30933/oscs/0/freq')
+        self.attr_Amplitude_read = self.daq.getDouble('/dev30933/sigouts/0/amplitudes/0')
+        #----- PROTECTED REGION END -----#  //  ZI2.init_device
 
     def always_executed_hook(self):
         self.debug_stream("In always_excuted_hook()")
         #----- PROTECTED REGION ID(ZI2.always_executed_hook) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	ZI2.always_executed_hook
+        #----- PROTECTED REGION END -----#  //  ZI2.always_executed_hook
 
     # -------------------------------------------------------------------------
     #    ZI read/write attribute methods
@@ -151,19 +152,19 @@ class ZI2 (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(ZI2.x1_read) ENABLED START -----#
         # self.attr_x1_read = readvalue from lockin
         attr.set_value(self.attr_x1_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.x1_read
+        #----- PROTECTED REGION END -----#  //  ZI2.x1_read
         
     def read_x2(self, attr):
         self.debug_stream("In read_x2()")
         #----- PROTECTED REGION ID(ZI2.x2_read) ENABLED START -----#
         attr.set_value(self.attr_x2_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.x2_read
+        #----- PROTECTED REGION END -----#  //  ZI2.x2_read
         
     def read_Amplitude(self, attr):
         self.debug_stream("In read_Amplitude()")
         #----- PROTECTED REGION ID(ZI2.Amplitude_read) ENABLED START -----#
         attr.set_value(self.attr_Amplitude_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.Amplitude_read
+        #----- PROTECTED REGION END -----#  //  ZI2.Amplitude_read
         
     def write_Amplitude(self, attr):
         self.debug_stream("In write_Amplitude()")
@@ -174,13 +175,13 @@ class ZI2 (PyTango.Device_4Impl):
         time.sleep(0.2)
         self.attr_Amplitude_read = self.daq.getDouble('/dev30933/sigouts/0/amplitudes/0')
         #self.attr_Amplitude_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.Amplitude_write
+        #----- PROTECTED REGION END -----#  //  ZI2.Amplitude_write
         
     def read_frequency(self, attr):
         self.debug_stream("In read_frequency()")
         #----- PROTECTED REGION ID(ZI2.frequency_read) ENABLED START -----#
         attr.set_value(self.attr_frequency_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.frequency_read
+        #----- PROTECTED REGION END -----#  //  ZI2.frequency_read
         
     def write_frequency(self, attr):
         self.debug_stream("In write_frequency()")
@@ -191,49 +192,49 @@ class ZI2 (PyTango.Device_4Impl):
         self.daq.setDouble('/dev30933/oscs/0/freq', data)
         time.sleep(0.2)
         self.attr_frequency_read = self.daq.getDouble('/dev30933/oscs/0/freq')
-        #----- PROTECTED REGION END -----#	//	ZI2.frequency_write
+        #----- PROTECTED REGION END -----#  //  ZI2.frequency_write
         
     def read_x3(self, attr):
         self.debug_stream("In read_x3()")
         #----- PROTECTED REGION ID(ZI2.x3_read) ENABLED START -----#
         attr.set_value(self.attr_x3_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.x3_read
+        #----- PROTECTED REGION END -----#  //  ZI2.x3_read
         
     def read_x4(self, attr):
         self.debug_stream("In read_x4()")
         #----- PROTECTED REGION ID(ZI2.x4_read) ENABLED START -----#
         attr.set_value(self.attr_x4_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.x4_read
+        #----- PROTECTED REGION END -----#  //  ZI2.x4_read
         
     def read_y1(self, attr):
         self.debug_stream("In read_y1()")
         #----- PROTECTED REGION ID(ZI2.y1_read) ENABLED START -----#
         attr.set_value(self.attr_y1_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.y1_read
+        #----- PROTECTED REGION END -----#  //  ZI2.y1_read
         
     def read_y2(self, attr):
         self.debug_stream("In read_y2()")
         #----- PROTECTED REGION ID(ZI2.y2_read) ENABLED START -----#
         attr.set_value(self.attr_y2_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.y2_read
+        #----- PROTECTED REGION END -----#  //  ZI2.y2_read
         
     def read_y3(self, attr):
         self.debug_stream("In read_y3()")
         #----- PROTECTED REGION ID(ZI2.y3_read) ENABLED START -----#
         attr.set_value(self.attr_y3_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.y3_read
+        #----- PROTECTED REGION END -----#  //  ZI2.y3_read
         
     def read_y4(self, attr):
         self.debug_stream("In read_y4()")
         #----- PROTECTED REGION ID(ZI2.y4_read) ENABLED START -----#
         attr.set_value(self.attr_y4_read)    
-        #----- PROTECTED REGION END -----#	//	ZI2.y4_read
+        #----- PROTECTED REGION END -----#  //  ZI2.y4_read
         
     def read_samplingrate(self, attr):
         self.debug_stream("In read_samplingrate()")
         #----- PROTECTED REGION ID(ZI2.samplingrate_read) ENABLED START -----#
         attr.set_value(self.attr_samplingrate_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.samplingrate_read
+        #----- PROTECTED REGION END -----#  //  ZI2.samplingrate_read
         
     def write_samplingrate(self, attr):
         self.debug_stream("In write_samplingrate()")
@@ -245,14 +246,14 @@ class ZI2 (PyTango.Device_4Impl):
         self.daq.setDouble('/dev30933/demods/3/rate', data)
         time.sleep(0.2)
         self.attr_samplingrate_read = self.daq.getDouble('/dev30933/demods/0/rate')
-        #----- PROTECTED REGION END -----#	//	ZI2.samplingrate_write
+        #----- PROTECTED REGION END -----#  //  ZI2.samplingrate_write
         
     def read_integrationtime(self, attr):
         self.debug_stream("In read_integrationtime()")
         #----- PROTECTED REGION ID(ZI2.integrationtime_read) ENABLED START -----#
         attr.set_value(self.attr_integrationtime_read)
         
-        #----- PROTECTED REGION END -----#	//	ZI2.integrationtime_read
+        #----- PROTECTED REGION END -----#  //  ZI2.integrationtime_read
         
     def write_integrationtime(self, attr):
         self.debug_stream("In write_integrationtime()")
@@ -266,22 +267,22 @@ class ZI2 (PyTango.Device_4Impl):
             order = int(self.daq.getDouble('/dev30933/demods/0/order'))
             settling = settle_99.get(order, 16.0) * tc
             if data < settling:
-                print(f'WARNING: integrationtime {data:.3f}s < settling time '
-                      f'{settling:.3f}s (TC={tc:.4f}s, order={order}). '
-                      f'ThreadZI will wait for settling then collect a minimum window.')
+                self.warn_stream(f'integrationtime {data:.3f}s < settling time '
+                                 f'{settling:.3f}s (TC={tc:.4f}s, order={order}). '
+                                 f'Samba handles settling externally before Start().')
             else:
-                print(f'integrationtime={data:.3f}s, settling={settling:.3f}s, '
-                      f'net collection={data - settling:.3f}s — OK')
+                self.info_stream(f'integrationtime={data:.3f}s, settling={settling:.3f}s, '
+                                 f'net collection={data - settling:.3f}s — OK')
         except Exception as e:
-            print(f'Could not validate settling: {e}')
+            self.warn_stream(f'Could not validate settling: {e}')
         self.attr_integrationtime_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.integrationtime_write
+        #----- PROTECTED REGION END -----#  //  ZI2.integrationtime_write
         
     def read_phase1(self, attr):
         self.debug_stream("In read_phase1()")
         #----- PROTECTED REGION ID(ZI2.phase1_read) ENABLED START -----#
         attr.set_value(self.attr_phase1_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.phase1_read
+        #----- PROTECTED REGION END -----#  //  ZI2.phase1_read
         
     def write_phase1(self, attr):
         self.debug_stream("In write_phase1()")
@@ -289,14 +290,14 @@ class ZI2 (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(ZI2.phase1_write) ENABLED START -----#
         self.daq.setDouble('/dev30933/demods/0/phaseshift', data)
         self.attr_phase1_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.phase1_write
+        #----- PROTECTED REGION END -----#  //  ZI2.phase1_write
         
     def read_phase2(self, attr):
         self.debug_stream("In read_phase2()")
         #----- PROTECTED REGION ID(ZI2.phase2_read) ENABLED START -----#
         attr.set_value(self.attr_phase2_read)
        
-        #----- PROTECTED REGION END -----#	//	ZI2.phase2_read
+        #----- PROTECTED REGION END -----#  //  ZI2.phase2_read
         
     def write_phase2(self, attr):
         self.debug_stream("In write_phase2()")
@@ -304,13 +305,13 @@ class ZI2 (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(ZI2.phase2_write) ENABLED START -----#
         self.daq.setDouble('/dev30933/demods/1/phaseshift', data)
         self.attr_phase2_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.phase2_write
+        #----- PROTECTED REGION END -----#  //  ZI2.phase2_write
         
     def read_phase3(self, attr):
         self.debug_stream("In read_phase3()")
         #----- PROTECTED REGION ID(ZI2.phase3_read) ENABLED START -----#
         attr.set_value(self.attr_phase3_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.phase3_read
+        #----- PROTECTED REGION END -----#  //  ZI2.phase3_read
         
     def write_phase3(self, attr):
         self.debug_stream("In write_phase3()")
@@ -318,13 +319,13 @@ class ZI2 (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(ZI2.phase3_write) ENABLED START -----#
         self.daq.setDouble('/dev30933/demods/2/phaseshift', data)
         self.attr_phase3_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.phase3_write
+        #----- PROTECTED REGION END -----#  //  ZI2.phase3_write
         
     def read_phase4(self, attr):
         self.debug_stream("In read_phase4()")
         #----- PROTECTED REGION ID(ZI2.phase4_read) ENABLED START -----#
         attr.set_value(self.attr_phase4_read)      
-        #----- PROTECTED REGION END -----#	//	ZI2.phase4_read
+        #----- PROTECTED REGION END -----#  //  ZI2.phase4_read
         
     def write_phase4(self, attr):
         self.debug_stream("In write_phase4()")
@@ -332,21 +333,21 @@ class ZI2 (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(ZI2.phase4_write) ENABLED START -----#
         self.daq.setDouble('/dev30933/demods/3/phaseshift', data)
         self.attr_phase4_read = data
-        #----- PROTECTED REGION END -----#	//	ZI2.phase4_write
+        #----- PROTECTED REGION END -----#  //  ZI2.phase4_write
         
     def read_timeconstant(self, attr):
         self.debug_stream("In read_timeconstant()")
         #----- PROTECTED REGION ID(ZI2.timeconstant_read) ENABLED START -----#
         self.attr_timeconstant_read = self.daq.getDouble('/dev30933/demods/0/timeconstant')
         attr.set_value(self.attr_timeconstant_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.timeconstant_read
+        #----- PROTECTED REGION END -----#  //  ZI2.timeconstant_read
 
     def read_filterorder(self, attr):
         self.debug_stream("In read_filterorder()")
         #----- PROTECTED REGION ID(ZI2.filterorder_read) ENABLED START -----#
         self.attr_filterorder_read = int(self.daq.getDouble('/dev30933/demods/0/order'))
         attr.set_value(self.attr_filterorder_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.filterorder_read
+        #----- PROTECTED REGION END -----#  //  ZI2.filterorder_read
 
     def read_settlingtime(self, attr):
         self.debug_stream("In read_settlingtime()")
@@ -357,7 +358,7 @@ class ZI2 (PyTango.Device_4Impl):
         order = int(self.daq.getDouble('/dev30933/demods/0/order'))
         self.attr_settlingtime_read = settle_99.get(order, 16.0) * tc
         attr.set_value(self.attr_settlingtime_read)
-        #----- PROTECTED REGION END -----#	//	ZI2.settlingtime_read
+        #----- PROTECTED REGION END -----#  //  ZI2.settlingtime_read
         
     
     
@@ -366,7 +367,7 @@ class ZI2 (PyTango.Device_4Impl):
         self.debug_stream("In read_attr_hardware()")
         #----- PROTECTED REGION ID(ZI2.read_attr_hardware) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	ZI2.read_attr_hardware
+        #----- PROTECTED REGION END -----#  //  ZI2.read_attr_hardware
 
 
     # -------------------------------------------------------------------------
@@ -382,19 +383,19 @@ class ZI2 (PyTango.Device_4Impl):
             self.thread = ThreadZI2(self)
             self.thread.start()
         else:
-            print "Thread is already running."
-        #----- PROTECTED REGION END -----#	//	ZI2.Start
+            self.warn_stream("Thread is already running.")
+        #----- PROTECTED REGION END -----#  //  ZI2.Start
         
 
     #----- PROTECTED REGION ID(ZI2.programmer_methods) ENABLED START -----#
     
-    #----- PROTECTED REGION END -----#	//	ZI2.programmer_methods
+    #----- PROTECTED REGION END -----#  //  ZI2.programmer_methods
 
 class ZI2Class(PyTango.DeviceClass):
     # -------- Add you global class variables here --------------------------
     #----- PROTECTED REGION ID(ZI2.global_class_variables) ENABLED START -----#
     
-    #----- PROTECTED REGION END -----#	//	ZI2.global_class_variables
+    #----- PROTECTED REGION END -----#  //  ZI2.global_class_variables
 
 
     #    Class Properties
@@ -404,10 +405,10 @@ class ZI2Class(PyTango.DeviceClass):
 
     #    Device Properties
     device_property_list = {
-        'DeviceProxy':
-            [PyTango.DevString, 
-            "Socket connecting to the ZI2 MFLI",
-            ["hpp-N42/socket/ZI"] ],
+        'ZI_Host':
+            [PyTango.DevString,
+            "IP address of the ZI MFLI lock-in amplifier (dev30933)",
+            ["192.168.1.144"] ],
         }
 
 
@@ -520,19 +521,25 @@ class ZI2Class(PyTango.DeviceClass):
 def main():
     try:
         py = PyTango.Util(sys.argv)
-        py.add_class(ZIClass, ZI, 'ZI2')
+        py.add_class(ZI2Class, ZI2, 'ZI2')
         #----- PROTECTED REGION ID(ZI2.add_classes) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	ZI2.add_classes
+        #----- PROTECTED REGION END -----#  //  ZI2.add_classes
 
         U = PyTango.Util.instance()
         U.server_init()
         U.server_run()
 
     except PyTango.DevFailed as e:
-        print ('-------> Received a DevFailed exception:', e)
+        try:
+            print(('-------> Received a DevFailed exception:', e))
+        except OSError:
+            pass
     except Exception as e:
-        print ('-------> An unforeseen exception occured....', e)
+        try:
+            print(('-------> An unforeseen exception occured....', e))
+        except OSError:
+            pass
 
 if __name__ == '__main__':
     main()

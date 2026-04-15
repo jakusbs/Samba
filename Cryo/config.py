@@ -148,6 +148,10 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_field_attr":   "field_longitudinal_corr",
         "relay_device":        "hpp-N42/current/PyRelais",
         "keithley_device":     "hpp-N42/current/PyKeithley",
+        "zi_device":           "hpp-N42/measure/ZI2",
+        "zi_tc_attr":          "timeconstant",
+        "zi_order_attr":       "filterorder",
+        "zi_settling_attr":    "settlingtime",
         "z_attr":              "position0",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data",
@@ -158,6 +162,10 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_field_attr":   "field_polar_corr",
         "relay_device":        "hpp-N42/current/PyRelais",
         "keithley_device":     "hpp-N42/current/PyKeithley2",
+        "zi_device":           "hpp-N42/measure/ZI2",
+        "zi_tc_attr":          "timeconstant",
+        "zi_order_attr":       "filterorder",
+        "zi_settling_attr":    "settlingtime",
         "z_attr":              "z",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data",
@@ -167,7 +175,13 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_current_attr": "current_polar",
         "magnet_field_attr":   "field_polar_corr",
         "relay_device":        "",
+        # AttoDRY uses a superconducting magnet — never demagnetize
+        "demagnetize_after_scan": False,
         "keithley_device":     "hpp-N42/current/PyKeithley2",
+        "zi_device":           "hpp-N42/measure/ZI2",
+        "zi_tc_attr":          "timeconstant",
+        "zi_order_attr":       "filterorder",
+        "zi_settling_attr":    "settlingtime",
         "attodry_device":      "hpp-N42/attoDRY/attoDRY",
         # Stage actuator defaults (editable in Setup Defaults tab)
         "act1_device":         "smaract2/control/IR-controller",
@@ -230,12 +244,12 @@ MAX_RETRIES = 3
 RETRY_DELAY = 0.05   # seconds between sensor read retries
 
 DEFAULT_SENSORS: List[dict] = [
-    {"label":"ZI2 x1",   "device":"hpp-N42/measure/ZI2",         "attribute":"x1",    "unit":"V","enabled":True, "y_axis":"Y1","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime"},
-    {"label":"ZI2 y1",   "device":"hpp-N42/measure/ZI2",         "attribute":"y1",    "unit":"V","enabled":True, "y_axis":"Y1","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime"},
-    {"label":"ZI2 x2",   "device":"hpp-N42/measure/ZI2",         "attribute":"x2",    "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime"},
-    {"label":"ZI2 y2",   "device":"hpp-N42/measure/ZI2",         "attribute":"y2",    "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime"},
-    {"label":"DC diode", "device":"hpp-N42/beckhoff/analogIn2",  "attribute":"Value", "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"",      "integ_time_attr":""},
-    {"label":"avgIn1",   "device":"hpp-N42/beckhoff/averageIn1", "attribute":"Value", "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime"},
+    {"label":"ZI2 x1",   "device":"hpp-N42/measure/ZI2",         "attribute":"x1",    "unit":"V","enabled":True, "y_axis":"Y1","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime", "settling_attr":"settlingtime"},
+    {"label":"ZI2 y1",   "device":"hpp-N42/measure/ZI2",         "attribute":"y1",    "unit":"V","enabled":True, "y_axis":"Y1","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime", "settling_attr":"settlingtime"},
+    {"label":"ZI2 x2",   "device":"hpp-N42/measure/ZI2",         "attribute":"x2",    "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime", "settling_attr":"settlingtime"},
+    {"label":"ZI2 y2",   "device":"hpp-N42/measure/ZI2",         "attribute":"y2",    "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime", "settling_attr":"settlingtime"},
+    {"label":"DC diode", "device":"hpp-N42/beckhoff/analogIn2",  "attribute":"Value", "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"",      "integ_time_attr":"",               "settling_attr":""},
+    {"label":"avgIn1",   "device":"hpp-N42/beckhoff/averageIn1", "attribute":"Value", "unit":"V","enabled":False,"y_axis":"Y2","plot_visible":True, "trigger_cmd":"Start", "integ_time_attr":"integrationtime", "settling_attr":""},
 ]
 
 def make_default_config(name: str = "scan_x") -> dict:
@@ -328,6 +342,7 @@ def _migrate_config(cfg: dict):
         # If a device has an integration time attribute, it needs a trigger
         if not s.get("trigger_cmd") and s.get("integ_time_attr"):
             s["trigger_cmd"] = "Start"
+        s.setdefault("settling_attr", "")
         if s.get("y_axis") == "Left Y":  s["y_axis"] = "Y1"
         elif s.get("y_axis") == "Right Y": s["y_axis"] = "Y2"
         else: s.setdefault("y_axis", "Y1")

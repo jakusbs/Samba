@@ -20,10 +20,10 @@ echo " Installing $DEVICE_NAME Tango Device"
 echo "========================================="
 
 # ── 1. Check that the required files exist ──────────────────────────
-for f in ThreadZI.py ZI.py; do
+for f in ThreadZI_DAQ.py ZI.py; do
     if [ ! -f "$SCRIPT_DIR/$f" ]; then
         echo "ERROR: $f not found in $SCRIPT_DIR"
-        echo "Please copy ThreadZI.py (DAQ version) and ZI.py here."
+        echo "Please ensure ThreadZI_DAQ.py and ZI.py are present here."
         exit 1
     fi
 done
@@ -33,8 +33,8 @@ echo "Creating package structure..."
 mkdir -p "$SCRIPT_DIR/$DEVICE_NAME"
 
 # Copy the device server file as the main module
-cp "$SCRIPT_DIR/ZI.py"       "$SCRIPT_DIR/$DEVICE_NAME/${DEVICE_NAME}.py"
-cp "$SCRIPT_DIR/ThreadZI.py" "$SCRIPT_DIR/$DEVICE_NAME/ThreadZI.py"
+cp "$SCRIPT_DIR/ZI.py"            "$SCRIPT_DIR/$DEVICE_NAME/${DEVICE_NAME}.py"
+cp "$SCRIPT_DIR/ThreadZI_DAQ.py"  "$SCRIPT_DIR/$DEVICE_NAME/ThreadZI.py"
 
 # Create __init__.py that imports main()
 cat > "$SCRIPT_DIR/$DEVICE_NAME/__init__.py" << 'EOF'
@@ -74,7 +74,7 @@ EOF
 # ── 4. pip install ──────────────────────────────────────────────────
 echo "Installing with pip..."
 cd "$SCRIPT_DIR"
-pip install . --quiet
+pip install . --force-reinstall --quiet
 
 echo ""
 echo "========================================="
