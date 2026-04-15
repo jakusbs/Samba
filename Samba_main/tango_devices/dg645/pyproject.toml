@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dg645-tango"
+version = "1.0.0"
+description = "TANGO device server for the SRS DG645 Digital Delay Generator"
+requires-python = ">=3.8"
+dependencies = ["pytango"]
+
+[project.scripts]
+DG645 = "DG645_DelayGenerator:main"
+
+[tool.setuptools]
+py-modules = ["DG645_DelayGenerator"]

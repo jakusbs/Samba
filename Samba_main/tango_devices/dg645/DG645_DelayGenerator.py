@@ -579,5 +579,8 @@ class DG645(Device):
         return f"FAULT: Cannot reach DG645 at {self.Host}:{self.Port}"
 
 
-if __name__ == "__main__":
+def main():
     run([DG645])
+
+if __name__ == "__main__":
+    main()
