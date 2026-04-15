@@ -434,26 +434,33 @@ class ScanRunner:
                     vals: Dict[str, float] = {}
                     point_had_error = False
                     for dev_path, sensors_on_dev in dev_sensors.items():
-                        attrs = [s["attribute"] for s in sensors_on_dev]
+                        # Deduplicate attrs: two sensors may share the same
+                        # attribute (e.g. two display channels both reading x1).
+                        # Tango rejects read_attributes with repeated names.
+                        unique_attrs = list(dict.fromkeys(
+                            s["attribute"] for s in sensors_on_dev))
                         for attempt in range(MAX_RETRIES + 1):
                             try:
-                                if len(attrs) == 1:
-                                    av = devp[dev_path].read_attribute(attrs[0])
+                                if len(unique_attrs) == 1:
+                                    av = devp[dev_path].read_attribute(unique_attrs[0])
                                     raw = av.value
-                                    v = float(raw[0]) if hasattr(raw, "__len__") else float(raw)
-                                    vals[sensors_on_dev[0]["label"]] = v
-                                    data[sensors_on_dev[0]["label"]][iy, ix] = v
+                                    attr_to_val = {unique_attrs[0]:
+                                        float(raw[0]) if hasattr(raw, "__len__") else float(raw)}
                                 else:
-                                    attr_vals = devp[dev_path].read_attributes(attrs)
-                                    for av, s in zip(attr_vals, sensors_on_dev):
+                                    attr_vals = devp[dev_path].read_attributes(unique_attrs)
+                                    attr_to_val = {}
+                                    for av, attr in zip(attr_vals, unique_attrs):
                                         raw = av.value
-                                        v = float(raw[0]) if hasattr(raw, "__len__") else float(raw)
-                                        vals[s["label"]] = v
-                                        data[s["label"]][iy, ix] = v
+                                        attr_to_val[attr] = (
+                                            float(raw[0]) if hasattr(raw, "__len__") else float(raw))
+                                for s in sensors_on_dev:
+                                    v = attr_to_val[s["attribute"]]
+                                    vals[s["label"]] = v
+                                    data[s["label"]][iy, ix] = v
                                 break
                             except Exception as e:
                                 if attempt == MAX_RETRIES:
-                                    lg(f"⚠ Read {dev_path} {attrs}: {e}")
+                                    lg(f"⚠ Read {dev_path} {unique_attrs}: {e}")
                                     point_had_error = True
                                     for s in sensors_on_dev:
                                         vals[s["label"]] = np.nan
