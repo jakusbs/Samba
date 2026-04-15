@@ -108,7 +108,8 @@ class ZI (PyTango.Device_4Impl):
         # set meaningful default values (memorized values are set later)
         #self.attr_samplinginterval_read = 100 # 100 ms
         self.set_state(PyTango.DevState.ON)
-        self.daq = ziPython.ziDAQServer('192.168.1.62',8004,6)
+        host = getattr(self, 'ZI_Host', '192.168.1.62')
+        self.daq = ziPython.ziDAQServer(host, 8004, 6)
         #set all channel to same oscillator (1)
         self.daq.setInt('/dev4855/demods/0/oscselect', 0)
         self.daq.setInt('/dev4855/demods/1/oscselect', 0)
@@ -404,10 +405,10 @@ class ZIClass(PyTango.DeviceClass):
 
     #    Device Properties
     device_property_list = {
-        'DeviceProxy':
-            [PyTango.DevString, 
-            "Socket connecting to the ZI MFLI",
-            ["hpp-N42/socket/ZI"] ],
+        'ZI_Host':
+            [PyTango.DevString,
+            "IP address of the ZI MFLI lock-in amplifier (dev4855)",
+            ["192.168.1.62"] ],
         }
 
 
