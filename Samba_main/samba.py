@@ -8,6 +8,7 @@ Usage:         export TANGO_HOST=192.168.1.1:10000 && python samba.py
 """
 import logging
 import sys, os, copy
+import time as _time
 import numpy as np
 
 # Ensure repo root is on sys.path so that `import core` resolves correctly,
@@ -42,6 +43,12 @@ from script_console import ScriptConsolePanel
 from calibration import CalibrationPanel
 from device_registry import DeviceRegistryPanel, load_registry, registry_to_sensors
 import play_intro
+
+try:
+    from setup_lock import acquire_lock, release_lock
+except Exception:
+    def acquire_lock(name): return True, ""   # type: ignore[misc]
+    def release_lock(name): pass              # type: ignore[misc]
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +127,7 @@ class MainWindow(QMainWindow):
         self._active_cfg_idx:    int                      = 0
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
+        self._scan_start_time:   float                    = 0.0
 
         for n in SETUP_NAMES:
             self._setups[n] = load_setup(n)
@@ -746,7 +754,7 @@ class MainWindow(QMainWindow):
     def _wire_worker(self, worker: ScanWorker):
         """Connect the standard signals shared by all scan workers."""
         worker.point_done.connect(self._on_point)
-        worker.progress.connect(lambda c, t: self.pbar.setValue(c))
+        worker.progress.connect(self._on_progress)
         worker.status_msg.connect(self._on_status)
         worker.log_msg.connect(self._log_append)
         worker.scan_done.connect(lambda fn: setattr(self, "_last_fn", fn))
@@ -763,6 +771,15 @@ class MainWindow(QMainWindow):
 
         active = self._prepare_scan(cfg)
         if active is None: return
+
+        # ── Setup lock ────────────────────────────────────────────────────────
+        ok, who = acquire_lock(self._active_setup_name)
+        if not ok:
+            QMessageBox.warning(
+                self, "Setup busy",
+                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
+                "Abort that scan first, then retry.")
+            return
 
         self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
@@ -791,6 +808,8 @@ class MainWindow(QMainWindow):
         if cfg.get("scan_type") == "DC_HYST":
             self._worker.dc_loop_ready.connect(self.traj_panel.update_dc_live)
 
+        self.pbar.setFormat("%v / %m pts")
+        self._scan_start_time = _time.time()
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -827,10 +846,12 @@ class MainWindow(QMainWindow):
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
         self.pbar.setMaximum(n_pts); self.pbar.setValue(0)
+        self.pbar.setFormat("%v / %m pts")
 
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)
 
+        self._scan_start_time = _time.time()
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -892,8 +913,25 @@ class MainWindow(QMainWindow):
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
 
+    def _on_progress(self, done: int, total: int):
+        """Update progress bar and show elapsed + ETA."""
+        self.pbar.setValue(done)
+        if done <= 0 or not self._scan_start_time:
+            return
+        elapsed = _time.time() - self._scan_start_time
+        if done < total:
+            eta = elapsed / done * (total - done)
+            def _fmt(s):
+                m, sec = divmod(int(s), 60)
+                return f"{m}m {sec:02d}s" if m else f"{sec}s"
+            self.pbar.setFormat(
+                f"%v / %m pts  —  {_fmt(elapsed)} elapsed  ~{_fmt(eta)} left")
+        else:
+            self.pbar.setFormat(f"%v / %m pts  —  done")
+
     def _on_worker_finished(self):
         cfg_type = self._current_scan_cfg.get("scan_type", "") if self._current_scan_cfg else ""
+        release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
         # Auto-zero the field after every DC hysteresis scan

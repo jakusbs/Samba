@@ -61,6 +61,12 @@ from device_registry import DeviceRegistryPanel, load_registry, registry_to_sens
 from defaults_panel  import SetupDefaultsPanel
 import play_intro
 
+try:
+    from setup_lock import acquire_lock, release_lock
+except Exception:
+    def acquire_lock(name): return True, ""   # type: ignore[misc]
+    def release_lock(name): pass              # type: ignore[misc]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stylesheet — cryo-blue accent
@@ -834,6 +840,15 @@ class CryoMainWindow(QMainWindow):
         if err:
             QMessageBox.warning(self, "Invalid scan parameters", err); return
 
+        # ── Setup lock ────────────────────────────────────────────────────────
+        ok, who = acquire_lock(self._active_setup_name)
+        if not ok:
+            QMessageBox.warning(
+                self, "Setup busy",
+                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
+                "Abort that scan first, then retry.")
+            return
+
         self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
         _, n_x, n_y = self._scan_dims(cfg)
@@ -936,6 +951,7 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setFormat(f"%v / %m pts  —  done")
 
     def _on_worker_finished(self):
+        release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
         self.pbar.setFormat("%v / %m pts")
