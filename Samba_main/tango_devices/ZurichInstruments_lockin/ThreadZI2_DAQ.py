@@ -58,7 +58,7 @@ class ThreadZI2(threading.Thread):
             while not h.finished():
                 time.sleep(0.05)
                 if time.time() - t0 > timeout:
-                    print('ThreadZI2: DAQ module timed out')
+                    self.p.warn_stream('ThreadZI2: DAQ module timed out')
                     break
 
             # ── 4. Read results ─────────────────────────────────────────
@@ -78,12 +78,13 @@ class ThreadZI2(threading.Thread):
             self.p._last_collect_s = collect_time
             self.p._last_n_samples = 1
 
-            print('ZI2: DAQ collected {:.3f}s, native averaging'.format(collect_time))
+            self.p.info_stream('ZI2: DAQ collected {:.3f}s, native averaging'.format(collect_time))
 
         except Exception as e:
-            print('ThreadZI2 error: {}'.format(e))
-            import traceback
-            traceback.print_exc()
+            try:
+                self.p.error_stream('ThreadZI2 error: {}'.format(e))
+            except Exception:
+                pass
 
         self.p.set_state(PyTango.DevState.ON)
 

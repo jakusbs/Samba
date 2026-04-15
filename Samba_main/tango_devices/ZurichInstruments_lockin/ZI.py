@@ -267,14 +267,14 @@ class ZI (PyTango.Device_4Impl):
             order = int(self.daq.getDouble('/dev4855/demods/0/order'))
             settling = settle_99.get(order, 16.0) * tc
             if data < settling:
-                print(f'WARNING: integrationtime {data:.3f}s < settling time '
-                      f'{settling:.3f}s (TC={tc:.4f}s, order={order}). '
-                      f'ThreadZI will wait for settling then collect a minimum window.')
+                self.warn_stream(f'integrationtime {data:.3f}s < settling time '
+                                 f'{settling:.3f}s (TC={tc:.4f}s, order={order}). '
+                                 f'Samba handles settling externally before Start().')
             else:
-                print(f'integrationtime={data:.3f}s, settling={settling:.3f}s, '
-                      f'net collection={data - settling:.3f}s — OK')
+                self.info_stream(f'integrationtime={data:.3f}s, settling={settling:.3f}s, '
+                                 f'net collection={data - settling:.3f}s — OK')
         except Exception as e:
-            print(f'Could not validate settling: {e}')
+            self.warn_stream(f'Could not validate settling: {e}')
         self.attr_integrationtime_read = data
         #----- PROTECTED REGION END -----#  //  ZI.integrationtime_write
         
@@ -383,7 +383,7 @@ class ZI (PyTango.Device_4Impl):
             self.thread = ThreadZI(self)
             self.thread.start()
         else:
-            print("Thread is already running.")
+            self.warn_stream("Thread is already running.")
         #----- PROTECTED REGION END -----#  //  ZI.Start
         
 
@@ -531,9 +531,15 @@ def main():
         U.server_run()
 
     except PyTango.DevFailed as e:
-        print(('-------> Received a DevFailed exception:', e))
+        try:
+            print(('-------> Received a DevFailed exception:', e))
+        except OSError:
+            pass
     except Exception as e:
-        print(('-------> An unforeseen exception occured....', e))
+        try:
+            print(('-------> An unforeseen exception occured....', e))
+        except OSError:
+            pass
 
 if __name__ == '__main__':
     main()
