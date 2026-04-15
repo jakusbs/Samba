@@ -9,6 +9,12 @@ Usage:         export TANGO_HOST=192.168.1.1:10000 && python samba.py
 import logging
 import sys, os, copy
 import numpy as np
+
+# Ensure repo root is on sys.path so that `import core` resolves correctly,
+# regardless of the working directory when the script is launched.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 from typing import Dict, Optional, Tuple
 
 from PyQt6.QtWidgets import (

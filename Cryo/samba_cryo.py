@@ -19,6 +19,12 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import numpy as np
 
+# Ensure repo root is on sys.path so that `import core` resolves correctly,
+# regardless of the working directory when the script is launched.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 # Use a cryo-specific config dir so it doesn't mix with standard Samba.
 # Set before any config imports so CONFIG_DIR picks it up.
 os.environ.setdefault("SAMBA_CONFIG_DIR",

@@ -31,6 +31,7 @@ v3.3 — Async trigger + corrected timestamps:
 """
 import copy, os, time, traceback
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import h5py
 from datetime import datetime
@@ -45,7 +46,7 @@ except ImportError:
     TANGO_AVAILABLE = False
 
 from config import MAX_RETRIES, RETRY_DELAY, X_TIME
-from hardware import get_proxy, fresh_proxy, safe_read, safe_write
+from hardware import get_proxy, fresh_proxy, safe_read, safe_write, demagnetize_magnet
 
 # How often to flush to disk for 1D scans (every N points)
 FLUSH_INTERVAL = 10
@@ -98,10 +99,18 @@ class ScanRunner:
             st("No sensors enabled."); return None
 
         devp: Dict[str, object] = {}
-        for s in active:
-            dp = s["device"]
-            if dp and dp not in devp:
-                fp, fp_err = fresh_proxy(dp)
+        # Collect unique device paths in order of first appearance
+        _seen: set = set()
+        unique_devs = [s["device"] for s in active
+                       if s["device"] and not (_seen.__contains__(s["device"])
+                                               or _seen.add(s["device"]))]
+        # Connect to all devices concurrently — startup latency doesn't affect
+        # trigger synchronization (triggers fire via a tight asynch loop later).
+        with ThreadPoolExecutor(max_workers=max(len(unique_devs), 1)) as _ex:
+            _fut_to_dev = {_ex.submit(fresh_proxy, dp): dp for dp in unique_devs}
+            for _fut in as_completed(_fut_to_dev):
+                dp = _fut_to_dev[_fut]
+                fp, fp_err = _fut.result()
                 devp[dp] = fp
                 if fp_err:
                     lg(f"⚠ {dp}: using sim — {fp_err}")
@@ -273,7 +282,9 @@ class ScanRunner:
                         if self._abort: break
 
                     if hdf_scan == "FIELD":
-                        mag_p.write_attribute(mag_cur_attr, x_pos)
+                        _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
+                        if _mag_err:
+                            lg(f"⚠ Magnet write failed at {x_pos:.4g} A: {_mag_err}")
                         time.sleep(max(cfg["settle_time"], 0.05))
                         v, _ = safe_read(mag_p, mag_fld_attr)
                         x_read = v if v is not None else x_pos * 0.15
@@ -330,13 +341,17 @@ class ScanRunner:
                         timeout = cfg["move_timeout"]
                         while remaining and (time.time() - t_wait < timeout):
                             if self._abort: break
-                            for dev_path in list(remaining):
+                            done = set()
+                            for dev_path in remaining:
                                 try:
                                     dev_state = devp[dev_path].state()
                                     if dev_state not in _RUNNING:
-                                        remaining.discard(dev_path)
-                                except Exception:
-                                    remaining.discard(dev_path)
+                                        done.add(dev_path)
+                                except Exception as e:
+                                    lg(f"⚠ State poll failed for {dev_path}: {e}"
+                                       f" — treating as done")
+                                    done.add(dev_path)
+                            remaining -= done
                             if remaining:
                                 time.sleep(0.01)
                         if remaining:
@@ -421,12 +436,12 @@ class ScanRunner:
                     # Flush periodically for 1D scans
                     if n_y == 1 and count % FLUSH_INTERVAL == 0:
                         try: hfile.flush()
-                        except Exception: pass
+                        except Exception as e: lg(f"⚠ HDF5 flush failed: {e}")
 
                 # Flush after each Y row (important for 2D scans)
                 if n_y > 1:
                     try: hfile.flush()
-                    except Exception: pass
+                    except Exception as e: lg(f"⚠ HDF5 flush failed: {e}")
 
         finally:
             # ── Finalize: update status and close ─────────────────────────────
@@ -435,6 +450,10 @@ class ScanRunner:
                                 x_lbl, x_unit, hdf_scan, cfg)
 
         if count > 0:
+            # Auto-demagnetize after FIELD scans
+            if hdf_scan == "FIELD" and mag_p is not None:
+                st("Auto-demagnetizing magnet…")
+                demagnetize_magnet(mag_p, mag_cur_attr, log_fn=lg)
             st(("Done ✓" if not self._abort else f"Aborted ({count}/{total} pts)") +
                f"  → {filename}")
             return filename
@@ -659,6 +678,7 @@ class ScanRunner:
         _RUNNING = {tango.DevState.RUNNING} if TANGO_AVAILABLE else set()
         _RUNNING.add("RUNNING")
 
+        result_fn = None
         try:
             # ── Start ─────────────────────────────────────────────────────────
             st(f"Starting DC Hyst: {npts} pts × {cycles} cycles, "
@@ -705,81 +725,83 @@ class ScanRunner:
                 st("DC Hyst aborted.")
                 hfile.attrs["scan_status"] = "aborted"
                 hfile.attrs["timestamp_end"] = datetime.now().isoformat()
-                hfile.flush(); hfile.close()
-                return None
+                # result_fn stays None; finally block closes the file
 
-            # ── Final read: get definitive result (device may have updated
-            #    after leaving RUNNING state — one final read ensures we have
-            #    the fully converged N-cycle average) ─────────────────────────
-            elapsed = time.time() - t0
-            lg(f"── DC Hyst complete ({elapsed:.1f} s) — reading final arrays ──")
-            result_arrays = self._read_and_emit_hyst_loop(
-                hyst_p, active_ch, n_loop, pt, pg, cycles, cycles, lg,
-                dl=cbs.get('dc_loop'))
-            # Fallback to last live result if final read fails
-            if result_arrays is None:
-                result_arrays = result_arrays_live or {}
+            else:
+                # ── Final read: get definitive result (device may have updated
+                #    after leaving RUNNING state — one final read ensures we have
+                #    the fully converged N-cycle average) ─────────────────────
+                elapsed = time.time() - t0
+                lg(f"── DC Hyst complete ({elapsed:.1f} s) — reading final arrays ──")
+                result_arrays = self._read_and_emit_hyst_loop(
+                    hyst_p, active_ch, n_loop, pt, pg, cycles, cycles, lg,
+                    dl=cbs.get('dc_loop'))
+                # Fallback to last live result if final read fails
+                if result_arrays is None:
+                    result_arrays = result_arrays_live or {}
 
-            # Read field axis directly (safe_read returns scalar — wrong for SPECTRUM)
-            try:
-                field_raw = hyst_p.read_attribute("field").value
-                field_arr = np.asarray(field_raw, dtype=float).flatten()
-                if len(field_arr) < 4:
-                    raise ValueError(f"field too short: {len(field_arr)} pts")
-            except Exception as e:
-                lg(f"⚠ final field read failed ({e}) — using linear estimate")
-                field_arr = np.concatenate([
-                    np.linspace(0, field_V * 1000 / 5.0, npts),
-                    np.linspace(0, -field_V * 1000 / 5.0, npts)])
-            n_actual = min(len(field_arr), n_loop)
+                # Read field axis directly (safe_read returns scalar — wrong for SPECTRUM)
+                try:
+                    field_raw = hyst_p.read_attribute("field").value
+                    field_arr = np.asarray(field_raw, dtype=float).flatten()
+                    if len(field_arr) < 4:
+                        raise ValueError(f"field too short: {len(field_arr)} pts")
+                except Exception as e:
+                    lg(f"⚠ final field read failed ({e}) — using linear estimate")
+                    field_arr = np.concatenate([
+                        np.linspace(0, field_V * 1000 / 5.0, npts),
+                        np.linspace(0, -field_V * 1000 / 5.0, npts)])
+                n_actual = min(len(field_arr), n_loop)
 
-            # Scalar results — safe_read is correct here (these ARE scalars)
-            scalars: Dict[str, float] = {}
-            for s in ("Hc", "Hshift", "Mr", "Ms"):
-                v, serr = safe_read(hyst_p, s)
-                if serr:
-                    lg(f"⚠ {s}: {serr}")
-                scalars[s] = float(v) if v is not None else np.nan
+                # Scalar results — safe_read is correct here (these ARE scalars)
+                scalars: Dict[str, float] = {}
+                for s in ("Hc", "Hshift", "Mr", "Ms"):
+                    v, serr = safe_read(hyst_p, s)
+                    if serr:
+                        lg(f"⚠ {s}: {serr}")
+                    scalars[s] = float(v) if v is not None else np.nan
 
-            # ── Write to HDF5 ─────────────────────────────────────────────────
-            hfile["data"]["actuator_field"][:n_actual] = field_arr[:n_actual]
-            for c in active_ch:
-                key = self._hdf5_key(c["label"])
-                arr = result_arrays.get(c["label"], np.full(n_loop, np.nan))
-                n_a = min(len(arr), n_loop)
-                hfile["data"][key][:n_a] = arr[:n_a]
-            # Scalar results → metadata attrs
-            for s, v in scalars.items():
-                hfile["metadata"].attrs[s] = v
-            hfile.attrs["scan_status"]      = "completed"
-            hfile.attrs["timestamp_end"]    = datetime.now().isoformat()
-            hfile.attrs["duration_seconds"] = elapsed
-            hfile["metadata"].attrs["duration_seconds"] = elapsed
-            hfile["metadata"].attrs["points_acquired"]  = n_actual
-            hfile.flush()
-            hfile.close()
+                # ── Write to HDF5 ──────────────────────────────────────────────
+                hfile["data"]["actuator_field"][:n_actual] = field_arr[:n_actual]
+                for c in active_ch:
+                    key = self._hdf5_key(c["label"])
+                    arr = result_arrays.get(c["label"], np.full(n_loop, np.nan))
+                    n_a = min(len(arr), n_loop)
+                    hfile["data"][key][:n_a] = arr[:n_a]
+                # Scalar results → metadata attrs
+                for s, v in scalars.items():
+                    hfile["metadata"].attrs[s] = v
+                hfile.attrs["scan_status"]      = "completed"
+                hfile.attrs["timestamp_end"]    = datetime.now().isoformat()
+                hfile.attrs["duration_seconds"] = elapsed
+                hfile["metadata"].attrs["duration_seconds"] = elapsed
+                hfile["metadata"].attrs["points_acquired"]  = n_actual
 
-            hc     = scalars.get("Hc",     np.nan)
-            hshift = scalars.get("Hshift", np.nan)
-            mr     = scalars.get("Mr",     np.nan)
-            ms     = scalars.get("Ms",     np.nan)
-            st(f"DC Hyst done ✓  "
-               f"Hc={hc:.3f} mT  Hshift={hshift:.3f} mT  "
-               f"Mr={mr:.4g}  Ms={ms:.4g}  → {filename}")
-            lg(f"  Hc={hc:.4f} mT  Hshift={hshift:.4f} mT  "
-               f"Mr={mr:.6g}  Ms={ms:.6g}  "
-               f"duration={elapsed:.2f} s")
-
-            return filename
+                hc     = scalars.get("Hc",     np.nan)
+                hshift = scalars.get("Hshift", np.nan)
+                mr     = scalars.get("Mr",     np.nan)
+                ms     = scalars.get("Ms",     np.nan)
+                st(f"DC Hyst done ✓  "
+                   f"Hc={hc:.3f} mT  Hshift={hshift:.3f} mT  "
+                   f"Mr={mr:.4g}  Ms={ms:.4g}  → {filename}")
+                lg(f"  Hc={hc:.4f} mT  Hshift={hshift:.4f} mT  "
+                   f"Mr={mr:.6g}  Ms={ms:.6g}  "
+                   f"duration={elapsed:.2f} s")
+                result_fn = filename
 
         except Exception:
             lg(f"⚠ DC Hyst exception:\n{traceback.format_exc()}")
             try:
                 hfile.attrs["scan_status"] = "error"
-                hfile.flush(); hfile.close()
             except Exception:
                 pass
-            return None
+        finally:
+            try:
+                hfile.flush()
+                hfile.close()
+            except Exception as fe:
+                lg(f"⚠ HDF5 close failed: {fe}")
+        return result_fn
 
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,
@@ -1019,24 +1041,15 @@ class ScanRunner:
     def _finalize_hdf5(self, f, count, total, x_actual, t_actual,
                        data, x_plan, y_plan, sensors,
                        x_lbl, x_unit, hdf_scan, cfg):
-        """Write final status/timing and close the file.
-
-        scan_status is written first in its own try block so it is guaranteed
-        to be set even if subsequent metadata writes raise an exception.
-        h5py buffers attribute writes in memory; the status will reach disk
-        either via the explicit flush below or via f.close() in the finally.
-        """
-        # Step 1: Write scan_status first — most critical for the data browser.
-        status = ("aborted" if self._abort else
-                  "empty"   if count == 0   else
-                  "completed")
+        """Write final status/timing and close the file."""
         try:
-            f.attrs["scan_status"] = status
-        except Exception:
-            pass
+            if count == 0:
+                f.attrs["scan_status"] = "empty"
+            elif self._abort:
+                f.attrs["scan_status"] = "aborted"
+            else:
+                f.attrs["scan_status"] = "completed"
 
-        # Step 2: Write remaining timing/count metadata.
-        try:
             duration = float(t_actual.max()) if count > 0 else 0.0
             f.attrs["timestamp_end"]    = datetime.now().isoformat()
             f.attrs["duration_seconds"] = duration
@@ -1055,150 +1068,3 @@ class ScanRunner:
 # ─────────────────────────────────────────────────────────────────────────────
 # ScanWorker — runs a single scan on a QThread
 # ─────────────────────────────────────────────────────────────────────────────
-class ScanWorker(QThread):
-    point_done     = pyqtSignal(int, int, float, dict)
-    progress       = pyqtSignal(int, int)
-    status_msg     = pyqtSignal(str)
-    log_msg        = pyqtSignal(str)
-    scan_done      = pyqtSignal(str)
-    scan_aborted   = pyqtSignal()
-    error_msg      = pyqtSignal(str)
-    dc_loop_ready  = pyqtSignal(object, object)   # (field_arr, y_bufs dict)
-
-    def __init__(self, cfg: dict, setup: dict):
-        super().__init__()
-        self._runner = ScanRunner(cfg, setup)
-
-    def abort(self):     self._runner.abort()
-    def pause(self):     self._runner.pause()
-    def resume(self):    self._runner.resume()
-    def is_paused(self): return self._runner._paused
-
-    def run(self):
-        try:
-            fn = self._runner.run({
-                'point':    self.point_done.emit,
-                'progress': self.progress.emit,
-                'status':   self.status_msg.emit,
-                'log':      self.log_msg.emit,
-                'dc_loop':  self.dc_loop_ready.emit,
-            })
-            (self.scan_done if fn else self.scan_aborted).emit(*(fn,) if fn else ())
-        except Exception:
-            self.error_msg.emit(traceback.format_exc())
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ScanlistWorker — runs N scans with polarity management on a QThread
-# ─────────────────────────────────────────────────────────────────────────────
-class ScanlistWorker(QThread):
-    point_done    = pyqtSignal(int, int, float, dict)
-    progress      = pyqtSignal(int, int)
-    list_progress = pyqtSignal(int, int)
-    cycle_done    = pyqtSignal(int)
-    status_msg    = pyqtSignal(str)
-    log_msg       = pyqtSignal(str)
-    scan_done     = pyqtSignal(int, str)
-    all_done      = pyqtSignal(str)
-    scan_aborted  = pyqtSignal()
-    error_msg     = pyqtSignal(str)
-    relay_changed = pyqtSignal(int)   # emitted whenever relay state is written
-
-    def __init__(self, cfg: dict, setup: dict, n_scans: int,
-                 list_name: str, relay_flip: bool, field_flip: bool):
-        super().__init__()
-        self.cfg = cfg; self.setup = setup; self.n_scans = n_scans
-        self.list_name = list_name
-        self.relay_flip = relay_flip; self.field_flip = field_flip
-        self._abort = False; self._runner = None
-        self._relay_state = 0
-
-    def abort(self):
-        self._abort = True
-        if self._runner: self._runner.abort()
-
-    def run(self):
-        try:
-            self._run_list()
-        except Exception:
-            self.error_msg.emit(traceback.format_exc())
-
-    def _run_list(self):
-        relay_p = get_proxy(self.setup.get("relay_device", ""))
-        mag_p     = get_proxy(self.setup.get("magnet_device", ""))
-        mag_cur   = self.setup.get("magnet_current_attr", "current_polar")
-        mag_fld   = self.setup.get("magnet_field_attr", "field_polar_corr")
-
-        try:
-            self._relay_state = int(relay_p.read_attribute("switchvar").value)
-            self.relay_changed.emit(self._relay_state)
-        except Exception:
-            self._relay_state = 0
-
-        base     = os.path.expanduser(self.setup.get("save_dir", "~/moke_data"))
-        sl_dir   = os.path.join(base, "ScanLists")
-        os.makedirs(sl_dir, exist_ok=True)
-        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-        txt_path = os.path.join(sl_dir, f"{self.list_name}_{ts}.txt")
-
-        results = []
-        for i in range(self.n_scans):
-            if self._abort: break
-            # ── Field flip ────────────────────────────────────────────────────
-            # Skip the flip on scan 0 so the first scan runs at the current
-            # field; flipping starts from scan 1 onward.
-            if self.field_flip and i > 0:
-                cur_val, cur_err = safe_read(mag_p, mag_cur)
-                if cur_err:
-                    self.log_msg.emit(f"⚠ field flip read: {cur_err}")
-                elif cur_val is not None and abs(cur_val) > 1e-6:
-                    neg_val = -cur_val
-                    err = safe_write(mag_p, mag_cur, neg_val)
-                    if err:
-                        self.log_msg.emit(f"⚠ field flip write: {err}")
-                    else:
-                        self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {neg_val:.4f} A")
-                    import time as _t; _t.sleep(0.1)
-
-            v, _ = safe_read(mag_p, mag_fld)
-            field_T = v if v is not None else 0.0
-
-            self.status_msg.emit(
-                f"Scanlist {i+1}/{self.n_scans}  "
-                f"relay={'1(−1)' if self._relay_state else '0(+1)'}  "
-                f"field={field_T:+.3f} T")
-
-            try:
-                relay_p.write_attribute("switchvar", self._relay_state)
-                self.relay_changed.emit(self._relay_state)
-            except Exception as e:
-                self.log_msg.emit(f"⚠ relay: {e}")
-
-            sc = copy.deepcopy(self.cfg)
-
-            self._runner = ScanRunner(sc, self.setup)
-            fn = self._runner.run({
-                'point':    self.point_done.emit,
-                'progress': self.progress.emit,
-                'status':   self.status_msg.emit,
-                'log':      self.log_msg.emit,
-            })
-
-            relay_sign = +1 if self._relay_state == 0 else -1
-            if fn:
-                results.append((fn, relay_sign, field_T))
-                self.scan_done.emit(i, fn)
-            self.list_progress.emit(i + 1, self.n_scans)
-            self.cycle_done.emit(i)
-
-            if self.relay_flip: self._relay_state = 1 - self._relay_state
-
-        if results:
-            with open(txt_path, "w") as f:
-                f.write(f"# Scanlist: {self.list_name}  {datetime.now().isoformat()}\n")
-                f.write("# path\trelay_sign\tfield_T\n")
-                for fn, rs, fT in results:
-                    f.write(f"{fn}\t{rs:+d}\t{fT:.6f}\n")
-            self.all_done.emit(txt_path)
-        else:
-            self.scan_aborted.emit()
