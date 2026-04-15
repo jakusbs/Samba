@@ -23,7 +23,39 @@ class HardwarePanel(QGroupBox):
         self._relay_state  = 0
         root = QHBoxLayout(self); root.setSpacing(8); root.setContentsMargins(6, 6, 6, 6)
 
-        # ── Left: Current Source ──────────────────────────────────────────────
+        # ── Lock-in status ────────────────────────────────────────────────────
+        li  = QGroupBox("Lock-in"); lig = QGridLayout(li)
+        lig.setSpacing(3); lig.setContentsMargins(6, 6, 6, 6)
+
+        row = 0
+        self.zi_dev_lbl = QLabel("—")
+        self.zi_dev_lbl.setStyleSheet("color:#6c7086;font-size:9px;")
+        lig.addWidget(self.zi_dev_lbl, row, 0, 1, 2); row += 1
+
+        lig.addWidget(QLabel("TC:"), row, 0)
+        self.zi_tc_lbl = QLabel("—")
+        self.zi_tc_lbl.setStyleSheet("color:#cdd6f4;font-weight:bold;")
+        lig.addWidget(self.zi_tc_lbl, row, 1); row += 1
+
+        lig.addWidget(QLabel("Order:"), row, 0)
+        self.zi_ord_lbl = QLabel("—")
+        self.zi_ord_lbl.setStyleSheet("color:#cdd6f4;font-weight:bold;")
+        lig.addWidget(self.zi_ord_lbl, row, 1); row += 1
+
+        lig.addWidget(QLabel("Settling:"), row, 0)
+        self.zi_set_lbl = QLabel("—")
+        self.zi_set_lbl.setStyleSheet("color:#89dceb;font-weight:bold;")
+        lig.addWidget(self.zi_set_lbl, row, 1); row += 1
+
+        btn_zi_read = QPushButton("🔄 Read"); btn_zi_read.clicked.connect(self._read_lockin)
+        lig.addWidget(btn_zi_read, row, 0, 1, 2); row += 1
+
+        self.zi_status = QLabel("")
+        self.zi_status.setWordWrap(True); self.zi_status.setStyleSheet("font-size:9px;")
+        lig.addWidget(self.zi_status, row, 0, 1, 2)
+        root.addWidget(li)
+
+        # ── Current Source ────────────────────────────────────────────────────
         cs  = QGroupBox("Current Source"); csg = QGridLayout(cs)
         csg.setSpacing(3); csg.setContentsMargins(6, 6, 6, 6)
 
@@ -145,6 +177,47 @@ class HardwarePanel(QGroupBox):
         w.setFixedWidth(width)
         w.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
         return w
+
+    # ── Lock-in ───────────────────────────────────────────────────────────────
+    def _read_lockin(self):
+        s = self._setup(); dev = s.get("zi_device", "")
+        if not dev:
+            self.zi_dev_lbl.setText("(not configured)")
+            self.zi_status.setText("")
+            return
+        self.zi_dev_lbl.setText(dev)
+        p, conn_err = fresh_proxy(dev)
+        if conn_err:
+            self._set_err(self.zi_status, conn_err); return
+
+        tc,   e1 = safe_read(p, "timeconstant")
+        ord_, e2 = safe_read(p, "filterorder")
+        st,   e3 = safe_read(p, "settlingtime")
+        errs = [e for e in [e1, e2, e3] if e]
+        if errs:
+            self._set_err(self.zi_status, errs[0][:60]); return
+
+        if tc is not None:
+            if tc >= 1.0:
+                self.zi_tc_lbl.setText(f"{tc:.4f} s")
+            elif tc >= 1e-3:
+                self.zi_tc_lbl.setText(f"{tc*1000:.3f} ms")
+            else:
+                self.zi_tc_lbl.setText(f"{tc*1e6:.1f} µs")
+        else:
+            self.zi_tc_lbl.setText("—")
+
+        self.zi_ord_lbl.setText(str(int(ord_)) if ord_ is not None else "—")
+
+        if st is not None:
+            st_str = (f"{st:.3f} s" if st >= 1.0
+                      else f"{st*1000:.1f} ms" if st >= 1e-3
+                      else f"{st:.4f} s")
+            self.zi_set_lbl.setText(f"{st_str}  (99%)")
+        else:
+            self.zi_set_lbl.setText("—")
+
+        self._set_ok(self.zi_status, "OK")
 
     # ── Keithley ──────────────────────────────────────────────────────────────
     def _read_keithley(self):
@@ -320,6 +393,7 @@ class HardwarePanel(QGroupBox):
 
     def refresh(self):
         """Re-read all hardware values. Called on tab switch."""
+        self._read_lockin()
         self._read_keithley()
 
     def get_relay_state(self) -> int: return self._relay_state

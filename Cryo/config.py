@@ -148,6 +148,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_field_attr":   "field_longitudinal_corr",
         "relay_device":        "hpp-N42/current/PyRelais",
         "keithley_device":     "hpp-N42/current/PyKeithley",
+        "zi_device":           "hpp-N42/measure/ZI2",
         "z_attr":              "position0",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data",
@@ -158,6 +159,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_field_attr":   "field_polar_corr",
         "relay_device":        "hpp-N42/current/PyRelais",
         "keithley_device":     "hpp-N42/current/PyKeithley2",
+        "zi_device":           "hpp-N42/measure/ZI2",
         "z_attr":              "z",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data",
@@ -170,6 +172,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         # AttoDRY uses a superconducting magnet — never demagnetize
         "demagnetize_after_scan": False,
         "keithley_device":     "hpp-N42/current/PyKeithley2",
+        "zi_device":           "hpp-N42/measure/ZI2",
         "attodry_device":      "hpp-N42/attoDRY/attoDRY",
         # Stage actuator defaults (editable in Setup Defaults tab)
         "act1_device":         "smaract2/control/IR-controller",
