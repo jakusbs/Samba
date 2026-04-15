@@ -55,10 +55,10 @@ AUTO_PAUSE_THRESHOLD = 5
 # Guard delay (ms) between device state leaving RUNNING and readout,
 # to let output registers settle with final averaged values
 READOUT_GUARD_MS = 10
-# Guard delay (ms) after async trigger dispatch, before state polling.
-# Gives the device thread time to transition from ON → RUNNING.
-# Without this, the poller sees ON immediately and reads stale values.
-TRIGGER_START_GUARD_MS = 50
+# Phase-A timeout (ms): how long to wait for triggered devices to enter
+# RUNNING after the async Start dispatch.  Normal ZI2 thread startup is
+# <10 ms; 200 ms is a generous upper bound before we give up and proceed.
+TRIGGER_START_GUARD_MS = 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,14 +379,31 @@ class ScanRunner:
 
                     # ── 2. Wait for ALL triggered devices to finish integration ──
                     if trigger_devs:
-                        # Short guard: give each device's acquisition thread time
-                        # to transition ON → RUNNING before we start polling.
-                        # Without this, async-dispatched devices (e.g. ZI2) are
-                        # still ON when we first check and are immediately marked
-                        # done, causing stale 0.0 values to be read.
-                        time.sleep(TRIGGER_START_GUARD_MS / 1000.0)
+                        triggered = set(trigger_devs.keys()) - set(trigger_failed)
 
-                        remaining = set(trigger_devs.keys())
+                        # Phase A — wait for every device to enter RUNNING.
+                        # async-dispatched Start commands (e.g. ZI2) spawn a
+                        # thread that sets state→RUNNING a few ms after Start()
+                        # returns.  Without this phase the completion poll sees
+                        # state=ON immediately and reads stale 0.0 values.
+                        not_yet_running = set(triggered)
+                        t_start = time.time()
+                        while not_yet_running and (time.time() - t_start
+                                                   < TRIGGER_START_GUARD_MS / 1000.0):
+                            if self._abort: break
+                            confirmed = set()
+                            for dev_path in not_yet_running:
+                                try:
+                                    if devp[dev_path].state() in _RUNNING:
+                                        confirmed.add(dev_path)
+                                except Exception:
+                                    confirmed.add(dev_path)
+                            not_yet_running -= confirmed
+                            if not_yet_running:
+                                time.sleep(0.002)
+
+                        # Phase B — wait for every device to leave RUNNING.
+                        remaining = set(triggered)
                         t_wait = time.time()
                         timeout = cfg["move_timeout"]
                         while remaining and (time.time() - t_wait < timeout):
