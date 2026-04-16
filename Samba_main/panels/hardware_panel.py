@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QDoubleSpinBox, QGroupBox
 )
-from PyQt6.QtCore import Qt
+import threading
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QAbstractSpinBox
 
 from config import KEITHLEY_RANGES
@@ -180,23 +181,42 @@ class HardwarePanel(QGroupBox):
 
     # ── Lock-in ───────────────────────────────────────────────────────────────
     def _read_lockin(self):
+        """Read ZI lock-in parameters in a background thread.
+
+        All TANGO I/O is kept off the GUI thread so that clicking Read
+        during a scan does not block the scan worker (which shares the GIL
+        with any synchronous TANGO call made on the main thread).
+        """
         s = self._setup(); dev = s.get("zi_device", "")
         if not dev:
             self.zi_dev_lbl.setText("(not configured)")
             self.zi_status.setText("")
             return
         self.zi_dev_lbl.setText(dev)
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            self._set_err(self.zi_status, conn_err); return
+        self.zi_status.setText("Reading…")
 
-        tc,   e1 = safe_read(p, s.get("zi_tc_attr",       "timeconstant"))
-        ord_, e2 = safe_read(p, s.get("zi_order_attr",    "filterorder"))
-        st,   e3 = safe_read(p, s.get("zi_settling_attr", "settlingtime"))
-        errs = [e for e in [e1, e2, e3] if e]
-        if errs:
-            self._set_err(self.zi_status, errs[0][:60]); return
+        tc_attr  = s.get("zi_tc_attr",       "timeconstant")
+        ord_attr = s.get("zi_order_attr",    "filterorder")
+        st_attr  = s.get("zi_settling_attr", "settlingtime")
 
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                QTimer.singleShot(0, lambda: self._set_err(self.zi_status, conn_err))
+                return
+            tc,   e1 = safe_read(p, tc_attr)
+            ord_, e2 = safe_read(p, ord_attr)
+            st,   e3 = safe_read(p, st_attr)
+            errs = [e for e in [e1, e2, e3] if e]
+            if errs:
+                QTimer.singleShot(0, lambda: self._set_err(self.zi_status, errs[0][:60]))
+                return
+            QTimer.singleShot(0, lambda: self._apply_lockin_readback(tc, ord_, st))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_lockin_readback(self, tc, ord_, st):
+        """Apply ZI readback values to the UI (must be called on the main thread)."""
         if tc is not None:
             if tc >= 1.0:
                 self.zi_tc_lbl.setText(f"{tc:.4f} s")
@@ -221,19 +241,30 @@ class HardwarePanel(QGroupBox):
 
     # ── Keithley ──────────────────────────────────────────────────────────────
     def _read_keithley(self):
+        """Read Keithley parameters in a background thread (same rationale as _read_lockin)."""
         s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            self._set_err(self.ks_status, conn_err); return
+        self._update_dev_labels()
+        self.ks_status.setText("Reading…")
 
-        amp, e1 = safe_read(p, "amplitude")
-        frq, e2 = safe_read(p, "frequency")
-        cpl, e3 = safe_read(p, "compliance")
-        cur, e4 = safe_read(p, "current")
-        errs = [e for e in [e1, e2] if e]
-        if errs:
-            self._set_err(self.ks_status, errs[0][:60]); return
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                QTimer.singleShot(0, lambda: self._set_err(self.ks_status, conn_err))
+                return
+            amp, e1 = safe_read(p, "amplitude")
+            frq, e2 = safe_read(p, "frequency")
+            cpl, e3 = safe_read(p, "compliance")
+            cur, e4 = safe_read(p, "current")
+            errs = [e for e in [e1, e2] if e]
+            if errs:
+                QTimer.singleShot(0, lambda: self._set_err(self.ks_status, errs[0][:60]))
+                return
+            QTimer.singleShot(0, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
 
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_keithley_readback(self, amp, frq, cpl, cur):
+        """Apply Keithley readback values to the UI (must be called on the main thread)."""
         if amp is not None: self.amp_spin.setValue(amp)
         if frq is not None: self.freq_spin.setValue(frq)
         if cpl is not None: self.compl_spin.setValue(cpl)
