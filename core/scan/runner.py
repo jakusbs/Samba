@@ -59,6 +59,10 @@ READOUT_GUARD_MS = 10
 # RUNNING after the async Start dispatch.  Normal ZI2 thread startup is
 # <10 ms; 200 ms is a generous upper bound before we give up and proceed.
 TRIGGER_START_GUARD_MS = 200
+# Minimum lock-in filter settling wait (ms).  Prevents sub-threshold TC
+# settings (e.g. TC=1.5 ms → 7 ms settling) from skipping meaningful
+# settling altogether, which can produce noisy or inconsistent readings.
+MIN_LOCKIN_SETTLING_MS = 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,8 +276,14 @@ class ScanRunner:
         max_lockin_settling = max(lockin_settling.values()) if lockin_settling else 0.0
         if not lockin_settling:
             lg("  (no devices with settling_attr configured)")
-        elif max_lockin_settling > 0:
-            lg(f"── Max lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+        else:
+            _floor = MIN_LOCKIN_SETTLING_MS / 1000.0
+            if 0 < max_lockin_settling < _floor:
+                lg(f"  ⚠ Max lock-in settling {max_lockin_settling*1000:.1f} ms is below "
+                   f"the {MIN_LOCKIN_SETTLING_MS} ms floor — clamping up")
+                max_lockin_settling = _floor
+            if max_lockin_settling > 0:
+                lg(f"── Max lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
         try:
             hfile["metadata"].attrs["lockin_settling_time"] = max_lockin_settling
         except Exception:
