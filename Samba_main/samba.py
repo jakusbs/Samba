@@ -699,6 +699,12 @@ class MainWindow(QMainWindow):
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
+        # Disable hardware Read buttons during scan to prevent concurrent TANGO
+        # access on the ZI device (Device_4Impl is single-threaded; simultaneous
+        # state() + read_attribute() calls cause IMP_LIMIT CORBA exceptions).
+        for panel in (self.traj_panel.hw, self.sl_panel.hw):
+            if hasattr(panel, 'set_scan_running'):
+                panel.set_scan_running(running)
 
     def _build_full_config(self) -> dict:
         partial  = self.traj_panel.get_config_partial()

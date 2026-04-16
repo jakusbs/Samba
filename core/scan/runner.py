@@ -429,18 +429,32 @@ class ScanRunner:
                         remaining = set(triggered)
                         t_wait = time.time()
                         timeout = cfg["move_timeout"]
+                        _phase_b_fails = {dp: 0 for dp in remaining}
                         while remaining and (time.time() - t_wait < timeout):
                             if self._abort: break
                             done = set()
                             for dev_path in remaining:
                                 try:
                                     dev_state = devp[dev_path].state()
+                                    _phase_b_fails[dev_path] = 0  # reset on success
                                     if dev_state not in _RUNNING:
                                         done.add(dev_path)
                                 except Exception as e:
-                                    lg(f"⚠ State poll failed for {dev_path}: {e}"
-                                       f" — treating as done")
-                                    done.add(dev_path)
+                                    # Transient CORBA errors (IMP_LIMIT, TRANSIENT)
+                                    # can occur if the device is briefly overloaded.
+                                    # Retry a few times before giving up — treating
+                                    # as "done" too early causes a stale-data read.
+                                    _phase_b_fails[dev_path] += 1
+                                    streak = _phase_b_fails[dev_path]
+                                    if streak >= 5:
+                                        lg(f"⚠ State poll failed {streak}× for "
+                                           f"{dev_path}: {type(e).__name__} — giving up")
+                                        done.add(dev_path)
+                                    else:
+                                        lg(f"⚠ State poll error for {dev_path} "
+                                           f"(attempt {streak}/5): {type(e).__name__}"
+                                           f" — retrying in 50 ms")
+                                        time.sleep(0.05)
                             remaining -= done
                             if remaining:
                                 time.sleep(0.01)

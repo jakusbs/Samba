@@ -67,8 +67,8 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         self.zi_set_lbl.setStyleSheet("color:#89dceb;font-weight:bold;")
         lig.addWidget(self.zi_set_lbl, row, 1); row += 1
 
-        btn_zi_read = QPushButton("🔄 Read"); btn_zi_read.clicked.connect(self._read_lockin)
-        lig.addWidget(btn_zi_read, row, 0, 1, 2); row += 1
+        self._btn_zi_read = QPushButton("🔄 Read"); self._btn_zi_read.clicked.connect(self._read_lockin)
+        lig.addWidget(self._btn_zi_read, row, 0, 1, 2); row += 1
 
         self.zi_status = QLabel("")
         self.zi_status.setWordWrap(True); self.zi_status.setStyleSheet("font-size:9px;")
@@ -314,9 +314,25 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
 
         set_ok(self.zi_status, "OK")
 
+    def set_scan_running(self, running: bool):
+        """Disable/enable the Read buttons and guard refresh() during active scans.
+
+        Concurrent hardware reads (ZI timeconstant, Keithley, AttoDRY) collide with
+        the scan runner's state() polling on the same TANGO device and cause
+        IMP_LIMIT CORBA errors.  Blocking the Read buttons prevents this.
+        """
+        self._scan_running = running
+        tip = "Cannot read during an active scan" if running else ""
+        for btn in (self._btn_zi_read, getattr(self, '_btn_ks_read', None)):
+            if btn is not None:
+                btn.setEnabled(not running)
+                btn.setToolTip(tip)
+
     # ── Refresh / readback (called by polling timer) ─────────────────────────
     def refresh(self):
-        """Read current values from Keithley + AttoDRY."""
+        """Read current values from Keithley + AttoDRY. Skipped during active scans."""
+        if getattr(self, '_scan_running', False):
+            return
         self._read_lockin()
         self._read_keithley()
         self._read_attodry()

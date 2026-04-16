@@ -99,6 +99,7 @@ def build_keithley_group(owner) -> QGroupBox:
     owner.current_rb.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;")
     csg.addWidget(owner.current_rb, row, 1, 1, 2)
     btn_read = QPushButton("🔄 Read"); btn_read.clicked.connect(owner._read_keithley)
+    owner._btn_ks_read = btn_read   # saved so set_scan_running() can disable it
     csg.addWidget(btn_read, row, 3, 1, 3); row += 1
 
     owner.ks_status = QLabel("")

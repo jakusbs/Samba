@@ -48,8 +48,8 @@ class HardwarePanel(QGroupBox):
         self.zi_set_lbl.setStyleSheet("color:#89dceb;font-weight:bold;")
         lig.addWidget(self.zi_set_lbl, row, 1); row += 1
 
-        btn_zi_read = QPushButton("🔄 Read"); btn_zi_read.clicked.connect(self._read_lockin)
-        lig.addWidget(btn_zi_read, row, 0, 1, 2); row += 1
+        self._btn_zi_read = QPushButton("🔄 Read"); self._btn_zi_read.clicked.connect(self._read_lockin)
+        lig.addWidget(self._btn_zi_read, row, 0, 1, 2); row += 1
 
         self.zi_status = QLabel("")
         self.zi_status.setWordWrap(True); self.zi_status.setStyleSheet("font-size:9px;")
@@ -91,8 +91,8 @@ class HardwarePanel(QGroupBox):
         self.current_rb = QLabel("—")
         self.current_rb.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;")
         csg.addWidget(self.current_rb, row, 1, 1, 2)
-        btn_read = QPushButton("🔄 Read"); btn_read.clicked.connect(self._read_keithley)
-        csg.addWidget(btn_read, row, 3, 1, 3); row += 1
+        self._btn_ks_read = QPushButton("🔄 Read"); self._btn_ks_read.clicked.connect(self._read_keithley)
+        csg.addWidget(self._btn_ks_read, row, 3, 1, 3); row += 1
 
         self.ks_status = QLabel("")
         self.ks_status.setWordWrap(True); self.ks_status.setStyleSheet("font-size:9px;")
@@ -422,8 +422,24 @@ class HardwarePanel(QGroupBox):
     def update_field_readback(self, val_T):
         self.field_rb.setText(f"{val_T:.1f} mT" if val_T is not None else "— mT")
 
+    def set_scan_running(self, running: bool):
+        """Disable/enable the Read buttons and guard refresh() during active scans.
+
+        A scan runner and a concurrent hardware read both call state()/read_attribute()
+        on the ZI device server (Device_4Impl — single-threaded CORBA).  Simultaneous
+        requests can cause IMP_LIMIT errors in the scan's state poller.  Blocking the
+        Read buttons while a scan is running avoids this collision entirely.
+        """
+        self._scan_running = running
+        tip = "Cannot read during an active scan" if running else ""
+        for btn in (self._btn_zi_read, self._btn_ks_read):
+            btn.setEnabled(not running)
+            btn.setToolTip(tip)
+
     def refresh(self):
-        """Re-read all hardware values. Called on tab switch."""
+        """Re-read all hardware values. Skipped silently during active scans."""
+        if getattr(self, '_scan_running', False):
+            return
         self._read_lockin()
         self._read_keithley()
 
