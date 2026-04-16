@@ -1105,7 +1105,7 @@ class TrajectoryPanel(QWidget):
         self._tr_read_output()
 
     # ── Read / write delay for selected channel ──────────────────────────
-    def _tr_read_delay(self):
+    def _tr_read_delay(self, update_inputs=True):
         from hardware import safe_read
         p, _ = self._tr_get_proxy()
         if p is None: return
@@ -1116,18 +1116,20 @@ class TrajectoryPanel(QWidget):
         if val is not None:
             disp = val / factor
             self._tr_ch_readback.setText(f"{disp:+.6f} {unit}")
-            self._tr_delay_set.setValue(disp)
+            if update_inputs:
+                self._tr_delay_set.setValue(disp)
         else:
             self._tr_ch_readback.setText("read err")
-        # Also read reference
-        ref_val, _ = safe_read(p, f"DelayRef{ch}")
-        if ref_val is not None:
-            refs = ["T0","T1","A","B","C","D","E","F","G","H"]
-            try:
-                idx = int(ref_val)
-                if 0 <= idx < len(refs):
-                    self._tr_ref.setCurrentText(refs[idx])
-            except (ValueError, TypeError): pass
+        # Also read reference — only update combo when explicitly requested
+        if update_inputs:
+            ref_val, _ = safe_read(p, f"DelayRef{ch}")
+            if ref_val is not None:
+                refs = ["T0","T1","A","B","C","D","E","F","G","H"]
+                try:
+                    idx = int(ref_val)
+                    if 0 <= idx < len(refs):
+                        self._tr_ref.setCurrentText(refs[idx])
+                except (ValueError, TypeError): pass
 
     def _tr_write_delay(self):
         from hardware import safe_write
@@ -1322,9 +1324,9 @@ class TrajectoryPanel(QWidget):
         return max(2, int(round(span / step)) + 1)
 
     def tr_refresh(self):
-        """Called by the 500ms poll timer — read selected channel delay."""
+        """Called by the 500ms poll timer — update readback label only, not input widgets."""
         if self.trmoke_w.isVisible():
-            self._tr_read_delay()
+            self._tr_read_delay(update_inputs=False)
 
     # ── Load / get config ─────────────────────────────────────────────────────
     def load_config(self, cfg: dict):
