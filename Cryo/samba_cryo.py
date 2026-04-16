@@ -620,6 +620,32 @@ class CryoMainWindow(QMainWindow):
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
         self._safe_save()
+        self._update_estimate()
+
+    def _update_estimate(self):
+        """Show a rough pre-scan time estimate in status_lbl when idle."""
+        if self._scan_running:
+            return
+        try:
+            cfg  = self._build_full_config()
+            mode, n_x, n_y = self._scan_dims(cfg)
+
+            def _fmt(s):
+                if s < 120:  return f"{s:.0f} s"
+                if s < 3600: return f"{s/60:.1f} min"
+                return       f"{s/3600:.1f} h"
+
+            n_pts  = n_x * n_y
+            int_t  = float(cfg.get("integration_time", 0.1))
+            settle = float(cfg.get("settle_time", 0.05))
+            total  = n_pts * (int_t + settle)
+            pts    = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
+            suffix = "" if mode == "TIME" else ", excl. moves"
+            self.status_lbl.setText(
+                f"≈ {_fmt(total)}  ({pts} pts × {int_t + settle:.3g} s/pt{suffix})")
+            self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
+        except Exception:
+            pass
 
     def _explicit_save(self):
         self._save_active_config()
@@ -962,6 +988,7 @@ class CryoMainWindow(QMainWindow):
         if self._last_fn:
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
+        self._update_estimate()
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return

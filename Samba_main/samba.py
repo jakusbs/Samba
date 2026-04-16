@@ -559,6 +559,38 @@ class MainWindow(QMainWindow):
         setup.update(self.setup_defaults.get_defaults())
         self.cfg_list.sync_name(idx, old["name"])
         save_setup(self._active_setup_name, setup)
+        self._update_estimate()
+
+    def _update_estimate(self):
+        """Show a rough pre-scan time estimate in status_lbl when idle."""
+        if self._scan_running:
+            return
+        try:
+            cfg  = self._build_full_config()
+            mode, n_x, n_y = self._scan_dims(cfg)
+
+            def _fmt(s):
+                if s < 120:  return f"{s:.0f} s"
+                if s < 3600: return f"{s/60:.1f} min"
+                return       f"{s/3600:.1f} h"
+
+            if mode == "DC_HYST":
+                int_t  = float(cfg.get("hyst_int_time", 2.0))
+                cycles = int(cfg.get("hyst_cycles", 1))
+                total  = int_t * 2 * cycles
+                self.status_lbl.setText(
+                    f"≈ {_fmt(total)}  ({n_x // 2} pts/half-loop × {cycles} cycle(s))")
+            else:
+                n_pts  = n_x * n_y
+                int_t  = float(cfg.get("integration_time", 0.1))
+                settle = float(cfg.get("settle_time", 0.05))
+                total  = n_pts * (int_t + settle)
+                pts    = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
+                suffix = "" if mode == "TIME" else ", excl. moves"
+                self.status_lbl.setText(
+                    f"≈ {_fmt(total)}  ({pts} pts × {int_t + settle:.3g} s/pt{suffix})")
+        except Exception:
+            pass
 
     def _explicit_save(self):
         self._save_active_config(); self.status_lbl.setText("Config saved ✓")
@@ -945,6 +977,7 @@ class MainWindow(QMainWindow):
         if self._last_fn:
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
+        self._update_estimate()
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return
