@@ -6,6 +6,7 @@ Used by both HardwarePanel (standard) and CryoHardwarePanel (cryo fork)
 to avoid duplicating ~80 lines of identical code.
 """
 import logging
+import threading
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -98,6 +99,7 @@ def build_keithley_group(owner) -> QGroupBox:
     owner.current_rb.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;")
     csg.addWidget(owner.current_rb, row, 1, 1, 2)
     btn_read = QPushButton("🔄 Read"); btn_read.clicked.connect(owner._read_keithley)
+    owner._btn_ks_read = btn_read   # saved so set_scan_running() can disable it
     csg.addWidget(btn_read, row, 3, 1, 3); row += 1
 
     owner.ks_status = QLabel("")
@@ -123,23 +125,32 @@ class KeithleyMixin:
 
     def _read_keithley(self):
         s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            set_err(self.ks_status, conn_err); return
+        self._update_dev_labels()
+        self.ks_status.setText("Reading…")
 
         amp_a = s.get("keithley_attr_amplitude",  "amplitude")
         frq_a = s.get("keithley_attr_frequency",  "frequency")
         cpl_a = s.get("keithley_attr_compliance", "compliance")
         cur_a = s.get("keithley_attr_current",    "current")
 
-        amp, e1 = safe_read(p, amp_a)
-        frq, e2 = safe_read(p, frq_a)
-        cpl, e3 = safe_read(p, cpl_a)
-        cur, e4 = safe_read(p, cur_a)
-        errs = [e for e in [e1, e2] if e]
-        if errs:
-            set_err(self.ks_status, errs[0][:60]); return
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                self._ks_err.emit(conn_err)
+                return
+            amp, e1 = safe_read(p, amp_a)
+            frq, e2 = safe_read(p, frq_a)
+            cpl, e3 = safe_read(p, cpl_a)
+            cur, e4 = safe_read(p, cur_a)
+            errs = [e for e in [e1, e2] if e]
+            if errs:
+                self._ks_err.emit(errs[0][:60])
+                return
+            self._ks_ok.emit(amp, frq, cpl, cur)
 
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_keithley_readback(self, amp, frq, cpl, cur):
         if amp is not None: self.amp_spin.setValue(amp)
         if frq is not None: self.freq_spin.setValue(frq)
         if cpl is not None: self.compl_spin.setValue(cpl)

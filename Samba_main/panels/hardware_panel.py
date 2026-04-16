@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QDoubleSpinBox, QGroupBox
 )
-from PyQt6.QtCore import Qt
+import threading
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QAbstractSpinBox
 
 from config import KEITHLEY_RANGES
@@ -17,6 +18,14 @@ from panels._widgets import NoScrollComboBox, NoScrollDoubleSpinBox
 
 
 class HardwarePanel(QGroupBox):
+    # Signals for cross-thread UI updates (emitted from background I/O threads).
+    # Qt signals are thread-safe; QTimer.singleShot from a plain threading.Thread
+    # is not reliably delivered in PyQt6 without a context QObject on the thread.
+    _zi_ok  = pyqtSignal(object, object, object)   # (tc, ord_, st)
+    _zi_err = pyqtSignal(str)
+    _ks_ok  = pyqtSignal(object, object, object, object)  # (amp, frq, cpl, cur)
+    _ks_err = pyqtSignal(str)
+
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
         super().__init__(title, parent)
         self._setup_getter = setup_getter
@@ -47,8 +56,8 @@ class HardwarePanel(QGroupBox):
         self.zi_set_lbl.setStyleSheet("color:#89dceb;font-weight:bold;")
         lig.addWidget(self.zi_set_lbl, row, 1); row += 1
 
-        btn_zi_read = QPushButton("🔄 Read"); btn_zi_read.clicked.connect(self._read_lockin)
-        lig.addWidget(btn_zi_read, row, 0, 1, 2); row += 1
+        self._btn_zi_read = QPushButton("🔄 Read"); self._btn_zi_read.clicked.connect(self._read_lockin)
+        lig.addWidget(self._btn_zi_read, row, 0, 1, 2); row += 1
 
         self.zi_status = QLabel("")
         self.zi_status.setWordWrap(True); self.zi_status.setStyleSheet("font-size:9px;")
@@ -90,8 +99,8 @@ class HardwarePanel(QGroupBox):
         self.current_rb = QLabel("—")
         self.current_rb.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;")
         csg.addWidget(self.current_rb, row, 1, 1, 2)
-        btn_read = QPushButton("🔄 Read"); btn_read.clicked.connect(self._read_keithley)
-        csg.addWidget(btn_read, row, 3, 1, 3); row += 1
+        self._btn_ks_read = QPushButton("🔄 Read"); self._btn_ks_read.clicked.connect(self._read_keithley)
+        csg.addWidget(self._btn_ks_read, row, 3, 1, 3); row += 1
 
         self.ks_status = QLabel("")
         self.ks_status.setWordWrap(True); self.ks_status.setStyleSheet("font-size:9px;")
@@ -139,6 +148,12 @@ class HardwarePanel(QGroupBox):
         frg.addWidget(self.relay_status, row, 0, 1, 3)
         root.addWidget(fr)
 
+        # Wire signals → UI-update slots (always runs on main thread via Qt dispatch)
+        self._zi_ok.connect(self._apply_lockin_readback)
+        self._zi_err.connect(lambda e: self._set_err(self.zi_status, e))
+        self._ks_ok.connect(self._apply_keithley_readback)
+        self._ks_err.connect(lambda e: self._set_err(self.ks_status, e))
+
     def _setup(self): return self._setup_getter()
 
     def _set_ok(self, lbl: QLabel, msg: str):
@@ -180,23 +195,42 @@ class HardwarePanel(QGroupBox):
 
     # ── Lock-in ───────────────────────────────────────────────────────────────
     def _read_lockin(self):
+        """Read ZI lock-in parameters in a background thread.
+
+        All TANGO I/O is kept off the GUI thread so that clicking Read
+        during a scan does not block the scan worker (which shares the GIL
+        with any synchronous TANGO call made on the main thread).
+        """
         s = self._setup(); dev = s.get("zi_device", "")
         if not dev:
             self.zi_dev_lbl.setText("(not configured)")
             self.zi_status.setText("")
             return
         self.zi_dev_lbl.setText(dev)
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            self._set_err(self.zi_status, conn_err); return
+        self.zi_status.setText("Reading…")
 
-        tc,   e1 = safe_read(p, s.get("zi_tc_attr",       "timeconstant"))
-        ord_, e2 = safe_read(p, s.get("zi_order_attr",    "filterorder"))
-        st,   e3 = safe_read(p, s.get("zi_settling_attr", "settlingtime"))
-        errs = [e for e in [e1, e2, e3] if e]
-        if errs:
-            self._set_err(self.zi_status, errs[0][:60]); return
+        tc_attr  = s.get("zi_tc_attr",       "timeconstant")
+        ord_attr = s.get("zi_order_attr",    "filterorder")
+        st_attr  = s.get("zi_settling_attr", "settlingtime")
 
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                self._zi_err.emit(conn_err)
+                return
+            tc,   e1 = safe_read(p, tc_attr)
+            ord_, e2 = safe_read(p, ord_attr)
+            st,   e3 = safe_read(p, st_attr)
+            errs = [e for e in [e1, e2, e3] if e]
+            if errs:
+                self._zi_err.emit(errs[0][:60])
+                return
+            self._zi_ok.emit(tc, ord_, st)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_lockin_readback(self, tc, ord_, st):
+        """Apply ZI readback values to the UI (must be called on the main thread)."""
         if tc is not None:
             if tc >= 1.0:
                 self.zi_tc_lbl.setText(f"{tc:.4f} s")
@@ -221,19 +255,30 @@ class HardwarePanel(QGroupBox):
 
     # ── Keithley ──────────────────────────────────────────────────────────────
     def _read_keithley(self):
+        """Read Keithley parameters in a background thread (same rationale as _read_lockin)."""
         s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            self._set_err(self.ks_status, conn_err); return
+        self._update_dev_labels()
+        self.ks_status.setText("Reading…")
 
-        amp, e1 = safe_read(p, "amplitude")
-        frq, e2 = safe_read(p, "frequency")
-        cpl, e3 = safe_read(p, "compliance")
-        cur, e4 = safe_read(p, "current")
-        errs = [e for e in [e1, e2] if e]
-        if errs:
-            self._set_err(self.ks_status, errs[0][:60]); return
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                self._ks_err.emit(conn_err)
+                return
+            amp, e1 = safe_read(p, "amplitude")
+            frq, e2 = safe_read(p, "frequency")
+            cpl, e3 = safe_read(p, "compliance")
+            cur, e4 = safe_read(p, "current")
+            errs = [e for e in [e1, e2] if e]
+            if errs:
+                self._ks_err.emit(errs[0][:60])
+                return
+            self._ks_ok.emit(amp, frq, cpl, cur)
 
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_keithley_readback(self, amp, frq, cpl, cur):
+        """Apply Keithley readback values to the UI (must be called on the main thread)."""
         if amp is not None: self.amp_spin.setValue(amp)
         if frq is not None: self.freq_spin.setValue(frq)
         if cpl is not None: self.compl_spin.setValue(cpl)
@@ -391,8 +436,24 @@ class HardwarePanel(QGroupBox):
     def update_field_readback(self, val_T):
         self.field_rb.setText(f"{val_T:.1f} mT" if val_T is not None else "— mT")
 
+    def set_scan_running(self, running: bool):
+        """Disable/enable the Read buttons and guard refresh() during active scans.
+
+        A scan runner and a concurrent hardware read both call state()/read_attribute()
+        on the ZI device server (Device_4Impl — single-threaded CORBA).  Simultaneous
+        requests can cause IMP_LIMIT errors in the scan's state poller.  Blocking the
+        Read buttons while a scan is running avoids this collision entirely.
+        """
+        self._scan_running = running
+        tip = "Cannot read during an active scan" if running else ""
+        for btn in (self._btn_zi_read, self._btn_ks_read):
+            btn.setEnabled(not running)
+            btn.setToolTip(tip)
+
     def refresh(self):
-        """Re-read all hardware values. Called on tab switch."""
+        """Re-read all hardware values. Skipped silently during active scans."""
+        if getattr(self, '_scan_running', False):
+            return
         self._read_lockin()
         self._read_keithley()
 

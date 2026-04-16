@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QDoubleSpinBox, QAbstractSpinBox, QCheckBox, QWidget
 )
-from PyQt6.QtCore import Qt
+import threading
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, is_sim_proxy
 from config   import KEITHLEY_RANGES
@@ -32,6 +33,14 @@ from keithley_mixin import (
 
 class CryoHardwarePanel(KeithleyMixin, QGroupBox):
     """Hardware panel for the Cryo setup: Keithley (left) + AttoDRY (right)."""
+
+    # Signals for thread-safe cross-thread UI updates.
+    _zi_ok  = pyqtSignal(object, object, object)        # (tc, ord_, st)
+    _zi_err = pyqtSignal(str)
+    _ks_ok  = pyqtSignal(object, object, object, object) # (amp, frq, cpl, cur)
+    _ks_err = pyqtSignal(str)
+    _ad_ok  = pyqtSignal(object, object, object, object, object, object)  # fld,tmp,vti,mgt,toggles,err
+    _ad_err = pyqtSignal(str)
 
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
         super().__init__(title, parent)
@@ -66,8 +75,8 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         self.zi_set_lbl.setStyleSheet("color:#89dceb;font-weight:bold;")
         lig.addWidget(self.zi_set_lbl, row, 1); row += 1
 
-        btn_zi_read = QPushButton("🔄 Read"); btn_zi_read.clicked.connect(self._read_lockin)
-        lig.addWidget(btn_zi_read, row, 0, 1, 2); row += 1
+        self._btn_zi_read = QPushButton("🔄 Read"); self._btn_zi_read.clicked.connect(self._read_lockin)
+        lig.addWidget(self._btn_zi_read, row, 0, 1, 2); row += 1
 
         self.zi_status = QLabel("")
         self.zi_status.setWordWrap(True); self.zi_status.setStyleSheet("font-size:9px;")
@@ -171,6 +180,18 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         adg.addWidget(self.ad_status, row, 0, 1, 4)
         root.addWidget(ad)
 
+        # Wire signals → UI-update slots (guaranteed on main thread via Qt dispatch)
+        self._zi_ok.connect(self._apply_lockin_readback)
+        self._zi_err.connect(lambda e: set_err(self.zi_status, e))
+        self._ks_ok.connect(self._apply_keithley_readback)
+        self._ks_err.connect(lambda e: set_err(self.ks_status, e))
+        self._ad_ok.connect(self._apply_attodry_readback)
+        self._ad_err.connect(self._on_attodry_error)
+
+    def _on_attodry_error(self, err: str):
+        self._update_dev_labels()
+        set_err(self.ad_status, err)
+
     def _setup(self):
         return self._setup_getter()
 
@@ -268,17 +289,29 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
             self.zi_status.setText("")
             return
         self.zi_dev_lbl.setText(dev)
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            set_err(self.zi_status, conn_err); return
+        self.zi_status.setText("Reading…")
 
-        tc,   e1 = safe_read(p, s.get("zi_tc_attr",       "timeconstant"))
-        ord_, e2 = safe_read(p, s.get("zi_order_attr",    "filterorder"))
-        st,   e3 = safe_read(p, s.get("zi_settling_attr", "settlingtime"))
-        errs = [e for e in [e1, e2, e3] if e]
-        if errs:
-            set_err(self.zi_status, errs[0][:60]); return
+        tc_attr  = s.get("zi_tc_attr",       "timeconstant")
+        ord_attr = s.get("zi_order_attr",    "filterorder")
+        st_attr  = s.get("zi_settling_attr", "settlingtime")
 
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                self._zi_err.emit(conn_err)
+                return
+            tc,   e1 = safe_read(p, tc_attr)
+            ord_, e2 = safe_read(p, ord_attr)
+            st,   e3 = safe_read(p, st_attr)
+            errs = [e for e in [e1, e2, e3] if e]
+            if errs:
+                self._zi_err.emit(errs[0][:60])
+                return
+            self._zi_ok.emit(tc, ord_, st)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_lockin_readback(self, tc, ord_, st):
         if tc is not None:
             if tc >= 1.0:
                 self.zi_tc_lbl.setText(f"{tc:.4f} s")
@@ -301,49 +334,77 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
 
         set_ok(self.zi_status, "OK")
 
+    def set_scan_running(self, running: bool):
+        """Disable/enable the Read buttons and guard refresh() during active scans.
+
+        Concurrent hardware reads (ZI timeconstant, Keithley, AttoDRY) collide with
+        the scan runner's state() polling on the same TANGO device and cause
+        IMP_LIMIT CORBA errors.  Blocking the Read buttons prevents this.
+        """
+        self._scan_running = running
+        tip = "Cannot read during an active scan" if running else ""
+        for btn in (self._btn_zi_read, getattr(self, '_btn_ks_read', None)):
+            if btn is not None:
+                btn.setEnabled(not running)
+                btn.setToolTip(tip)
+
     # ── Refresh / readback (called by polling timer) ─────────────────────────
     def refresh(self):
-        """Read current values from Keithley + AttoDRY."""
+        """Read current values from Keithley + AttoDRY. Skipped during active scans."""
+        if getattr(self, '_scan_running', False):
+            return
         self._read_lockin()
         self._read_keithley()
         self._read_attodry()
 
     def _read_attodry(self):
-        p, err = self._ad_proxy(); self._update_dev_labels()
-        if err:
-            set_err(self.ad_status, err); return
-
         s = self._setup()
-        fld, e1 = safe_read(p, s.get("attodry_attr_field_rb",  "MagneticField"))
-        tmp, e2 = safe_read(p, s.get("attodry_attr_temp_rb",   "Temperature"))
-        vti, _  = safe_read(p, s.get("attodry_attr_vti_temp",  "VtiTemperature"))
-        mgt, _  = safe_read(p, s.get("attodry_attr_mag_temp",  "MagnetTemperature"))
+        dev  = s.get("attodry_device", "")
+        fld_a = s.get("attodry_attr_field_rb",  "MagneticField")
+        tmp_a = s.get("attodry_attr_temp_rb",   "Temperature")
+        vti_a = s.get("attodry_attr_vti_temp",  "VtiTemperature")
+        mgt_a = s.get("attodry_attr_mag_temp",  "MagnetTemperature")
+        toggle_attrs = {k: s.get(k, "") for k in (
+            "attodry_attr_mag_ctrl", "attodry_attr_temp_ctrl", "attodry_attr_persist")}
+        self.ad_status.setText("Reading…")
 
-        if fld is not None:
-            self.field_rb.setText(f"{fld:.4f} T")
-        if tmp is not None:
-            self.temp_rb.setText(f"{tmp:.2f} K")
-        if vti is not None:
-            self.vti_rb.setText(f"VTI: {vti:.2f} K")
-        if mgt is not None:
-            self.mag_t_rb.setText(f"Mag: {mgt:.2f} K")
+        def _do():
+            p, err = fresh_proxy(dev)
+            if err:
+                self._ad_err.emit(err)
+                return
+            fld, e1 = safe_read(p, fld_a)
+            tmp, e2 = safe_read(p, tmp_a)
+            vti, _  = safe_read(p, vti_a)
+            mgt, _  = safe_read(p, mgt_a)
+            toggles = {}
+            for k, attr in toggle_attrs.items():
+                if attr:
+                    val, _ = safe_read(p, attr)
+                    if val is not None:
+                        toggles[k] = bool(val)
+            first_err = e1 or e2 or None
+            self._ad_ok.emit(fld, tmp, vti, mgt, toggles, first_err)
 
-        # Sync toggle button states from actual device boolean attrs
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_attodry_readback(self, fld, tmp, vti, mgt, toggles: dict, err_str):
+        self._update_dev_labels()
+        if fld is not None: self.field_rb.setText(f"{fld:.4f} T")
+        if tmp is not None: self.temp_rb.setText(f"{tmp:.2f} K")
+        if vti is not None: self.vti_rb.setText(f"VTI: {vti:.2f} K")
+        if mgt is not None: self.mag_t_rb.setText(f"Mag: {mgt:.2f} K")
         for attr_key, btn in [
             ("attodry_attr_mag_ctrl",  self.btn_mag_ctrl),
             ("attodry_attr_temp_ctrl", self.btn_temp_ctrl),
             ("attodry_attr_persist",   self.btn_persist),
         ]:
-            attr = s.get(attr_key, "")
-            if attr:
-                val, _ = safe_read(p, attr)
-                if val is not None:
-                    btn.setChecked(bool(val))
-
-        if not e1 and not e2:
+            if attr_key in toggles:
+                btn.setChecked(toggles[attr_key])
+        if err_str:
+            set_err(self.ad_status, err_str[:60])
+        else:
             set_ok(self.ad_status, "Connected")
-        elif e1:
-            set_err(self.ad_status, e1[:60])
 
     def update_field_readback(self, val_T: Optional[float]) -> None:
         """Called by the 500ms polling timer from samba_cryo.py."""

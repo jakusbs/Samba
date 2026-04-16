@@ -59,6 +59,10 @@ READOUT_GUARD_MS = 10
 # RUNNING after the async Start dispatch.  Normal ZI2 thread startup is
 # <10 ms; 200 ms is a generous upper bound before we give up and proceed.
 TRIGGER_START_GUARD_MS = 200
+# Minimum lock-in filter settling wait (ms).  Prevents sub-threshold TC
+# settings (e.g. TC=1.5 ms → 7 ms settling) from skipping meaningful
+# settling altogether, which can produce noisy or inconsistent readings.
+MIN_LOCKIN_SETTLING_MS = 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,8 +276,14 @@ class ScanRunner:
         max_lockin_settling = max(lockin_settling.values()) if lockin_settling else 0.0
         if not lockin_settling:
             lg("  (no devices with settling_attr configured)")
-        elif max_lockin_settling > 0:
-            lg(f"── Max lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+        else:
+            _floor = MIN_LOCKIN_SETTLING_MS / 1000.0
+            if 0 < max_lockin_settling < _floor:
+                lg(f"  ⚠ Max lock-in settling {max_lockin_settling*1000:.1f} ms is below "
+                   f"the {MIN_LOCKIN_SETTLING_MS} ms floor — clamping up")
+                max_lockin_settling = _floor
+            if max_lockin_settling > 0:
+                lg(f"── Max lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
         try:
             hfile["metadata"].attrs["lockin_settling_time"] = max_lockin_settling
         except Exception:
@@ -294,6 +304,19 @@ class ScanRunner:
             lg(f"── Triggered devices ({len(trigger_devs)}): ──")
             for dp, tc in trigger_devs.items():
                 lg(f"  {dp} → command_inout('{tc}')")
+            # ThreadZI's daq.poll() can block for up to (int_time + 5 s) before
+            # returning.  The default 3 s TANGO client timeout fires first,
+            # producing spurious TRANSIENT_CallTimedout on state() queries.
+            # Set the proxy timeout to outlast the worst-case daq.poll() run.
+            _zi_timeout_ms = max(15_000, int((int_time + 7.5) * 1000))
+            for dp in trigger_devs:
+                fp = devp.get(dp)
+                if fp is not None and hasattr(fp, 'set_timeout_millis'):
+                    try:
+                        fp.set_timeout_millis(_zi_timeout_ms)
+                        lg(f"  {dp}: state-poll timeout → {_zi_timeout_ms} ms")
+                    except Exception:
+                        pass
         else:
             lg("── No triggered devices — using timed integration (sleep) ──")
 
@@ -406,18 +429,32 @@ class ScanRunner:
                         remaining = set(triggered)
                         t_wait = time.time()
                         timeout = cfg["move_timeout"]
+                        _phase_b_fails = {dp: 0 for dp in remaining}
                         while remaining and (time.time() - t_wait < timeout):
                             if self._abort: break
                             done = set()
                             for dev_path in remaining:
                                 try:
                                     dev_state = devp[dev_path].state()
+                                    _phase_b_fails[dev_path] = 0  # reset on success
                                     if dev_state not in _RUNNING:
                                         done.add(dev_path)
                                 except Exception as e:
-                                    lg(f"⚠ State poll failed for {dev_path}: {e}"
-                                       f" — treating as done")
-                                    done.add(dev_path)
+                                    # Transient CORBA errors (IMP_LIMIT, TRANSIENT)
+                                    # can occur if the device is briefly overloaded.
+                                    # Retry a few times before giving up — treating
+                                    # as "done" too early causes a stale-data read.
+                                    _phase_b_fails[dev_path] += 1
+                                    streak = _phase_b_fails[dev_path]
+                                    if streak >= 5:
+                                        lg(f"⚠ State poll failed {streak}× for "
+                                           f"{dev_path}: {type(e).__name__} — giving up")
+                                        done.add(dev_path)
+                                    else:
+                                        lg(f"⚠ State poll error for {dev_path} "
+                                           f"(attempt {streak}/5): {type(e).__name__}"
+                                           f" — retrying in 50 ms")
+                                        time.sleep(0.05)
                             remaining -= done
                             if remaining:
                                 time.sleep(0.01)
