@@ -449,7 +449,7 @@ class TrajectoryPanel(QWidget):
 
         # Device row — path comes from Setup Defaults; shown read-only here
         cg.addWidget(QLabel("Device:"), 0, 0)
-        self._tr_dev_lbl = QLabel("intermag/dg645/1")
+        self._tr_dev_lbl = QLabel("hpp-N42/delay/DG645")
         self._tr_dev_lbl.setStyleSheet(
             "color:#a6e3a1;font-size:10px;background:#181825;"
             "border:1px solid #313244;border-radius:4px;padding:2px 6px;")

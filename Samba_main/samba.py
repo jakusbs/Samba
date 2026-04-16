@@ -728,7 +728,7 @@ class MainWindow(QMainWindow):
         scan_type = partial.get("scan_type", "SPATIAL")
         if scan_type == "TR_MOKE":
             # TR-MOKE: act1 is the DG645 delay channel
-            dg_path = setup.get("trmoke_dg645", "intermag/dg645/1")
+            dg_path = setup.get("trmoke_dg645", "hpp-N42/delay/DG645")
             partial["act1_device"]  = dg_path
             partial["trmoke_dg645"] = dg_path
         else:
