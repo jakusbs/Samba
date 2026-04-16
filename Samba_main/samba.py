@@ -109,6 +109,11 @@ QSplitter::handle:vertical{height:4px;}
 # MainWindow
 # ─────────────────────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
+    # General-purpose signal for posting callables to the main thread from
+    # background threads. QTimer.singleShot(0, context, lambda) is not reliably
+    # delivered in PyQt6 when called from a plain threading.Thread; signals are.
+    _post_to_main = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Samba v3 — ETH Zürich")
@@ -143,7 +148,11 @@ class MainWindow(QMainWindow):
         self._rb_timer.start()
         self._rb_poll_active = False   # guard: skip tick if previous poll still running
 
-        # Read hardware panels once after the window is shown
+        # Wire cross-thread callable dispatcher
+        self._post_to_main.connect(lambda fn: fn())
+
+        # Read hardware panels once after the window is shown.
+        # Staggered: traj first, then sl 600ms later, to avoid simultaneous ZI reads.
         QTimer.singleShot(300, self._initial_hw_read)
 
         self._restore_geometry()
@@ -630,7 +639,7 @@ class MainWindow(QMainWindow):
                 val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
                 if val is not None:
                     zi = float(val)
-                    QTimer.singleShot(0, self, lambda: _show(zi))
+                    self._post_to_main.emit(lambda zi=zi: _show(zi))
             except Exception:
                 pass
 
@@ -1227,7 +1236,7 @@ class MainWindow(QMainWindow):
                             pos[k] = av
                     res["positions"] = pos
 
-                QTimer.singleShot(0, self, lambda: self._apply_field_poll(res, scan_t))
+                self._post_to_main.emit(lambda: self._apply_field_poll(res, scan_t))
             finally:
                 self._rb_poll_active = False
 
@@ -1263,9 +1272,9 @@ class MainWindow(QMainWindow):
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def _initial_hw_read(self):
-        """Read all hardware panels once on startup (fired 300 ms after __init__)."""
+        """Read hardware panels once on startup. Staggered to avoid simultaneous ZI reads."""
         self.traj_panel.hw.refresh()
-        self.sl_panel.hw.refresh()
+        QTimer.singleShot(800, self.sl_panel.hw.refresh)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

@@ -214,8 +214,13 @@ class ReadbackWorker(QThread):
 # CryoMainWindow
 # ─────────────────────────────────────────────────────────────────────────────
 class CryoMainWindow(QMainWindow):
+    # Used to safely post callables to the main thread from background threads.
+    # See also: hardware_panel.py for the same pattern.
+    _post_to_main = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
+        self._post_to_main.connect(lambda fn: fn())
         self.setWindowTitle("Samba Cryo — ETH Zürich")
         self.setMinimumSize(1360, 920)
 
@@ -676,7 +681,7 @@ class CryoMainWindow(QMainWindow):
                 val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
                 if val is not None:
                     zi = float(val)
-                    QTimer.singleShot(0, self, lambda: _show(zi))
+                    self._post_to_main.emit(lambda zi=zi: _show(zi))
             except Exception:
                 pass
 
@@ -1181,9 +1186,10 @@ class CryoMainWindow(QMainWindow):
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
     def _initial_hw_read(self):
-        """Read all hardware panels once on startup (fired 400 ms after __init__)."""
+        """Read all hardware panels once on startup (fired 400 ms after __init__).
+        Staggered to avoid simultaneous ZI reads that cause IMP_LIMIT CORBA errors."""
         self.traj_panel.hw.refresh()
-        self.sl_panel.hw.refresh()
+        QTimer.singleShot(800, self.sl_panel.hw.refresh)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

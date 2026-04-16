@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QAbstractSpinBox, QCheckBox, QWidget
 )
 import threading
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, is_sim_proxy
 from config   import KEITHLEY_RANGES
@@ -33,6 +33,14 @@ from keithley_mixin import (
 
 class CryoHardwarePanel(KeithleyMixin, QGroupBox):
     """Hardware panel for the Cryo setup: Keithley (left) + AttoDRY (right)."""
+
+    # Signals for thread-safe cross-thread UI updates.
+    _zi_ok  = pyqtSignal(object, object, object)        # (tc, ord_, st)
+    _zi_err = pyqtSignal(str)
+    _ks_ok  = pyqtSignal(object, object, object, object) # (amp, frq, cpl, cur)
+    _ks_err = pyqtSignal(str)
+    _ad_ok  = pyqtSignal(object, object, object, object, object, object)  # fld,tmp,vti,mgt,toggles,err
+    _ad_err = pyqtSignal(str)
 
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
         super().__init__(title, parent)
@@ -172,6 +180,18 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         adg.addWidget(self.ad_status, row, 0, 1, 4)
         root.addWidget(ad)
 
+        # Wire signals → UI-update slots (guaranteed on main thread via Qt dispatch)
+        self._zi_ok.connect(self._apply_lockin_readback)
+        self._zi_err.connect(lambda e: set_err(self.zi_status, e))
+        self._ks_ok.connect(self._apply_keithley_readback)
+        self._ks_err.connect(lambda e: set_err(self.ks_status, e))
+        self._ad_ok.connect(self._apply_attodry_readback)
+        self._ad_err.connect(self._on_attodry_error)
+
+    def _on_attodry_error(self, err: str):
+        self._update_dev_labels()
+        set_err(self.ad_status, err)
+
     def _setup(self):
         return self._setup_getter()
 
@@ -278,16 +298,16 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, self, lambda: set_err(self.zi_status, conn_err))
+                self._zi_err.emit(conn_err)
                 return
             tc,   e1 = safe_read(p, tc_attr)
             ord_, e2 = safe_read(p, ord_attr)
             st,   e3 = safe_read(p, st_attr)
             errs = [e for e in [e1, e2, e3] if e]
             if errs:
-                QTimer.singleShot(0, self, lambda: set_err(self.zi_status, errs[0][:60]))
+                self._zi_err.emit(errs[0][:60])
                 return
-            QTimer.singleShot(0, self, lambda: self._apply_lockin_readback(tc, ord_, st))
+            self._zi_ok.emit(tc, ord_, st)
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -351,10 +371,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         def _do():
             p, err = fresh_proxy(dev)
             if err:
-                QTimer.singleShot(0, self, lambda: (
-                    self._update_dev_labels(),
-                    set_err(self.ad_status, err),
-                ))
+                self._ad_err.emit(err)
                 return
             fld, e1 = safe_read(p, fld_a)
             tmp, e2 = safe_read(p, tmp_a)
@@ -367,8 +384,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
                     if val is not None:
                         toggles[k] = bool(val)
             first_err = e1 or e2 or None
-            QTimer.singleShot(0, self, lambda: self._apply_attodry_readback(
-                fld, tmp, vti, mgt, toggles, first_err))
+            self._ad_ok.emit(fld, tmp, vti, mgt, toggles, first_err)
 
         threading.Thread(target=_do, daemon=True).start()
 

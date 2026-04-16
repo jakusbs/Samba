@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QDoubleSpinBox, QGroupBox
 )
 import threading
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QAbstractSpinBox
 
 from config import KEITHLEY_RANGES
@@ -18,6 +18,14 @@ from panels._widgets import NoScrollComboBox, NoScrollDoubleSpinBox
 
 
 class HardwarePanel(QGroupBox):
+    # Signals for cross-thread UI updates (emitted from background I/O threads).
+    # Qt signals are thread-safe; QTimer.singleShot from a plain threading.Thread
+    # is not reliably delivered in PyQt6 without a context QObject on the thread.
+    _zi_ok  = pyqtSignal(object, object, object)   # (tc, ord_, st)
+    _zi_err = pyqtSignal(str)
+    _ks_ok  = pyqtSignal(object, object, object, object)  # (amp, frq, cpl, cur)
+    _ks_err = pyqtSignal(str)
+
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
         super().__init__(title, parent)
         self._setup_getter = setup_getter
@@ -140,6 +148,12 @@ class HardwarePanel(QGroupBox):
         frg.addWidget(self.relay_status, row, 0, 1, 3)
         root.addWidget(fr)
 
+        # Wire signals → UI-update slots (always runs on main thread via Qt dispatch)
+        self._zi_ok.connect(self._apply_lockin_readback)
+        self._zi_err.connect(lambda e: self._set_err(self.zi_status, e))
+        self._ks_ok.connect(self._apply_keithley_readback)
+        self._ks_err.connect(lambda e: self._set_err(self.ks_status, e))
+
     def _setup(self): return self._setup_getter()
 
     def _set_ok(self, lbl: QLabel, msg: str):
@@ -202,16 +216,16 @@ class HardwarePanel(QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, self, lambda: self._set_err(self.zi_status, conn_err))
+                self._zi_err.emit(conn_err)
                 return
             tc,   e1 = safe_read(p, tc_attr)
             ord_, e2 = safe_read(p, ord_attr)
             st,   e3 = safe_read(p, st_attr)
             errs = [e for e in [e1, e2, e3] if e]
             if errs:
-                QTimer.singleShot(0, self, lambda: self._set_err(self.zi_status, errs[0][:60]))
+                self._zi_err.emit(errs[0][:60])
                 return
-            QTimer.singleShot(0, self, lambda: self._apply_lockin_readback(tc, ord_, st))
+            self._zi_ok.emit(tc, ord_, st)
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -249,7 +263,7 @@ class HardwarePanel(QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, self, lambda: self._set_err(self.ks_status, conn_err))
+                self._ks_err.emit(conn_err)
                 return
             amp, e1 = safe_read(p, "amplitude")
             frq, e2 = safe_read(p, "frequency")
@@ -257,9 +271,9 @@ class HardwarePanel(QGroupBox):
             cur, e4 = safe_read(p, "current")
             errs = [e for e in [e1, e2] if e]
             if errs:
-                QTimer.singleShot(0, self, lambda: self._set_err(self.ks_status, errs[0][:60]))
+                self._ks_err.emit(errs[0][:60])
                 return
-            QTimer.singleShot(0, self, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
+            self._ks_ok.emit(amp, frq, cpl, cur)
 
         threading.Thread(target=_do, daemon=True).start()
 
