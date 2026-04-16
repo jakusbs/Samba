@@ -294,6 +294,19 @@ class ScanRunner:
             lg(f"── Triggered devices ({len(trigger_devs)}): ──")
             for dp, tc in trigger_devs.items():
                 lg(f"  {dp} → command_inout('{tc}')")
+            # ThreadZI's daq.poll() can block for up to (int_time + 5 s) before
+            # returning.  The default 3 s TANGO client timeout fires first,
+            # producing spurious TRANSIENT_CallTimedout on state() queries.
+            # Set the proxy timeout to outlast the worst-case daq.poll() run.
+            _zi_timeout_ms = max(15_000, int((int_time + 7.5) * 1000))
+            for dp in trigger_devs:
+                fp = devp.get(dp)
+                if fp is not None and hasattr(fp, 'set_timeout_millis'):
+                    try:
+                        fp.set_timeout_millis(_zi_timeout_ms)
+                        lg(f"  {dp}: state-poll timeout → {_zi_timeout_ms} ms")
+                    except Exception:
+                        pass
         else:
             lg("── No triggered devices — using timed integration (sleep) ──")
 
