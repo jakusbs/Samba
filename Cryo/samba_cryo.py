@@ -14,7 +14,7 @@ Differences from standard samba.py:
 Shared (unchanged): scan.py, plot_widgets.py, data_browser.py, hardware.py,
                       calibration.py, device_registry.py, config.py
 """
-import sys, os, copy, logging, time as _time
+import sys, os, copy, logging, threading, time as _time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import numpy as np
@@ -259,6 +259,8 @@ class CryoMainWindow(QMainWindow):
 
         # Schedule a startup device probe shortly after the window appears
         QTimer.singleShot(800, self._probe_devices)
+        # Read hardware panels once the window is shown
+        QTimer.singleShot(400, self._initial_hw_read)
 
     def _probe_devices(self):
         """Check critical hardware devices at startup and warn if any are unreachable.
@@ -623,58 +625,62 @@ class CryoMainWindow(QMainWindow):
         self._update_estimate()
 
     def _update_estimate(self):
-        """Show a breakdown pre-scan time estimate in status_lbl when idle."""
+        """Show a breakdown pre-scan time estimate in status_lbl when idle.
+
+        ZI settling is read in a background thread so the GUI is never blocked.
+        """
         if self._scan_running:
             return
         try:
             cfg   = self._build_full_config()
             setup = self._active_setup()
             mode, n_x, n_y = self._scan_dims(cfg)
+        except Exception:
+            return
 
-            def _fmt(s):
-                if s < 120:  return f"{s:.0f} s"
-                if s < 3600: return f"{s/60:.1f} min"
-                return       f"{s/3600:.1f} h"
+        def _fmt(s):
+            if s < 120:  return f"{s:.0f} s"
+            if s < 3600: return f"{s/60:.1f} min"
+            return       f"{s/3600:.1f} h"
 
-            n_pts   = n_x * n_y
-            int_t   = float(cfg.get("integration_time", 0.1))
-            settle  = float(cfg.get("settle_time", 0.05))
-            if mode == "FIELD":
-                settle = max(settle, 0.05)
-            elif mode == "TIME":
-                settle = 0.0
+        int_t  = float(cfg.get("integration_time", 0.1))
+        settle = float(cfg.get("settle_time", 0.05))
+        if mode == "FIELD":  settle = max(settle, 0.05)
+        elif mode == "TIME": settle = 0.0
+        n_pts = n_x * n_y
+        pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
+        move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
 
-            # Try to read ZI filter settling from the device (cached proxy, fast)
-            zi_settle = 0.0
-            zi_path   = setup.get("zi_device", "")
-            zi_s_attr = setup.get("zi_settling_attr", "settlingtime")
-            if zi_path and zi_s_attr:
-                try:
-                    dp = get_proxy(zi_path)
-                    if dp:
-                        dp.set_timeout_millis(500)
-                        val = dp.read_attribute(zi_s_attr).value
-                        if val is not None:
-                            zi_settle = float(val)
-                except Exception:
-                    pass
-
-            time_per_pt = settle + zi_settle + int_t
-            total = n_pts * time_per_pt
-            pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
-
+        def _show(zi_settle=0.0):
+            if self._scan_running:
+                return
             parts = []
             if settle    > 0: parts.append(f"{settle:.3g}s settle")
             if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
             parts.append(f"{int_t:.3g}s integ")
-            breakdown = " + ".join(parts)
-            move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
-
+            total = n_pts * (settle + zi_settle + int_t)
             self.status_lbl.setText(
-                f"≈ {_fmt(total)}  ({pts} pts × [{breakdown}]{move_note})")
+                f"≈ {_fmt(total)}  ({pts} pts × [{' + '.join(parts)}]{move_note})")
             self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
-        except Exception:
-            pass
+
+        _show(0.0)
+
+        zi_path  = setup.get("zi_device", "")
+        zi_s_attr = setup.get("zi_settling_attr", "settlingtime")
+        if not zi_path or not zi_s_attr:
+            return
+
+        def _read_zi():
+            try:
+                dp = get_proxy(zi_path)
+                val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
+                if val is not None:
+                    zi = float(val)
+                    QTimer.singleShot(0, lambda: _show(zi))
+            except Exception:
+                pass
+
+        threading.Thread(target=_read_zi, daemon=True).start()
 
     def _explicit_save(self):
         self._save_active_config()
@@ -1168,6 +1174,11 @@ class CryoMainWindow(QMainWindow):
             self._rb_worker.calib_axis_info = self.calib_panel.get_axis_info()
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
+    def _initial_hw_read(self):
+        """Read all hardware panels once on startup (fired 400 ms after __init__)."""
+        self.traj_panel.hw.refresh()
+        self.sl_panel.hw.refresh()
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         if not self._split_initialised and self.height() > 100:

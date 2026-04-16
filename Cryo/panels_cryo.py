@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QDoubleSpinBox, QAbstractSpinBox, QCheckBox, QWidget
 )
-from PyQt6.QtCore import Qt
+import threading
+from PyQt6.QtCore import Qt, QTimer
 
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, is_sim_proxy
 from config   import KEITHLEY_RANGES
@@ -268,17 +269,29 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
             self.zi_status.setText("")
             return
         self.zi_dev_lbl.setText(dev)
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            set_err(self.zi_status, conn_err); return
+        self.zi_status.setText("Reading…")
 
-        tc,   e1 = safe_read(p, s.get("zi_tc_attr",       "timeconstant"))
-        ord_, e2 = safe_read(p, s.get("zi_order_attr",    "filterorder"))
-        st,   e3 = safe_read(p, s.get("zi_settling_attr", "settlingtime"))
-        errs = [e for e in [e1, e2, e3] if e]
-        if errs:
-            set_err(self.zi_status, errs[0][:60]); return
+        tc_attr  = s.get("zi_tc_attr",       "timeconstant")
+        ord_attr = s.get("zi_order_attr",    "filterorder")
+        st_attr  = s.get("zi_settling_attr", "settlingtime")
 
+        def _do():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                QTimer.singleShot(0, lambda: set_err(self.zi_status, conn_err))
+                return
+            tc,   e1 = safe_read(p, tc_attr)
+            ord_, e2 = safe_read(p, ord_attr)
+            st,   e3 = safe_read(p, st_attr)
+            errs = [e for e in [e1, e2, e3] if e]
+            if errs:
+                QTimer.singleShot(0, lambda: set_err(self.zi_status, errs[0][:60]))
+                return
+            QTimer.singleShot(0, lambda: self._apply_lockin_readback(tc, ord_, st))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_lockin_readback(self, tc, ord_, st):
         if tc is not None:
             if tc >= 1.0:
                 self.zi_tc_lbl.setText(f"{tc:.4f} s")
@@ -309,41 +322,57 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         self._read_attodry()
 
     def _read_attodry(self):
-        p, err = self._ad_proxy(); self._update_dev_labels()
-        if err:
-            set_err(self.ad_status, err); return
-
         s = self._setup()
-        fld, e1 = safe_read(p, s.get("attodry_attr_field_rb",  "MagneticField"))
-        tmp, e2 = safe_read(p, s.get("attodry_attr_temp_rb",   "Temperature"))
-        vti, _  = safe_read(p, s.get("attodry_attr_vti_temp",  "VtiTemperature"))
-        mgt, _  = safe_read(p, s.get("attodry_attr_mag_temp",  "MagnetTemperature"))
+        dev  = s.get("attodry_device", "")
+        fld_a = s.get("attodry_attr_field_rb",  "MagneticField")
+        tmp_a = s.get("attodry_attr_temp_rb",   "Temperature")
+        vti_a = s.get("attodry_attr_vti_temp",  "VtiTemperature")
+        mgt_a = s.get("attodry_attr_mag_temp",  "MagnetTemperature")
+        toggle_attrs = {k: s.get(k, "") for k in (
+            "attodry_attr_mag_ctrl", "attodry_attr_temp_ctrl", "attodry_attr_persist")}
+        self.ad_status.setText("Reading…")
 
-        if fld is not None:
-            self.field_rb.setText(f"{fld:.4f} T")
-        if tmp is not None:
-            self.temp_rb.setText(f"{tmp:.2f} K")
-        if vti is not None:
-            self.vti_rb.setText(f"VTI: {vti:.2f} K")
-        if mgt is not None:
-            self.mag_t_rb.setText(f"Mag: {mgt:.2f} K")
+        def _do():
+            p, err = fresh_proxy(dev)
+            if err:
+                QTimer.singleShot(0, lambda: (
+                    self._update_dev_labels(),
+                    set_err(self.ad_status, err),
+                ))
+                return
+            fld, e1 = safe_read(p, fld_a)
+            tmp, e2 = safe_read(p, tmp_a)
+            vti, _  = safe_read(p, vti_a)
+            mgt, _  = safe_read(p, mgt_a)
+            toggles = {}
+            for k, attr in toggle_attrs.items():
+                if attr:
+                    val, _ = safe_read(p, attr)
+                    if val is not None:
+                        toggles[k] = bool(val)
+            first_err = e1 or e2 or None
+            QTimer.singleShot(0, lambda: self._apply_attodry_readback(
+                fld, tmp, vti, mgt, toggles, first_err))
 
-        # Sync toggle button states from actual device boolean attrs
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_attodry_readback(self, fld, tmp, vti, mgt, toggles: dict, err_str):
+        self._update_dev_labels()
+        if fld is not None: self.field_rb.setText(f"{fld:.4f} T")
+        if tmp is not None: self.temp_rb.setText(f"{tmp:.2f} K")
+        if vti is not None: self.vti_rb.setText(f"VTI: {vti:.2f} K")
+        if mgt is not None: self.mag_t_rb.setText(f"Mag: {mgt:.2f} K")
         for attr_key, btn in [
             ("attodry_attr_mag_ctrl",  self.btn_mag_ctrl),
             ("attodry_attr_temp_ctrl", self.btn_temp_ctrl),
             ("attodry_attr_persist",   self.btn_persist),
         ]:
-            attr = s.get(attr_key, "")
-            if attr:
-                val, _ = safe_read(p, attr)
-                if val is not None:
-                    btn.setChecked(bool(val))
-
-        if not e1 and not e2:
+            if attr_key in toggles:
+                btn.setChecked(toggles[attr_key])
+        if err_str:
+            set_err(self.ad_status, err_str[:60])
+        else:
             set_ok(self.ad_status, "Connected")
-        elif e1:
-            set_err(self.ad_status, e1[:60])
 
     def update_field_readback(self, val_T: Optional[float]) -> None:
         """Called by the 500ms polling timer from samba_cryo.py."""
