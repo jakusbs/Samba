@@ -508,3 +508,143 @@ Left panel: device list with Add/Duplicate/Delete buttons.
 Right panel: property editor (name, path, type, trigger_cmd, integ_time_attr, settling_attr) + scrollable channel list (attr, label, unit per row).
 
 Signal `registry_changed` propagates updates to: SensorPickerRow, SetupDefaultsPanel, trajectory monitor combo.
+
+---
+
+## 9. ETA Display & Pre-scan Estimate
+
+### Runtime ETA (`_on_progress`)
+
+Connected to `worker.progress(done, total)`. Uses linear extrapolation:
+
+```python
+elapsed = time.time() - self._scan_start_time
+eta = (elapsed / done) * (total - done)
+# Progress bar format: "123 / 456 pts  —  2m 34s elapsed  ~3m 21s left"
+```
+
+`_scan_start_time` is captured just before `worker.start()` in both `_start_scan` and `_start_calib_timescan`.
+
+### Pre-scan estimate (`_update_estimate`)
+
+Shown in the status label before starting a scan. Called at the end of `_save_active_config()` and `_on_worker_finished()`. Skipped if a scan is already running.
+
+**Formula for standard scans (SPATIAL / FIELD / TIME):**
+
+```
+time_per_point = settle + zi_settle + integration_time
+total_estimate = n_points × time_per_point
+```
+
+- `settle`: from config. TIME → 0, FIELD → max(settle, 0.05), SPATIAL → as-is
+- `zi_settle`: read **live** from the ZI device's `settlingtime` attribute (500 ms Tango timeout). Falls back to 0 if device unreachable.
+- `integration_time`: from config
+
+**Formula for DC_HYST:**
+
+```
+total = integration_time × 2 × cycles
+# (2 half-loops per cycle, each taking integration_time seconds)
+```
+
+**Output format examples:**
+
+```
+≈ 45 s   (10 pts × [0.1s settle + 4.5s ZI + 0.1s integ])
+≈ 2.3 min  (51×51 pts × [0.05s settle + 0.1s integ] + moves)
+≈ 4 s   (2 × 2.0s/half-loop × 1 cycle(s), 100 pts/half)
+```
+
+The breakdown shows each time component. Spatial scans add a "+ moves" note since stage travel time is not estimated.
+
+---
+
+## 10. Setup Defaults Panel
+
+**File:** `Samba_main/panels/setup_defaults.py`
+
+Editable per-setup hardware device paths and attribute names. Each section uses registry-driven combo boxes.
+
+### Configurable sections
+
+| Section | Fields | Registry type filter |
+|---------|--------|---------------------|
+| Stage Act 1/2/Z | device, attr, label (R/O), unit (R/O) | all |
+| Keithley | device, amplitude/frequency/range/compliance attrs | "current", "keithley" |
+| Magnet | device, current_attr, field_attr | "magnet" |
+| Relay | device, attr | "relay" |
+| Lock-in (ZI) | device, tc_attr, order_attr, settling_attr | "lockin" |
+| Focus sensor | device, attr | "sensor", "beckhoff" |
+| TR-MOKE | DG645 device | "dg645" |
+
+### Registry-driven combos
+
+- **Device combos** display friendly names, store TANGO paths as item data
+- **Attribute combos** populated from selected device's channels
+- Fallback attribute lists (e.g., `_LOCKIN_TC_ATTRS = ["timeconstant", "tc", ...]`) used when device has no channels defined
+- Label/Unit fields auto-fill from registry on device+attr selection
+
+### Data flow
+
+```
+SetupDefaultsPanel.get_defaults()  →  flat dict with all keys
+    ↓
+setup.update(defaults)             →  merged into setup dict
+    ↓
+save_setup(name, setup)            →  persisted to ~/.config/moke_scan/{name}.json
+    ↓
+ScanRunner reads setup keys        →  zi_device, magnet_device, etc.
+```
+
+Signal `defaults_changed` triggers immediate save to disk.
+
+---
+
+## 11. Recent Changes (April 2026)
+
+### Setup lock integration
+- Wired `acquire_lock()` / `release_lock()` from `setup_lock.py` into both `samba.py` and `samba_cryo.py`
+- Lock acquired before scan start (with "Setup busy" dialog if locked)
+- Lock released in `_on_worker_finished()`
+- Added logging throughout `setup_lock.py` for debugging
+
+### IR settling time fix
+- `SensorPickerRow.get()` in `Samba_main/panels/sensor_picker.py` was missing `"settling_attr"` in its output dict
+- Without this field, the scan engine couldn't read the ZI settling time for IR sensors
+- One-line fix: added `"settling_attr": dev.get("settling_attr", "")`
+
+### Pre-scan time estimate
+- Added `_update_estimate()` to `samba.py` and `samba_cryo.py`
+- Shows breakdown: settle + ZI settle + integration per point
+- ZI settling read live from device (not cached)
+- DC_HYST branch: `int_time × 2 × cycles`
+- Called after every config save and scan completion
+
+### Runtime ETA display
+- Ported `_on_progress()` from Cryo to Samba_main
+- Shows elapsed time and estimated time remaining in progress bar
+- Added `_scan_start_time` capture in both `_start_scan` and `_start_calib_timescan`
+
+### Cryo installer fix
+- Replaced `conda install -c conda-forge pytango` (was hanging on dependency solving) with pip-based installation matching Samba_main's approach
+
+### Config schema migration v1→v2
+- Added TR-MOKE default fields to migration chain
+
+### ZI/ZI2 device server fixes (prior session)
+- Fixed `poll()` + numpy averaging to flush stale samples before collecting
+- Corrected settling time factors (`_SETTLE_99`)
+- Fixed `integrationtime` write-back and readback verification
+
+---
+
+## 12. Architecture Principles
+
+1. **Hardware-gated synchronization** — Async trigger + state polling prevents timing drift between Samba and devices
+2. **Fail-open** — Lock server, Tango connections, and device reads all fail gracefully. Samba always runs.
+3. **Two-phase polling** — Phase A (entry) + Phase B (completion) guarantees data is ready before read
+4. **Batch per device** — All sensors on the same device read in one call to minimize inter-channel skew
+5. **Crash-safe persistence** — HDF5 written per-point; Cryo uses atomic file replacement for JSON configs
+6. **Registry-driven UI** — Device/channel definitions in one place; UI combos auto-populate from registry
+7. **Schema migration** — Versioned config chain ensures old configs load correctly after feature additions
+8. **Catppuccin Mocha theme** — Consistent dark UI across all panels using the Catppuccin color palette
