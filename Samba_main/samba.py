@@ -7,7 +7,7 @@ Requirements:  pip install pytango PyQt6 matplotlib h5py numpy
 Usage:         export TANGO_HOST=192.168.1.1:10000 && python samba.py
 """
 import logging
-import sys, os, copy
+import sys, os, copy, threading
 import time as _time
 import numpy as np
 
@@ -141,6 +141,11 @@ class MainWindow(QMainWindow):
         self._rb_timer = QTimer(self); self._rb_timer.setInterval(500)
         self._rb_timer.timeout.connect(self._poll_field_readback)
         self._rb_timer.start()
+        self._rb_poll_active = False   # guard: skip tick if previous poll still running
+
+        # Read hardware panels once after the window is shown
+        QTimer.singleShot(300, self._initial_hw_read)
+
         self._restore_geometry()
 
     def _active_setup(self) -> dict:
@@ -562,68 +567,74 @@ class MainWindow(QMainWindow):
         self._update_estimate()
 
     def _update_estimate(self):
-        """Show a breakdown pre-scan time estimate in status_lbl when idle."""
+        """Show a breakdown pre-scan time estimate in status_lbl when idle.
+
+        The ZI settling read is done in a background thread so the GUI is
+        never blocked.  The label is updated twice: immediately (zi_settle=0)
+        and again once the device responds.
+        """
         if self._scan_running:
             return
         try:
             cfg   = self._build_full_config()
             setup = self._active_setup()
             mode, n_x, n_y = self._scan_dims(cfg)
+        except Exception:
+            return
 
-            def _fmt(s):
-                if s < 120:  return f"{s:.0f} s"
-                if s < 3600: return f"{s/60:.1f} min"
-                return       f"{s/3600:.1f} h"
+        def _fmt(s):
+            if s < 120:  return f"{s:.0f} s"
+            if s < 3600: return f"{s/60:.1f} min"
+            return       f"{s/3600:.1f} h"
 
-            if mode == "DC_HYST":
-                int_t  = float(cfg.get("hyst_int_time", 2.0))
-                npts   = int(cfg.get("hyst_npts", 100))
-                cycles = int(cfg.get("hyst_cycles", 1))
-                total  = int_t * 2 * cycles
-                self.status_lbl.setText(
-                    f"≈ {_fmt(total)}  (2 × {int_t:.3g}s/half-loop × {cycles} cycle(s), {npts} pts/half)")
+        if mode == "DC_HYST":
+            int_t  = float(cfg.get("hyst_int_time", 2.0))
+            npts   = int(cfg.get("hyst_npts", 100))
+            cycles = int(cfg.get("hyst_cycles", 1))
+            total  = int_t * 2 * cycles
+            self.status_lbl.setText(
+                f"≈ {_fmt(total)}  (2 × {int_t:.3g}s/half-loop × {cycles} cycle(s), {npts} pts/half)")
+            return
+
+        int_t  = float(cfg.get("integration_time", 0.1))
+        settle = float(cfg.get("settle_time", 0.05))
+        if mode == "FIELD":   settle = max(settle, 0.05)
+        elif mode == "TIME":  settle = 0.0
+        n_pts = n_x * n_y
+        pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
+        move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
+
+        def _show(zi_settle=0.0):
+            if self._scan_running:
                 return
-
-            n_pts   = n_x * n_y
-            int_t   = float(cfg.get("integration_time", 0.1))
-            # settle_time: post-move wait (FIELD uses max(settle,0.05))
-            settle  = float(cfg.get("settle_time", 0.05))
-            if mode == "FIELD":
-                settle = max(settle, 0.05)
-            elif mode == "TIME":
-                settle = 0.0
-
-            # Try to read ZI filter settling from the device (cached proxy, fast)
-            zi_settle = 0.0
-            zi_path   = setup.get("zi_device", "")
-            zi_s_attr = setup.get("zi_settling_attr", "settlingtime")
-            if zi_path and zi_s_attr:
-                try:
-                    dp = get_proxy(zi_path)
-                    if dp:
-                        dp.set_timeout_millis(500)
-                        val = dp.read_attribute(zi_s_attr).value
-                        if val is not None:
-                            zi_settle = float(val)
-                except Exception:
-                    pass
-
-            time_per_pt = settle + zi_settle + int_t
-            total = n_pts * time_per_pt
-            pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
-
-            # Breakdown: only include non-zero components
             parts = []
-            if settle   > 0: parts.append(f"{settle:.3g}s settle")
+            if settle    > 0: parts.append(f"{settle:.3g}s settle")
             if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
             parts.append(f"{int_t:.3g}s integ")
-            breakdown = " + ".join(parts)
-            move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
-
+            total = n_pts * (settle + zi_settle + int_t)
             self.status_lbl.setText(
-                f"≈ {_fmt(total)}  ({pts} pts × [{breakdown}]{move_note})")
-        except Exception:
-            pass
+                f"≈ {_fmt(total)}  ({pts} pts × [{' + '.join(parts)}]{move_note})")
+
+        # Show immediately without ZI settling (no I/O)
+        _show(0.0)
+
+        # Then read ZI settling in background and refresh label
+        zi_path  = setup.get("zi_device", "")
+        zi_s_attr = setup.get("zi_settling_attr", "settlingtime")
+        if not zi_path or not zi_s_attr:
+            return
+
+        def _read_zi():
+            try:
+                dp = get_proxy(zi_path)
+                val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
+                if val is not None:
+                    zi = float(val)
+                    QTimer.singleShot(0, lambda: _show(zi))
+            except Exception:
+                pass
+
+        threading.Thread(target=_read_zi, daemon=True).start()
 
     def _explicit_save(self):
         self._save_active_config(); self.status_lbl.setText("Config saved ✓")
@@ -1140,68 +1151,116 @@ class MainWindow(QMainWindow):
         self.map2d.set_colormap(cmap)
 
     def _poll_field_readback(self):
-        # HW panel always reads from the magnet device
+        """All TANGO I/O runs in a background thread; GUI updates posted back
+        via QTimer.singleShot so the Qt event loop is never blocked."""
+        if self._rb_poll_active:
+            return  # previous poll still in flight — skip this tick
+        self._rb_poll_active = True
+
+        # ── Snapshot GUI state on the main thread (no I/O) ────────────────
         setup    = self._active_setup()
-        dev      = setup.get("magnet_device", "")
+        mag_dev  = setup.get("magnet_device", "")
         fld_attr = setup.get("magnet_field_attr", "field_polar_corr")
-        p = get_proxy(dev)
-        v, _ = safe_read(p, fld_attr)
+        scan_t   = (self._current_scan_cfg.get("scan_type", "")
+                    if self._scan_running and self._current_scan_cfg else "")
+        last_dc  = self._last_dc_cycle
+
+        mon_dev, mon_attr = "", ""
+        if scan_t == "FIELD":
+            mon_dev, mon_attr = self.traj_panel.get_monitor_device()
+
+        hyst_dev = ""
+        if scan_t == "DC_HYST":
+            hyst_dev = self._current_scan_cfg.get("hyst_device", "")
+
+        calib_active = (self.live_tabs.currentWidget() is self.calib_panel)
+        calib_axes: dict = {}
+        if calib_active:
+            info = self.calib_panel.get_axis_info()
+            calib_axes = {k: info.get(k, ("", "")) for k in ("x", "y", "z")}
+
+        # ── All device reads off the GUI thread ────────────────────────────
+        def _do():
+            try:
+                res: dict = {}
+
+                # Field readback
+                p = get_proxy(mag_dev)
+                v, _ = safe_read(p, fld_attr)
+                res["field"] = v
+
+                # FIELD scan: monitor device (or fallback to field value)
+                if scan_t == "FIELD":
+                    if mon_dev and mon_attr:
+                        mp = get_proxy(mon_dev)
+                        mv, _ = safe_read(mp, mon_attr)
+                        res["monitor"] = mv
+                    else:
+                        res["monitor"] = v
+
+                # DC_HYST: poll CycleReadback + optional Hc/Hshift
+                if hyst_dev:
+                    hp = get_proxy(hyst_dev)
+                    cyc_v, _ = safe_read(hp, "CycleReadback")
+                    res["dc_cycle"] = cyc_v
+                    if cyc_v is not None:
+                        c_int = int(cyc_v)
+                        if c_int != last_dc and c_int > 0:
+                            hc_v,  _ = safe_read(hp, "Hc")
+                            hsh_v, _ = safe_read(hp, "Hshift")
+                            res["hc"]  = hc_v
+                            res["hsh"] = hsh_v
+
+                # Calibration tab: stage positions
+                if calib_axes:
+                    pos: dict = {}
+                    for k, (dev, attr) in calib_axes.items():
+                        if dev:
+                            px = get_proxy(dev)
+                            av, _ = safe_read(px, attr)
+                            pos[k] = av
+                    res["positions"] = pos
+
+                QTimer.singleShot(0, lambda: self._apply_field_poll(res, scan_t))
+            finally:
+                self._rb_poll_active = False
+
+        threading.Thread(target=_do, daemon=True).start()
+
+        # tr_refresh is lightweight (just updates a label from a cached value)
+        self.traj_panel.tr_refresh()
+
+    def _apply_field_poll(self, res: dict, scan_t: str):
+        """Apply poll results to widgets (always called on the main thread)."""
+        v = res.get("field")
         self.traj_panel.hw.update_field_readback(v)
         self.sl_panel.hw.update_field_readback(v)
 
-        if not self._scan_running or not self._current_scan_cfg:
-            return
-        scan_t = self._current_scan_cfg.get("scan_type", "")
+        if "monitor" in res:
+            self.traj_panel.update_field_monitor(res["monitor"])
 
-        # AC field scan: read from monitor dropdown device
-        if scan_t == "FIELD":
-            mon_dev, mon_attr = self.traj_panel.get_monitor_device()
-            if mon_dev and mon_attr:
-                mp = get_proxy(mon_dev)
-                mv, _ = safe_read(mp, mon_attr)
-                self.traj_panel.update_field_monitor(mv)
-            else:
-                # Fallback to magnet field
-                self.traj_panel.update_field_monitor(v)
+        if "dc_cycle" in res:
+            cyc_v = res["dc_cycle"]
+            if cyc_v is not None:
+                c_int = int(cyc_v)
+                if c_int != self._last_dc_cycle and c_int > 0:
+                    self._last_dc_cycle = c_int
+                    hc_v  = res.get("hc")
+                    hsh_v = res.get("hsh")
+                    if hc_v is not None:
+                        self.traj_panel.update_dc_cycle(
+                            c_int, float(hc_v),
+                            float(hsh_v) if hsh_v is not None else 0.0)
 
-        # DC hyst: poll CycleReadback + Hc from hyst device only
-        # (DO NOT poll other devices — the Beckhoff controls the field internally.
-        #  The monitor graph is fed by dc_loop_ready signal, not by polling.)
-        elif scan_t == "DC_HYST":
-            hyst_dev = self._current_scan_cfg.get("hyst_device", "")
-            if not hyst_dev:
-                return
-            hp = get_proxy(hyst_dev)
-            cyc_v, _ = safe_read(hp, "CycleReadback")
-            if cyc_v is None:
-                return
-            c_int = int(cyc_v)
-            if c_int != self._last_dc_cycle and c_int > 0:
-                self._last_dc_cycle = c_int
-                hc_v,  _ = safe_read(hp, "Hc")
-                hsh_v, _ = safe_read(hp, "Hshift")
-                if hc_v is not None:
-                    self.traj_panel.update_dc_cycle(
-                        c_int,
-                        float(hc_v),
-                        float(hsh_v) if hsh_v is not None else 0.0)
-
-        # Poll stage positions for calibration tab (only when visible)
-        if self.live_tabs.currentWidget() is self.calib_panel:
-            info = self.calib_panel.get_axis_info()
-            vals = {}
-            for axis_key in ("x", "y", "z"):
-                dev, attr = info.get(axis_key, ("", ""))
-                if dev:
-                    p = get_proxy(dev)
-                    v, _ = safe_read(p, attr)
-                    vals[axis_key] = v
-            self.calib_panel.update_positions(vals)
-
-        # Poll TR-MOKE delay readback when TR-MOKE is active
-        self.traj_panel.tr_refresh()
+        if "positions" in res:
+            self.calib_panel.update_positions(res["positions"])
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
+    def _initial_hw_read(self):
+        """Read all hardware panels once on startup (fired 300 ms after __init__)."""
+        self.traj_panel.hw.refresh()
+        self.sl_panel.hw.refresh()
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         if not self._split_initialised and self.height() > 100:
