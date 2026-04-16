@@ -101,13 +101,32 @@ INSTALL_CMD="
 
     conda activate '${CONDA_ENV}'
 
-    # pytango is best installed from conda-forge
-    echo '     Installing pytango from conda-forge...'
-    conda install -y -q -c conda-forge pytango 2>&1 | tail -2 || true
+    # Install all packages via pip
+    FAILED_PKGS=()
+    for entry in PyQt6:PyQt6 numpy:numpy matplotlib:matplotlib h5py:h5py pytango:tango; do
+        pip_name=\${entry%%:*}
+        import_name=\${entry##*:}
+        if python -c \"import \$import_name\" 2>/dev/null; then
+            ver=\$(python -c \"import \$import_name; print(getattr(\$import_name, '__version__', 'ok'))\" 2>/dev/null || echo ok)
+            echo \"     \033[0;32m✓\033[0m  \$pip_name  (\$ver)\"
+        else
+            echo \"     Installing \$pip_name ...\"
+            if python -m pip install \"\$pip_name\" -q; then
+                echo \"     \033[0;32m✓\033[0m  \$pip_name  installed\"
+            else
+                echo \"     \033[1;33m!\033[0m  \$pip_name  pip install failed\"
+                FAILED_PKGS+=(\"\$pip_name\")
+            fi
+        fi
+    done
 
-    # Remaining packages via pip
-    echo '     Installing numpy, matplotlib, h5py, PyQt6...'
-    pip install -q numpy matplotlib h5py PyQt6
+    if [ \${#FAILED_PKGS[@]} -gt 0 ]; then
+        echo \"\"
+        echo \"     \033[1;33m!\033[0m  Could not install: \${FAILED_PKGS[*]}\"
+        if [[ \" \${FAILED_PKGS[*]} \" == *\" pytango \"* ]]; then
+            echo \"     \033[1;33m!\033[0m  Try:  conda install -c conda-forge pytango\"
+        fi
+    fi
 "
 
 if [ -n "$SUDO_USER" ]; then
