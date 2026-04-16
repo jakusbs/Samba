@@ -265,3 +265,90 @@ Entirely delegated to the PyHysteresis Beckhoff device:
 - Data written per-point as it arrives
 - NXdata format for PyMca compatibility
 - Metadata attributes include all config fields, lock-in settling time, timestamps
+
+---
+
+## 6. ZI / ZI2 Tango Device Servers
+
+**Files:** `Samba_main/tango_devices/ZurichInstruments_lockin/ZI.py`, `ZI2.py`, `ThreadZI_DAQ.py`, `ThreadZI2_DAQ.py`
+
+### Purpose
+
+TANGO device servers wrapping Zurich Instruments MFLI lock-in amplifiers. Each server manages 4 demodulators (channels 1–4), providing averaged X/Y output via a poll-and-average approach.
+
+### ZI vs ZI2
+
+| Aspect | ZI (Green) | ZI2 (IR) |
+|--------|-----------|----------|
+| Serial | dev4855 | dev30933 |
+| Default host | 192.168.1.62 | 192.168.1.144 |
+| Demod 4 harmonic | 4 | 1 (changed 04.05.2024) |
+| Thread class | ThreadZI | ThreadZI2 |
+| Integration logic | Identical | Identical |
+
+### Key attributes
+
+**Read-only (per demodulator):**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `x1`–`x4` | DevDouble | Averaged X component (µV, ×√2) |
+| `y1`–`y4` | DevDouble | Averaged Y component (µV, ×√2) |
+| `timeconstant` | DevDouble | Current low-pass filter TC (seconds) |
+| `filterorder` | DevLong | Filter order (1–8) |
+| `settlingtime` | DevDouble | 99% settling = settle_99[order] × TC |
+| `phase1`–`phase4` | DevDouble | Demodulator phase shift |
+| `frequency` | DevDouble | Oscillator frequency |
+| `samplingrate` | DevDouble | Demodulator sampling rate |
+
+**Read-write:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `integrationtime` | DevDouble | Collection duration (seconds, written by Samba) |
+| `Amplitude` | DevDouble | Signal output amplitude |
+
+### Settling time computation
+
+The `settlingtime` attribute is computed on-device from the low-pass filter parameters:
+
+```python
+_SETTLE_99 = {
+    1: 4.6,   2: 6.6,   3: 8.4,   4: 10.0,
+    5: 11.6,  6: 13.1,  7: 14.6,  8: 16.0
+}
+settlingtime = _SETTLE_99[filterorder] * timeconstant
+```
+
+These are the factors for 99% settling of a Butterworth filter cascade. Example: order=6, TC=0.1 s → settling = 1.31 s. Samba reads this value at scan start and sleeps for it before each trigger (see §5, phase 3).
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `Start` | Begin integration: spawns poll thread, sets state → RUNNING |
+| `SetIntegTime(float)` | Alternative way to set integration time |
+
+### Poll-and-average mechanism (`ThreadZI_DAQ` / `ThreadZI2_DAQ`)
+
+When `Start()` is called:
+
+1. Thread reads stored `integrationtime` value
+2. **Flush** — polls DAQ for ~100 ms to discard stale buffered samples
+3. **Collect** — polls DAQ for exactly `integrationtime` seconds, accumulating samples
+4. **Average** — `value = np.mean(samples) * 1e6 * sqrt(2)` (converts to µV RMS)
+5. Writes averaged values to `x1`–`x4`, `y1`–`y4` output attributes
+6. Sets device state → ON
+
+The `poll()` call returns whatever samples the MFLI has buffered since the last poll. The numpy averaging ensures noise reduction proportional to √N. The `× 1e6 × √2` scaling converts from V peak to µV RMS.
+
+### State machine
+
+```
+INIT → ON (idle, ready for trigger)
+     → RUNNING (integration in progress, thread collecting samples)
+     → ON (integration complete, results in x1–x4/y1–y4)
+     → FAULT (connection lost to MFLI)
+```
+
+The scan engine's two-phase polling (§5) relies on this: Phase A waits for ON→RUNNING, Phase B waits for RUNNING→ON.
