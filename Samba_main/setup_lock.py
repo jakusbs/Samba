@@ -36,10 +36,11 @@ except ImportError:
 LOCK_DEVICE = "hpp-N42/samba/lock"       # adjust to match your TANGO DB
 
 # Map setup name → attribute names on the Pogo device
+# NOTE: Tango attribute names are the Python method names (lowercase).
 _ATTR_MAP = {
-    "Green": ("GreenBusy", "GreenInfo"),
-    "IR":    ("IrBusy",    "IrInfo"),
-    "Cryo":  ("CryoBusy",  "CryoInfo"),
+    "Green": ("greenbusy", "greeninfo"),
+    "IR":    ("irbusy",    "irinfo"),
+    "Cryo":  ("cryobusy",  "cryoinfo"),
 }
 
 
