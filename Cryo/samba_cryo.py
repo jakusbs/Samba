@@ -623,11 +623,12 @@ class CryoMainWindow(QMainWindow):
         self._update_estimate()
 
     def _update_estimate(self):
-        """Show a rough pre-scan time estimate in status_lbl when idle."""
+        """Show a breakdown pre-scan time estimate in status_lbl when idle."""
         if self._scan_running:
             return
         try:
-            cfg  = self._build_full_config()
+            cfg   = self._build_full_config()
+            setup = self._active_setup()
             mode, n_x, n_y = self._scan_dims(cfg)
 
             def _fmt(s):
@@ -635,14 +636,42 @@ class CryoMainWindow(QMainWindow):
                 if s < 3600: return f"{s/60:.1f} min"
                 return       f"{s/3600:.1f} h"
 
-            n_pts  = n_x * n_y
-            int_t  = float(cfg.get("integration_time", 0.1))
-            settle = float(cfg.get("settle_time", 0.05))
-            total  = n_pts * (int_t + settle)
-            pts    = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
-            suffix = "" if mode == "TIME" else ", excl. moves"
+            n_pts   = n_x * n_y
+            int_t   = float(cfg.get("integration_time", 0.1))
+            settle  = float(cfg.get("settle_time", 0.05))
+            if mode == "FIELD":
+                settle = max(settle, 0.05)
+            elif mode == "TIME":
+                settle = 0.0
+
+            # Try to read ZI filter settling from the device (cached proxy, fast)
+            zi_settle = 0.0
+            zi_path   = setup.get("zi_device", "")
+            zi_s_attr = setup.get("zi_settling_attr", "settlingtime")
+            if zi_path and zi_s_attr:
+                try:
+                    dp = get_proxy(zi_path)
+                    if dp:
+                        dp.set_timeout_millis(500)
+                        val = dp.read_attribute(zi_s_attr).value
+                        if val is not None:
+                            zi_settle = float(val)
+                except Exception:
+                    pass
+
+            time_per_pt = settle + zi_settle + int_t
+            total = n_pts * time_per_pt
+            pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
+
+            parts = []
+            if settle    > 0: parts.append(f"{settle:.3g}s settle")
+            if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
+            parts.append(f"{int_t:.3g}s integ")
+            breakdown = " + ".join(parts)
+            move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
+
             self.status_lbl.setText(
-                f"≈ {_fmt(total)}  ({pts} pts × {int_t + settle:.3g} s/pt{suffix})")
+                f"≈ {_fmt(total)}  ({pts} pts × [{breakdown}]{move_note})")
             self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
         except Exception:
             pass
