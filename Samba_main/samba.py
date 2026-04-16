@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QProgressBar, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
     QComboBox, QLineEdit, QPushButton, QFileDialog, QButtonGroup, QFrame, QStyle
 )
-from PyQt6.QtCore import QTimer, QSettings, Qt
+from PyQt6.QtCore import QTimer, QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QShortcut, QKeySequence, QTextCharFormat, QColor, QTextCursor, QIcon
 
 try:
