@@ -352,3 +352,159 @@ INIT → ON (idle, ready for trigger)
 ```
 
 The scan engine's two-phase polling (§5) relies on this: Phase A waits for ON→RUNNING, Phase B waits for RUNNING→ON.
+
+---
+
+## 7. Setup Lock
+
+**Server:** `Samba_main/tango_devices/SetupLock/SetupLock.py`
+**Client:** `Samba_main/setup_lock.py`, `Cryo/setup_lock.py`
+**TANGO path:** `hpp-N42/samba/lock`
+
+### Purpose
+
+Prevents two computers from running scans on the same physical setup simultaneously. Three independent locks: Green, IR, Cryo.
+
+### Server-side attributes
+
+| Attribute | Type | Access | Description |
+|-----------|------|--------|-------------|
+| `greenbusy` | DevBoolean | RW | True while Green is scanning |
+| `greeninfo` | DevString | RW | Stamp: "hostname:pid @ HH:MM:SS" |
+| `irbusy` | DevBoolean | RW | True while IR is scanning |
+| `irinfo` | DevString | RW | Stamp |
+| `cryobusy` | DevBoolean | RW | True while Cryo is scanning |
+| `cryoinfo` | DevString | RW | Stamp |
+
+**Auto-clear:** Writing `busy = False` automatically clears the corresponding info string:
+
+```python
+@greenbusy.write
+def greenbusy(self, value):
+    self._green_busy = bool(value)
+    if not value:
+        self._green_info = ''   # auto-clear
+```
+
+**Server state:** `RUNNING` if any setup is busy, `ON` otherwise (via `always_executed_hook`).
+
+### Client-side protocol (optimistic locking)
+
+**`acquire_lock(setup_name)`** → `(bool, str)`:
+
+1. Connect to lock device (1 s timeout)
+2. Read `busy` attribute — if already True, return `(False, info)` (someone else has it)
+3. Write info stamp: `"hostname:pid @ HH:MM:SS"`
+4. Write `busy = True`
+5. Sleep 50 ms (race window)
+6. Re-read info — if stamp differs, another client won the race → release and return `(False, actual_info)`
+7. Return `(True, "")`
+
+**`release_lock(setup_name)`**: Write `busy = False`, `info = ""`. Silently ignores errors.
+
+**`check_lock(setup_name)`** → `(bool, str)`: Read-only check without acquiring.
+
+### Fail-open design
+
+If the lock server is unreachable (network down, server not running, pytango not installed), all functions silently succeed. This ensures Samba always works even without the lock infrastructure. Failures are logged at WARNING level.
+
+### Integration in samba.py / samba_cryo.py
+
+```python
+# Before scan start (_start_scan):
+ok, who = acquire_lock(self._active_setup_name)
+if not ok:
+    QMessageBox.warning(self, "Setup busy",
+        f"Setup '{self._active_setup_name}' is already in use:\n{who}")
+    return
+
+# After scan completes (_on_worker_finished):
+release_lock(self._active_setup_name)
+```
+
+---
+
+## 8. Device Registry & Sensor Flow
+
+**File:** `core/device_registry.py`
+**Persistence:** `~/.config/moke_scan/device_registry.json`
+
+### Device entry structure
+
+```python
+{
+    "name":            "ZI2",                          # Friendly display name
+    "tango_path":      "hpp-N42/measure/ZI2",          # Full TANGO device path
+    "type":            "lockin",                        # Category (see below)
+    "trigger_cmd":     "Start",                         # Command to trigger read
+    "integ_time_attr": "integrationtime",               # Integration time attribute
+    "settling_attr":   "settlingtime",                  # Lock-in settling attribute
+    "channels": [
+        {"attr": "x1", "label": "ZI2 x1", "unit": "µV"},
+        {"attr": "y1", "label": "ZI2 y1", "unit": "µV"},
+        # ...
+    ]
+}
+```
+
+**Device types:** `lockin`, `beckhoff_avg`, `beckhoff_adc`, `magnet`, `hysteresis`, `stage`, `delay`, `cryostat`, `other`
+
+### Sensor flow: registry → picker → scan engine
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
+│ Device Registry  │────▶│ SensorPickerRow  │────▶│ Scan Config │
+│ (device_registry │     │ (sensor_picker.py)│     │ (JSON file) │
+│  .json)          │     │                  │     │             │
+│                  │     │ dev_combo ────┐  │     │ sensors: [  │
+│ name ───────────▶│     │ ch_combo  ───┐│  │     │   {label,   │
+│ channels[] ─────▶│     │ axis_combo─┐ ││  │     │    device,  │
+│ trigger_cmd ────▶│     │ checkbox ┐ │ ││  │     │    attr,    │
+│ integ_time_attr ▶│     │          ▼ ▼ ▼▼  │     │    ...}     │
+│ settling_attr ──▶│     │  .get() ─────────▶────▶│ ]           │
+└─────────────────┘     └──────────────────┘     └──────┬──────┘
+                                                        │
+                                                        ▼
+                                                 ┌─────────────┐
+                                                 │ ScanRunner   │
+                                                 │ (runner.py)  │
+                                                 │              │
+                                                 │ Groups by    │
+                                                 │ device path  │
+                                                 │ Triggers     │
+                                                 │ Reads attrs  │
+                                                 └─────────────┘
+```
+
+### SensorPickerRow.get() output
+
+The `get()` method returns a dict that serves **both** the scan engine and config persistence:
+
+```python
+{
+    # Scan engine fields
+    "label":           "ZI2 x1",
+    "device":          "hpp-N42/measure/ZI2",    # TANGO path
+    "attribute":       "x1",
+    "unit":            "µV",
+    "enabled":         True,
+    "y_axis":          "Y1",                     # Y1, Y2
+    "plot_visible":    True,                     # False if axis == "hidden"
+    "trigger_cmd":     "Start",                  # From device registry
+    "integ_time_attr": "integrationtime",        # From device registry
+    "settling_attr":   "settlingtime",           # From device registry
+
+    # Config persistence keys (used to restore dropdowns on load)
+    "device_name":     "ZI2",                    # Registry device name
+    "channel_attr":    "x1",                     # Registry channel attr
+}
+```
+
+The `device_name` and `channel_attr` fields enable reliable config restoration — the picker can re-select the correct dropdowns even if TANGO paths change.
+
+### Registry editor UI (`DeviceRegistryPanel`)
+
+Left panel: device list with Add/Duplicate/Delete buttons.
+Right panel: property editor (name, path, type, trigger_cmd, integ_time_attr, settling_attr) + scrollable channel list (attr, label, unit per row).
+
+Signal `registry_changed` propagates updates to: SensorPickerRow, SetupDefaultsPanel, trajectory monitor combo.
