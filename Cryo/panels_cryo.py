@@ -278,16 +278,16 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, lambda: set_err(self.zi_status, conn_err))
+                QTimer.singleShot(0, self, lambda: set_err(self.zi_status, conn_err))
                 return
             tc,   e1 = safe_read(p, tc_attr)
             ord_, e2 = safe_read(p, ord_attr)
             st,   e3 = safe_read(p, st_attr)
             errs = [e for e in [e1, e2, e3] if e]
             if errs:
-                QTimer.singleShot(0, lambda: set_err(self.zi_status, errs[0][:60]))
+                QTimer.singleShot(0, self, lambda: set_err(self.zi_status, errs[0][:60]))
                 return
-            QTimer.singleShot(0, lambda: self._apply_lockin_readback(tc, ord_, st))
+            QTimer.singleShot(0, self, lambda: self._apply_lockin_readback(tc, ord_, st))
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -335,7 +335,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         def _do():
             p, err = fresh_proxy(dev)
             if err:
-                QTimer.singleShot(0, lambda: (
+                QTimer.singleShot(0, self, lambda: (
                     self._update_dev_labels(),
                     set_err(self.ad_status, err),
                 ))
@@ -351,7 +351,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
                     if val is not None:
                         toggles[k] = bool(val)
             first_err = e1 or e2 or None
-            QTimer.singleShot(0, lambda: self._apply_attodry_readback(
+            QTimer.singleShot(0, self, lambda: self._apply_attodry_readback(
                 fld, tmp, vti, mgt, toggles, first_err))
 
         threading.Thread(target=_do, daemon=True).start()

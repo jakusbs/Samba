@@ -676,7 +676,7 @@ class CryoMainWindow(QMainWindow):
                 val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
                 if val is not None:
                     zi = float(val)
-                    QTimer.singleShot(0, lambda: _show(zi))
+                    QTimer.singleShot(0, self, lambda: _show(zi))
             except Exception:
                 pass
 

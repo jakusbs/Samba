@@ -202,16 +202,16 @@ class HardwarePanel(QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, lambda: self._set_err(self.zi_status, conn_err))
+                QTimer.singleShot(0, self, lambda: self._set_err(self.zi_status, conn_err))
                 return
             tc,   e1 = safe_read(p, tc_attr)
             ord_, e2 = safe_read(p, ord_attr)
             st,   e3 = safe_read(p, st_attr)
             errs = [e for e in [e1, e2, e3] if e]
             if errs:
-                QTimer.singleShot(0, lambda: self._set_err(self.zi_status, errs[0][:60]))
+                QTimer.singleShot(0, self, lambda: self._set_err(self.zi_status, errs[0][:60]))
                 return
-            QTimer.singleShot(0, lambda: self._apply_lockin_readback(tc, ord_, st))
+            QTimer.singleShot(0, self, lambda: self._apply_lockin_readback(tc, ord_, st))
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -249,7 +249,7 @@ class HardwarePanel(QGroupBox):
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, lambda: self._set_err(self.ks_status, conn_err))
+                QTimer.singleShot(0, self, lambda: self._set_err(self.ks_status, conn_err))
                 return
             amp, e1 = safe_read(p, "amplitude")
             frq, e2 = safe_read(p, "frequency")
@@ -257,9 +257,9 @@ class HardwarePanel(QGroupBox):
             cur, e4 = safe_read(p, "current")
             errs = [e for e in [e1, e2] if e]
             if errs:
-                QTimer.singleShot(0, lambda: self._set_err(self.ks_status, errs[0][:60]))
+                QTimer.singleShot(0, self, lambda: self._set_err(self.ks_status, errs[0][:60]))
                 return
-            QTimer.singleShot(0, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
+            QTimer.singleShot(0, self, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
 
         threading.Thread(target=_do, daemon=True).start()
 

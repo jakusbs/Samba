@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
                 val, _ = safe_read(dp, zi_s_attr, timeout=0.5)
                 if val is not None:
                     zi = float(val)
-                    QTimer.singleShot(0, lambda: _show(zi))
+                    QTimer.singleShot(0, self, lambda: _show(zi))
             except Exception:
                 pass
 
@@ -1221,7 +1221,7 @@ class MainWindow(QMainWindow):
                             pos[k] = av
                     res["positions"] = pos
 
-                QTimer.singleShot(0, lambda: self._apply_field_poll(res, scan_t))
+                QTimer.singleShot(0, self, lambda: self._apply_field_poll(res, scan_t))
             finally:
                 self._rb_poll_active = False
 

@@ -135,7 +135,7 @@ class KeithleyMixin:
         def _do():
             p, conn_err = fresh_proxy(dev)
             if conn_err:
-                QTimer.singleShot(0, lambda: set_err(self.ks_status, conn_err))
+                QTimer.singleShot(0, self, lambda: set_err(self.ks_status, conn_err))
                 return
             amp, e1 = safe_read(p, amp_a)
             frq, e2 = safe_read(p, frq_a)
@@ -143,9 +143,9 @@ class KeithleyMixin:
             cur, e4 = safe_read(p, cur_a)
             errs = [e for e in [e1, e2] if e]
             if errs:
-                QTimer.singleShot(0, lambda: set_err(self.ks_status, errs[0][:60]))
+                QTimer.singleShot(0, self, lambda: set_err(self.ks_status, errs[0][:60]))
                 return
-            QTimer.singleShot(0, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
+            QTimer.singleShot(0, self, lambda: self._apply_keithley_readback(amp, frq, cpl, cur))
 
         threading.Thread(target=_do, daemon=True).start()
 
