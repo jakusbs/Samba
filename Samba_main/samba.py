@@ -44,13 +44,14 @@ from calibration import CalibrationPanel
 from device_registry import DeviceRegistryPanel, load_registry, registry_to_sensors
 import play_intro
 
+log = logging.getLogger(__name__)
+
 try:
     from setup_lock import acquire_lock, release_lock
-except Exception:
+except Exception as _e:
+    log.warning("setup_lock import failed (%s) — locking disabled", _e)
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
-
-log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

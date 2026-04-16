@@ -20,11 +20,14 @@ Usage in samba.py:
     release_lock("Green")
 """
 
+import logging
 import os
 import socket
 import time as _time
 from datetime import datetime
 from typing import Tuple
+
+log = logging.getLogger(__name__)
 
 try:
     import tango
@@ -47,13 +50,15 @@ _ATTR_MAP = {
 def _get_proxy():
     """Return a DeviceProxy to the lock server, or None if unavailable."""
     if not TANGO_AVAILABLE:
+        log.warning("setup_lock: tango not available")
         return None
     try:
         dp = tango.DeviceProxy(LOCK_DEVICE)
         dp.set_timeout_millis(1000)
         dp.ping()
         return dp
-    except Exception:
+    except Exception as e:
+        log.warning("setup_lock: cannot reach %s (%s) — locking skipped", LOCK_DEVICE, e)
         return None
 
 
@@ -100,8 +105,10 @@ def acquire_lock(setup_name: str) -> Tuple[bool, str]:
                 pass
             return False, actual or "unknown"
 
+        log.info("setup_lock: acquired '%s' as %s", setup_name, stamp)
         return True, ""
-    except Exception:
+    except Exception as e:
+        log.warning("setup_lock: acquire failed for '%s' (%s) — proceeding anyway", setup_name, e)
         return True, ""
 
 
@@ -118,8 +125,9 @@ def release_lock(setup_name: str):
     try:
         dp.write_attribute(busy_attr, False)
         dp.write_attribute(info_attr, "")
-    except Exception:
-        pass
+        log.info("setup_lock: released '%s'", setup_name)
+    except Exception as e:
+        log.warning("setup_lock: release failed for '%s' (%s)", setup_name, e)
 
 
 def check_lock(setup_name: str) -> Tuple[bool, str]:
