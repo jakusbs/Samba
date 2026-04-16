@@ -648,3 +648,272 @@ Signal `defaults_changed` triggers immediate save to disk.
 6. **Registry-driven UI** — Device/channel definitions in one place; UI combos auto-populate from registry
 7. **Schema migration** — Versioned config chain ensures old configs load correctly after feature additions
 8. **Catppuccin Mocha theme** — Consistent dark UI across all panels using the Catppuccin color palette
+9. **Custom over Sardana** — Deliberate decision to build a custom scan engine rather than use the Sardana synchrotron framework, because the hardware is simpler and a lightweight custom solution is easier to maintain
+10. **TR-MOKE as SPATIAL** — TR-MOKE scans are converted to SPATIAL by samba.py before passing to ScanRunner — the DG645 delay attribute becomes the actuator — requiring zero changes to the scan engine
+
+---
+
+## 13. DG645 Delay Generator & TR-MOKE
+
+**Device server:** `Samba_main/tango_devices/DG645/` (separate repo)
+**TANGO path:** `intermag/dg645/1`
+
+### DG645 device server
+
+Thread-safe TANGO wrapper around the Stanford DG645 via TCP socket with auto-reconnect.
+
+**Channels:** 8 delay channels (A–H), each with a delay value and reference channel.
+**Outputs:** 5 outputs (T0, AB, CD, EF, GH) with amplitude, offset, and polarity.
+**Trigger:** 7 trigger modes (Internal, Ext Rising, Ext Falling, SS Ext Rising, SS Ext Falling, Single Shot, Line).
+**Burst mode:** N bursts with configurable period and delay count.
+**Persistence:** 9 settings store/recall slots. Raw `SendCommand`/`SendQuery` for arbitrary SCPI.
+
+### TR-MOKE scan conversion trick
+
+TR-MOKE scans are **not** a separate scan engine mode. Instead, `samba.py` converts them to SPATIAL scans before passing to `ScanRunner`:
+
+1. The DG645 delay channel attribute (e.g., `delay_A`) becomes `act1_attr`
+2. The DG645 device path becomes `act1_device`
+3. Scan range (start/stop delay in seconds) → `act1_start` / `act1_stop`
+4. `scan_type` is set to `SPATIAL`
+
+The only TR-MOKE-specific logic in `samba.py` is the X-axis unit conversion in `_on_point`: seconds → ns/ps/µs for display.
+
+### TR-MOKE UI
+
+Front-panel-style widget in the trajectory panel:
+- Clickable channel buttons (A–H, blue highlight) for selecting delay channel
+- Large monospace delay readback display
+- Output buttons (T0/AB/CD/EF/GH, gold highlight) with amplitude/offset/polarity
+- Prescaler, f_mod display, burst mode controls
+- Keithley section hidden when TR-MOKE is active
+
+---
+
+## 14. Cryo Architecture
+
+**Entry point:** `Cryo/samba_cryo.py` → `CryoMainWindow`
+
+### CryoMainWindow vs MainWindow
+
+`CryoMainWindow` is **not** a subclass of `MainWindow`. It is an independent implementation that shares modules from `core/` but has its own UI layout, hardware panel, and config structure. Key differences:
+
+| Aspect | Samba_main | Cryo |
+|--------|-----------|------|
+| Setups | Green, IR (tab-switching) | Cryo only (no tabs) |
+| Magnet | Beckhoff (room-temp coils) | AttoDRY (superconducting, ±9 T) |
+| Temperature | N/A | AttoDRY (0–400 K) |
+| Demagnetization | Auto after field scan | Disabled (superconducting) |
+| Config panel | QTabWidget (multi-setup) | QListWidget (single setup) |
+| Relay | Optical relay switching | N/A |
+| Accent color | Catppuccin Mocha palette | #0080FE blue branding |
+| QSettings key | "Samba" | "SambaCryo" |
+
+### Hardware panel injection
+
+`TrajectoryPanel` and `ScanlistPanel` accept a `hw_panel_class` parameter (default `HardwarePanel`). `CryoMainWindow` passes `CryoHardwarePanel` instead. This replaced the earlier fragile `_replace_hw_panel()` approach.
+
+### CryoHardwarePanel layout
+
+**Left column** — Keithley 6221 controls via `KeithleyMixin`:
+- Amplitude, frequency, range, compliance spin boxes
+- `_make_spin()` factory for consistent styling
+- `set_ok` / `set_err` / `set_sim` status helpers
+
+**Right column** — AttoDRY cryostat controls:
+- Field setpoint (±9 T), temperature setpoint (0–400 K)
+- VTI and magnet temperature readbacks
+- Toggle buttons: Magnetic Field Control, Temperature Control, Persistent Mode
+- Monitor button → opens `CryoMonitorDialog`
+
+### ReadbackWorker
+
+QThread replacing GUI-thread polling for hardware readback:
+- Emits signals: `attodry_readback`, `fallback_field`, `ac_monitor`, `stage_positions`
+- GUI updates via 400 ms QTimer that reads latest values from the worker
+- Cleanly stopped in `closeEvent()`
+
+### CryoMonitorDialog
+
+Rolling live plots for cryostat monitoring:
+- 3 columns × 3 rows = 9 subplots
+- **Temperatures:** Sample, VTI, Magnet, Reservoir
+- **Pressures:** CryostatIn, CryostatOut
+- **Heater powers:** Sample, VTI, Reservoir
+- 60-second rolling window, 500 ms poll interval
+- Uses `Line2D.set_data()` for incremental rendering (no redraw from scratch)
+- `WA_DeleteOnClose = False` — dialog is hidden, not destroyed
+
+### Temperature Sweep mode
+
+Uses the FIELD scan engine with `act1_device` set to the AttoDRY and `act1_attr` set to the temperature setpoint attribute. After writing the setpoint, waits for settle (60–300 s) before reading sensors. Parameters: device, attribute, start/stop (K), N points, settle time.
+
+### KeithleyMixin
+
+Shared between `HardwarePanel` (Samba_main) and `CryoHardwarePanel` (Cryo):
+- `build_keithley_group(owner)` — creates the QGroupBox with spin boxes
+- `_read_keithley` / `_write_range` / `_write_amplitude` / `_write_compliance` / `_write_frequency`
+- `_make_spin()` factory for NoScrollDoubleSpinBox with consistent range/decimals
+
+### Cryo config specifics
+
+- Atomic save: writes to `.json.tmp` → `os.fsync()` → `os.replace()` (crash-safe)
+- `_sanitize()`: converts numpy/Qt types to JSON-safe Python types before serialization
+- No demagnetization: alternating-decay demagnetization is not applicable to superconducting magnets
+
+### Cryo import order
+
+```
+config ← hardware ← scan
+config + hardware ← panels ← keithley_mixin ← panels_cryo + cryo_monitor
+all ← samba_cryo
+```
+
+---
+
+## 15. Extended Hardware Map
+
+### Cryo stages (Attocube positioners)
+
+| Device | TANGO Path | Attributes | Purpose |
+|--------|-----------|------------|---------|
+| ANM200 piezo scanner | `hpp-N42/attocube/ANM200` | x, y, z, scaling | Fine positioning (nm) |
+| ANC300 stepper | `hpp-N42/attocube/ANC300` | fx/fy/fz, Vx/Vy/Vz, px/py/pz | Coarse positioning (steps) |
+
+### Additional Beckhoff devices
+
+| Device | TANGO Path | Purpose |
+|--------|-----------|---------|
+| PyHysteresis (polar) | `hpp-N42/beckhoff/pyhystpolar` | DC hyst, polar magnet |
+| PyHysteresis (longi) | `hpp-N42/beckhoff/pyhystlongi` | DC hyst, longitudinal magnet |
+| DoubleOutBeckhoff | `hpp-N42/beckhoff/analogOut` | Magnet coil current write |
+
+### Magnet field readback attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `current_polar` | Coil current for polar geometry |
+| `current_longitudinal` | Coil current for longitudinal geometry |
+| `field_polar_corr` | Corrected field (polar), mT |
+| `field_longitudinal_corr` | Corrected field (longitudinal), mT |
+
+### AttoDRY commands
+
+| Command | Description |
+|---------|-------------|
+| `toggleMagneticFieldControl` | Enable/disable superconducting magnet PID |
+| `toggleFulltemperatureControl` | Enable/disable temperature PID |
+| `togglePersistentMode` | Enable/disable persistent mode (traps field in magnet) |
+
+### Beckhoff trigger_cmd origin
+
+The `trigger_cmd` pattern was discovered through `DoubleInBeckhoffAverage`: this device requires `Start()` → wait for `RUNNING→ON` → read `Value`. This handshake became the standard sensor trigger protocol used by all triggered devices (ZI, ZI2, BeckhoffAverage).
+
+### AdsBridge architecture
+
+The Beckhoff devices sit behind a two-layer bridge:
+1. **AdsBridge** — TCP/ADS gateway translating TANGO commands into TwinCAT ADS protocol
+2. **DoubleInBeckhoff / DoubleOutBeckhoff** — thin TANGO wrappers exposing individual PLC variables as attributes
+
+SAMBA replaced the original C++ ScanServer from tango-controls.org with a Python-based scan engine.
+
+---
+
+## 16. UI Patterns & Conventions
+
+### Scan naming (`MokeMetadataGroup.build_scan_name`)
+
+Auto-generated scan filenames follow:
+```
+YYYYMMDD_SampleName_AmplitudemA_FreqHz_Config_Incidence_MirrorShift_Notes_noDC_lam2
+```
+Auto-updates when any metadata field changes.
+
+### NoScroll widgets
+
+`NoScrollComboBox`, `NoScrollSpinBox`, `NoScrollDoubleSpinBox` override `wheelEvent()` to prevent accidental value changes while scrolling the panel. Defined in `panels/_widgets.py`.
+
+### Button icons (`_scan_btn` helper)
+
+Uses `QIcon.fromTheme()` with freedesktop icon names and ASCII fallback text. Per-button `:disabled` styling for grayed-out state.
+
+### CSS scoping
+
+Action bar CSS uses `objectName` scoping (`#action_bar`) to prevent style cascade to child widgets. Early bug: `setStyleSheet("QWidget{...}")` cascaded to children.
+
+### Catppuccin Mocha palette
+
+| Color | Hex | Usage |
+|-------|-----|-------|
+| Green | `#a6e3a1` | Start button, success states |
+| Peach | `#fab387` | Pause button, warnings |
+| Red | `#f38ba8` | Abort button, errors, delete buttons |
+| Blue | `#89b4fa` | Info text, Y1 axis color |
+| Mauve | `#cba6f7` | Y2 axis color |
+| Surface 0 | `#313244` | Widget backgrounds |
+| Surface 1 | `#45475a` | Borders, hover states |
+| Text | `#cdd6f4` | Primary text |
+| Subtext 0 | `#a6adc8` | Secondary text |
+| Base | `#1e1e2e` | Window background |
+| Mantle | `#181825` | Sidebar/panel background |
+
+### PyQt5 → PyQt6 migration notes
+
+- `QAction` moved from `QtWidgets` to `QtGui`
+- `exec_()` → `exec()`
+- Enum-style flags (e.g., `Qt.AlignLeft` → `Qt.AlignmentFlag.AlignLeft`)
+- Matplotlib backend: `Qt5Agg` → `QtAgg`
+- `NavigationToolbar2QT` SIP TypeError fix: pass `None` as parent, then `addToolBar()` reparents
+
+---
+
+## 17. Known Issues & Future Work
+
+### Known issues
+
+- **Zigzag scan asymmetry** — 2D scans with zigzag show signal asymmetry due to piezo hysteresis. Workaround: increase settle time or disable zigzag.
+- **ZI averaging is suboptimal** — The ZI device servers use `poll()` + numpy averaging (a digitizer pattern) instead of the MFLI's native hardware low-pass filter. The recommended alternative is `getSample()` with proper settling, which would give hardware-filtered results with lower noise.
+- **Sequential sensor reads** — Sensors are read via individual TANGO RPCs with ms-scale gaps between devices. Not truly synchronized. Fine for slow scans, but introduces skew for fast ones.
+- **TR-MOKE HDF5 x-axis** — Stores raw seconds, not the display unit (ns/ps). Post-processing must apply the conversion.
+- **File versioning** — Stale project snapshot files may exist from earlier development.
+
+### Planned future work
+
+- **ZI hardware filtering** — Switch from poll-and-average to `getSample()` with settling for proper hardware-filtered lock-in output
+- **Auto-focus before scanlist** — Run autofocus automatically before each scan in a scanlist
+- **Scan history overlay** — Overlay previous scan data in the data browser for comparison
+
+---
+
+## 18. Installation & Running
+
+### Requirements
+
+```
+pip install pytango PyQt6 matplotlib h5py numpy
+```
+
+For pytango, if pip fails, fall back to:
+```
+conda install -c conda-forge pytango
+```
+
+### Environment
+
+```bash
+export TANGO_HOST=192.168.1.1:10000
+```
+
+### Running
+
+```bash
+# Samba_main (Green + IR)
+cd Samba_main && python samba.py
+
+# Cryo
+cd Cryo && python samba_cryo.py
+```
+
+### Simulation mode
+
+If `pytango` is not installed, Samba falls back to `SimProxy` (defined in `core/hardware.py`) which returns dummy values. All Tango operations are wrapped in try/except with graceful degradation. This allows UI development without access to the lab hardware.
