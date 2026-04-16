@@ -577,10 +577,11 @@ class MainWindow(QMainWindow):
 
             if mode == "DC_HYST":
                 int_t  = float(cfg.get("hyst_int_time", 2.0))
+                npts   = int(cfg.get("hyst_npts", 100))
                 cycles = int(cfg.get("hyst_cycles", 1))
                 total  = int_t * 2 * cycles
                 self.status_lbl.setText(
-                    f"≈ {_fmt(total)}  ({n_x // 2} pts/half-loop × {cycles} cycle(s))")
+                    f"≈ {_fmt(total)}  (2 × {int_t:.3g}s/half-loop × {cycles} cycle(s), {npts} pts/half)")
                 return
 
             n_pts   = n_x * n_y
