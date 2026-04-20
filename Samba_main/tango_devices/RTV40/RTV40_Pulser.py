@@ -65,8 +65,8 @@ class RTV40(Device):
         dtype=int, default_value=115200,
         doc="Serial baud rate. RTV40 uses 115200.")
     Timeout = device_property(
-        dtype=float, default_value=2.0,
-        doc="Serial read timeout in seconds.")
+        dtype=float, default_value=1.0,
+        doc="Serial readline timeout in seconds. Keep well below the TANGO client timeout (3 s).")
     LineTerminator = device_property(
         dtype=str, default_value="\r",
         doc="Command line terminator sent to device (always \\r for RTV40).")
@@ -200,23 +200,16 @@ class RTV40(Device):
         self._serial = None
 
     def _send(self, cmd: str) -> str:
-        """Send cmd + terminator, read response lines until 'ok' is found."""
+        """Send cmd + CR, read the single response line (device replies with CR+LF)."""
         with self._lock:
             if not self._serial or not self._serial.is_open:
                 raise RuntimeError("Serial port not open")
             raw = (cmd + self.LineTerminator).encode("ascii")
             self._serial.reset_input_buffer()
             self._serial.write(raw)
-            # Collect lines until we see one ending with 'ok'
-            lines = []
-            deadline = time.time() + self.Timeout
-            while time.time() < deadline:
-                line = self._serial.readline().decode("ascii", errors="replace").strip()
-                if line:
-                    lines.append(line)
-                if line.endswith("ok"):
-                    break
-            return " ".join(lines)
+            self._serial.flush()
+            resp = self._serial.readline()
+            return resp.decode("ascii", errors="replace").strip()
 
     def _send_no_response(self, cmd: str):
         """Send cmd and wait for 'ok' acknowledgement (discarded)."""
