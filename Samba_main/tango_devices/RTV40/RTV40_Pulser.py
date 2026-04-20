@@ -189,6 +189,8 @@ class RTV40(Device):
             rtscts=False,
             timeout=self.Timeout,
         )
+        self._serial.reset_input_buffer()
+        self._serial.reset_output_buffer()
         time.sleep(0.1)
 
     def _close_serial(self):
@@ -230,9 +232,11 @@ class RTV40(Device):
         """Open the serial port. Sending any character triggers remote mode."""
         try:
             self._open_serial()
-            # Any character activates remote mode and elicits the banner
+            # Any character activates remote mode and elicits the banner.
+            # Sleep 1 s to let the full banner arrive, then discard it.
             self._serial.write(b"\r")
-            time.sleep(0.3)
+            self._serial.flush()
+            time.sleep(1.0)
             self._serial.reset_input_buffer()
             self.set_state(DevState.ON)
             self.set_status(f"Connected on {self.SerialPort} at {self.BaudRate} baud")
@@ -282,8 +286,8 @@ class RTV40(Device):
             resp = self._send(self.CmdGetAmplitude)
             raw = int(self._parse_response(resp))   # 0.1 V units
             self._amplitude = raw / 10.0
-        except Exception:
-            pass
+        except Exception as e:
+            self.warn_stream(f"read_Amplitude failed: {e!r}")
         return self._amplitude
 
     def write_Amplitude(self, val: float):
@@ -297,8 +301,8 @@ class RTV40(Device):
             resp = self._send(self.CmdGetWidth)
             raw = int(self._parse_response(resp))   # ps
             self._pulse_width = raw / 1000.0        # ps → ns
-        except Exception:
-            pass
+        except Exception as e:
+            self.warn_stream(f"read_PulseWidth failed: {e!r}")
         return self._pulse_width
 
     def write_PulseWidth(self, val: float):
@@ -311,8 +315,8 @@ class RTV40(Device):
         try:
             resp = self._send(self.CmdGetTrigSource)
             self._trig_source = int(self._parse_response(resp))
-        except Exception:
-            pass
+        except Exception as e:
+            self.warn_stream(f"read_TriggerSource failed: {e!r}")
         return self._trig_source
 
     def write_TriggerSource(self, val: int):
@@ -323,8 +327,8 @@ class RTV40(Device):
         try:
             resp = self._send(self.CmdGetRate)
             self._trig_rate = float(self._parse_response(resp))
-        except Exception:
-            pass
+        except Exception as e:
+            self.warn_stream(f"read_TriggerRate failed: {e!r}")
         return self._trig_rate
 
     def write_TriggerRate(self, val: float):
@@ -337,8 +341,8 @@ class RTV40(Device):
         try:
             resp = self._send(self.CmdGetPolarity)
             self._polarity = int(self._parse_response(resp))
-        except Exception:
-            pass
+        except Exception as e:
+            self.warn_stream(f"read_Polarity failed: {e!r}")
         return self._polarity
 
     def write_Polarity(self, val: int):
