@@ -265,7 +265,7 @@ class RTV40(Device):
         """Send a raw command string (no response read). For testing/debugging."""
         self._send_no_response(cmd)
 
-    @command(dtype_in=str, doc_out=str,
+    @command(dtype_in=str, dtype_out=str,
              doc_in="Raw ASCII query string.",
              doc_out="Response string from device.")
     def SendQuery(self, cmd: str) -> str:
