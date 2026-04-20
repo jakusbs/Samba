@@ -204,7 +204,7 @@ class RTV40(Device):
         with self._lock:
             if not self._serial or not self._serial.is_open:
                 raise RuntimeError("Serial port not open")
-            raw = (cmd + self.LineTerminator).encode("ascii")
+            raw = (cmd + self.LineTerminator).encode()
             self._serial.reset_input_buffer()
             self._serial.write(raw)
             self._serial.flush()
