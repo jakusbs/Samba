@@ -50,6 +50,10 @@ Samba/
 │       │   ├── ZI.py / ZI2.py           # ZI MFLI device servers
 │       │   ├── ThreadZI_DAQ.py / ThreadZI2_DAQ.py  # poll()+numpy threads
 │       │   └── install_ZI_DAQ.sh / install_ZI2_DAQ.sh
+│       ├── RTV40/
+│       │   ├── RTV40_Pulser.py          # Kentech RTV40/RTV30 pulse generator
+│       │   ├── install_RTV40.sh         # pip-installable package installer
+│       │   └── RTV_30_manual.pdf        # Hardware manual
 │       └── SetupLock/
 │           └── SetupLock.py              # Setup lock Tango device server
 │
@@ -107,6 +111,7 @@ in Samba_main and Cryo re-export from `core/scan/`.
 | Relay | `hpp-N42/current/PyRelais` | Optical relay switching |
 | AttoDRY | `hpp-N42/attoDRY/attoDRY` | Cryostat (Cryo only) |
 | Setup Lock | `hpp-N42/samba/lock` | Multi-computer scan mutex |
+| RTV40 | `hpp-N42/pulser/RTV40` | Kentech RTV40/RTV30 pulse generator |
 
 ---
 
@@ -601,6 +606,24 @@ Signal `defaults_changed` triggers immediate save to disk.
 ---
 
 ## 11. Recent Changes (April 2026)
+
+### RTV40 pulse generator TANGO device server
+- Added `Samba_main/tango_devices/RTV40/RTV40_Pulser.py` and `install_RTV40.sh`
+- **Protocol** (from RTV30 manual): PowerForth ASCII, 115200 baud, no flow control
+  - Set: `<value> !<command><CR>` — device replies `<echo> ok<CR><LF>`
+  - Query: `?<command><CR>` — device replies `<value> ok<CR><LF>`
+- **Wire unit conversions**: amplitude in 0.1 V units (10–350), pulse width in ps (300–20000)
+- **Trigger modes**: 0 = Off, 1 = External, 2 = Internal (not binary like original code assumed)
+- **Threading model**: single background poll thread owns all serial reads; TANGO attribute
+  `read_*()` methods return cached values only — no serial I/O on TANGO polls. This prevents
+  command interleaving (`?rate\r?polarity` concatenation) when TANGO polls multiple attributes.
+- Lock (`threading.Lock`) serializes poll thread reads and write method sends — never simultaneous
+- `Connect` command triggers remote mode (sends `\r`, sleeps 1 s, discards banner), starts poll thread
+- `Disconnect` stops poll thread, sends `local`, closes port
+- Added `Local` and `ForceTrigger` commands; removed `OutputEnabled` (no hardware equivalent,
+  use `TriggerSource=0` for off)
+- **DG645 note**: Option 3 rear-panel BNC outputs have fixed TTL levels — amplitude/offset SCPI
+  commands only affect front-panel outputs
 
 ### Setup lock integration
 - Wired `acquire_lock()` / `release_lock()` from `setup_lock.py` into both `samba.py` and `samba_cryo.py`
