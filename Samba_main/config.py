@@ -60,7 +60,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
     },
     "IR": {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
@@ -93,7 +93,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
     },
     "Cryo": {
         "magnet_device":         "",
@@ -126,7 +126,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
     },
 }
 
@@ -189,7 +189,7 @@ def make_default_config(name: str = "scan_x") -> dict:
             {"label": "R6",        "attr": "result6", "enabled": False, "y_axis": "Y2"},
         ],
         # TR-MOKE defaults
-        "trmoke_dg645":     "intermag/dg645/1",
+        "trmoke_dg645":     "hpp-N42/delay/DG645",
         "trmoke_channel":   "A",
         "trmoke_output":    "AB",
         "trmoke_unit":      "ns",
@@ -276,7 +276,7 @@ def _migrate_v0_to_v1(cfg: dict):
 
 def _migrate_v1_to_v2(cfg: dict):
     """v1→v2: Add TR-MOKE defaults."""
-    cfg.setdefault("trmoke_dg645",     "intermag/dg645/1")
+    cfg.setdefault("trmoke_dg645",     "hpp-N42/delay/DG645")
     cfg.setdefault("trmoke_channel",   "A")
     cfg.setdefault("trmoke_output",    "AB")
     cfg.setdefault("trmoke_unit",      "ns")

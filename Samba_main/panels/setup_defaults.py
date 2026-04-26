@@ -422,7 +422,7 @@ class SetupDefaultsPanel(QWidget):
             _set_by_path(self.focus_dev,   setup_data.get("focus_averagein",    ""))
             _set(self.focus_attr,           setup_data.get("focus_attr",         "Value"))
 
-            _set_by_path(self.trmoke_dg645, setup_data.get("trmoke_dg645",     "intermag/dg645/1"))
+            _set_by_path(self.trmoke_dg645, setup_data.get("trmoke_dg645",     "hpp-N42/delay/DG645"))
 
             _set_by_path(self.zi_dev,       setup_data.get("zi_device",        ""))
             _set(self.zi_tc_attr,           setup_data.get("zi_tc_attr",       "timeconstant"))
