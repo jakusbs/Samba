@@ -157,6 +157,7 @@ trmoke_*: TR-MOKE / DG645 parameters
 Configs are versioned with `_schema_version`. On load, `_migrate_config()` runs a chain:
 - **v0→v1:** Canonicalize scan type names, add DC hyst / field segment defaults, normalize sensor fields (add `settling_attr`, `plot_visible`, etc.)
 - **v1→v2:** Add TR-MOKE defaults
+- **v2→v3:** Add RTV40 sync defaults (`rtv40_sync_enabled`, `rtv40_base_width_ns`, `rtv40_trig_src`, `rtv40_trig_rate`, `rtv40_polarity`)
 
 ---
 
@@ -581,6 +582,7 @@ Editable per-setup hardware device paths and attribute names. Each section uses 
 | Lock-in (ZI) | device, tc_attr, order_attr, settling_attr | "lockin" |
 | Focus sensor | device, attr | "sensor", "beckhoff" |
 | TR-MOKE | DG645 device | "dg645" |
+| TR-MOKE | RTV40 device | "pulser" |
 
 ### Registry-driven combos
 
@@ -606,6 +608,39 @@ Signal `defaults_changed` triggers immediate save to disk.
 ---
 
 ## 11. Recent Changes (April 2026)
+
+### RTV40 pulse-width sync for TR-MOKE
+- Added "RTV40 Sync" as a 4th column in the TR-MOKE panel (trajectory.py)
+- **Goal**: keep the END of the RTV40 high-voltage pulse at a fixed time while
+  sweeping the DG645 delay. Formula per scan point:
+  `width_i = base_width − (delay_i − start_delay)`
+  As the DG645 delay increases (pulse start shifts right), the pulse width
+  decreases by the same amount so the end stays fixed.
+- **UI controls**: enable checkbox, device label (from Setup Defaults), tracking
+  label (shows which sweep channel is followed), base-width spinbox + "Read"
+  button, trigger source / rate / polarity dropdowns, "Apply to Device" button
+- **Scan engine** (`core/scan/runner.py`): RTV40 proxy created at scan start;
+  `PulseWidth` written after every DG645 move (clamped to hardware range
+  0.3–20 ns); width reset to `base_width` in the `finally` block (covers
+  normal completion and abort)
+- **Pre-scan checks** (`samba.py`): warns if sweep range would push width
+  outside 0.3–20 ns (clamped); warns if `TriggerSource ≠ External` (both
+  dialogs are Yes/No — user can proceed)
+- **Setup Defaults**: `rtv40_device` key added to `SETUP_HW_DEFAULTS` for
+  Green and IR (defaults to `hpp-N42/pulser/RTV40`); device combo filtered to
+  registry type `"pulser"`
+- **Config schema v3**: added `rtv40_sync_enabled`, `rtv40_base_width_ns`,
+  `rtv40_trig_src`, `rtv40_trig_rate`, `rtv40_polarity` defaults; migration
+  `_migrate_v2_to_v3` backfills old configs
+
+### DG645 device init fix (TR-MOKE)
+- On startup, `load_config()` was overwriting the DG645 device label with a
+  stale value from the scan config JSON (baked in by the v1→v2 migration
+  default), immediately after `set_trmoke_device()` had correctly set it from
+  setup data
+- Fix: removed the `_tr_dev_lbl.setText` block from `load_config()`; the
+  label is now set exclusively by `set_trmoke_device()` which is always called
+  from setup data before `load_config()`
 
 ### RTV40 pulse generator TANGO device server
 - Added `Samba_main/tango_devices/RTV40/RTV40_Pulser.py` and `install_RTV40.sh`
