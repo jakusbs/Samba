@@ -50,7 +50,7 @@ import numpy as np
 import zhinst
 import zhinst.ziPython as ziPython
 import time
-from ThreadZI2_DAQ import *
+from ThreadZI2 import*
 #----- PROTECTED REGION END -----#  //  ZI2.additionnal_import
 
 # Device States Description

@@ -17,7 +17,7 @@ from tango.server import Device, attribute, command, device_property, run
 
 import zhinst.ziPython as ziPython
 
-from ThreadZI2_DAQ import ThreadZI2
+from ThreadZI2 import ThreadZI2
 
 __all__ = ["ZI2", "main"]
 
