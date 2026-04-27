@@ -1525,10 +1525,8 @@ class TrajectoryPanel(QWidget):
         self.dc_int_t.setValue(  cfg.get("hyst_int_time", 2.0))
         self.dc_npts.setValue(   cfg.get("hyst_npts",     100))
         self.dc_cycles.setValue( cfg.get("hyst_cycles",   1))
-        # TR-MOKE params — device path comes from Setup Defaults, shown read-only
-        tr_dev = cfg.get("trmoke_dg645", "")
-        if tr_dev:
-            self._tr_dev_lbl.setText(tr_dev)
+        # TR-MOKE params — device path is set authoritatively by set_trmoke_device()
+        # from setup data; do NOT read it from the scan config here as that value is stale.
         ch = cfg.get("trmoke_channel", "A")
         idx = self._tr_ch.findText(ch)
         if idx >= 0: self._tr_ch.setCurrentIndex(idx)
