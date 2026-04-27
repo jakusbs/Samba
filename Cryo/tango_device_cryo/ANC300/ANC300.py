@@ -200,8 +200,9 @@ class ANC300(Device):
         time.sleep(0.1)
         if steps > 0:
             self.ANC.Write('stepu ' + self.addr_x + ' ' + str(steps))
-        else:
+        elif steps < 0:
             self.ANC.Write('stepd ' + self.addr_x + ' ' + str(abs(steps)))
+        # Only update cache after commands succeeded
         self._px = value
         self._Gx = False
 
@@ -217,7 +218,7 @@ class ANC300(Device):
         time.sleep(0.1)
         if steps > 0:
             self.ANC.Write('stepu ' + self.addr_y + ' ' + str(steps))
-        else:
+        elif steps < 0:
             self.ANC.Write('stepd ' + self.addr_y + ' ' + str(abs(steps)))
         self._py = value
         self._Gy = False
@@ -234,7 +235,7 @@ class ANC300(Device):
         time.sleep(0.1)
         if steps > 0:
             self.ANC.Write('stepu ' + self.addr_z + ' ' + str(steps))
-        else:
+        elif steps < 0:
             self.ANC.Write('stepd ' + self.addr_z + ' ' + str(abs(steps)))
         self._pz = value
         self._Gz = False
@@ -250,10 +251,12 @@ class ANC300(Device):
     def Gx(self, value):
         if value:
             self.ANC.Write('setm ' + self.addr_x + ' gnd')
+        else:
+            self.ANC.Write('setm ' + self.addr_x + ' stp')
         self._Gx = value
 
     @attribute(dtype=bool, access=AttrWriteType.READ_WRITE,
-               doc="Ground state of y axis (write True to ground)")
+               doc="Ground state of y axis (write True to ground, False to return to stepping mode)")
     def Gy(self):
         return self._Gy
 
@@ -261,10 +264,12 @@ class ANC300(Device):
     def Gy(self, value):
         if value:
             self.ANC.Write('setm ' + self.addr_y + ' gnd')
+        else:
+            self.ANC.Write('setm ' + self.addr_y + ' stp')
         self._Gy = value
 
     @attribute(dtype=bool, access=AttrWriteType.READ_WRITE,
-               doc="Ground state of z axis (write True to ground)")
+               doc="Ground state of z axis (write True to ground, False to return to stepping mode)")
     def Gz(self):
         return self._Gz
 
@@ -272,19 +277,32 @@ class ANC300(Device):
     def Gz(self, value):
         if value:
             self.ANC.Write('setm ' + self.addr_z + ' gnd')
+        else:
+            self.ANC.Write('setm ' + self.addr_z + ' stp')
         self._Gz = value
 
     # ---- Commands -------------------------------------------------------
 
     @command()
     def Ground(self):
-        """Ground all three axes."""
-        self.ANC.Write('setm ' + self.addr_x + ' gnd')
-        self._Gx = True
-        self.ANC.Write('setm ' + self.addr_y + ' gnd')
-        self._Gy = True
-        self.ANC.Write('setm ' + self.addr_z + ' gnd')
-        self._Gz = True
+        """Ground all three axes. Attempts all axes even if one fails; raises if any failed."""
+        errors = []
+        for addr, flag, name in [
+            (self.addr_x, '_Gx', 'x'),
+            (self.addr_y, '_Gy', 'y'),
+            (self.addr_z, '_Gz', 'z'),
+        ]:
+            try:
+                self.ANC.Write('setm ' + addr + ' gnd')
+                setattr(self, flag, True)
+            except Exception as e:
+                errors.append('axis {}: {}'.format(name, e))
+        if errors:
+            tango.Except.throw_exception(
+                'Ground failed',
+                'Some axes could not be grounded: ' + '; '.join(errors),
+                'ANC300::Ground'
+            )
 
 
 def main(args=None, **kwargs):

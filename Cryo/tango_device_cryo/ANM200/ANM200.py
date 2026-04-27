@@ -10,6 +10,8 @@ import tango
 from tango import DevState, AttrWriteType
 from tango.server import Device, attribute, device_property, run
 
+MAX_VOLTAGE = 10.0  # ANM200 DC input limit: ±10 V
+
 __all__ = ["ANM200", "main"]
 
 
@@ -32,13 +34,20 @@ class ANM200(Device):
 
     def init_device(self):
         Device.init_device(self)
-        self._x = 0.0
-        self._y = 0.0
-        self._z = 0.0
         self._scaling = 1.0
         self.Sx = tango.DeviceProxy(self.Socketx)
         self.Sy = tango.DeviceProxy(self.Sockety)
         self.Sz = tango.DeviceProxy(self.Socketz)
+        # Read current hardware output voltages so the cache reflects reality
+        try:
+            self._x = float(self.Sx.read_attribute('Value').value)
+            self._y = float(self.Sy.read_attribute('Value').value)
+            self._z = float(self.Sz.read_attribute('Value').value)
+        except Exception as e:
+            self.error_stream("ANM200: could not read initial voltages (using 0.0): {}".format(e))
+            self._x = 0.0
+            self._y = 0.0
+            self._z = 0.0
         self.set_state(DevState.ON)
 
     def always_executed_hook(self):
@@ -55,6 +64,12 @@ class ANM200(Device):
     @x.write
     def x(self, value):
         voltage = value * self._scaling
+        if abs(voltage) > MAX_VOLTAGE:
+            tango.Except.throw_exception(
+                'Voltage out of range',
+                'Requested voltage {:.3f} V exceeds ANM200 limit ±{} V'.format(voltage, MAX_VOLTAGE),
+                'ANM200::x.write'
+            )
         self.Sx.write_attribute('Value', voltage)
         self._x = voltage
 
@@ -67,6 +82,12 @@ class ANM200(Device):
     @y.write
     def y(self, value):
         voltage = value * self._scaling
+        if abs(voltage) > MAX_VOLTAGE:
+            tango.Except.throw_exception(
+                'Voltage out of range',
+                'Requested voltage {:.3f} V exceeds ANM200 limit ±{} V'.format(voltage, MAX_VOLTAGE),
+                'ANM200::y.write'
+            )
         self.Sy.write_attribute('Value', voltage)
         self._y = voltage
 
@@ -78,6 +99,12 @@ class ANM200(Device):
     @z.write
     def z(self, value):
         voltage = value * self._scaling
+        if abs(voltage) > MAX_VOLTAGE:
+            tango.Except.throw_exception(
+                'Voltage out of range',
+                'Requested voltage {:.3f} V exceeds ANM200 limit ±{} V'.format(voltage, MAX_VOLTAGE),
+                'ANM200::z.write'
+            )
         self.Sz.write_attribute('Value', voltage)
         self._z = voltage
 
@@ -89,6 +116,12 @@ class ANM200(Device):
 
     @scaling.write
     def scaling(self, value):
+        if value == 0.0:
+            tango.Except.throw_exception(
+                'Invalid scaling',
+                'Scaling factor must not be zero',
+                'ANM200::scaling.write'
+            )
         self._scaling = value
 
 

@@ -21,26 +21,28 @@ POLL_INTERVAL = 1.0  # seconds between convergence checks
 
 
 class AttoDRYCheck(threading.Thread):
-    lock = threading.Lock()
 
     def __init__(self, parent):
         threading.Thread.__init__(self)
         self.p = parent
         self.daemon = True
+        self._stop_event = threading.Event()
 
     def run(self):
-        while True:
-            field_err = abs(self.p.attr_MagneticField_read - self.p.setField)
-            temp_err  = abs(self.p.attr_Temperature_read   - self.p.setTemp)
+        while not self._stop_event.is_set():
+            with self.p._cache_lock:
+                field_err = abs(self.p.attr_MagneticField_read - self.p.setField)
+                temp_err  = abs(self.p.attr_Temperature_read   - self.p.setTemp)
 
             if field_err <= FIELD_TOL and temp_err <= TEMP_TOL:
                 self.p.set_state(PyTango.DevState.ON)
-                break
+                return
 
             self.p.set_state(PyTango.DevState.MOVING)
             print('Field error: {:.4f} T   Temp error: {:.3f} K'.format(
                 field_err, temp_err))
-            time.sleep(POLL_INTERVAL)
+            # Use wait() so stop() wakes us immediately instead of sleeping
+            self._stop_event.wait(timeout=POLL_INTERVAL)
 
     def stop(self):
-        self.p.set_state(PyTango.DevState.ON)
+        self._stop_event.set()

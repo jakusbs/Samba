@@ -97,34 +97,34 @@ class AttoDRYThread(threading.Thread):
                 time.sleep(self.interval)
                 continue
 
-            # Update internal state mirrors
-            self.p.is_controlling_field       = iCF
-            self.p.is_controlling_temperature = iCT
-            self.p.is_persistent_mode_set     = iCP
-            self.p.current_magnetic_field     = gMF
-            self.p.sample_temperature         = gST
-            self.p.vti_temperature            = gVT
-            self.p.magnet_temperature         = gMT
-            self.p.reservoir_temperature      = gRT
-            self.p.cryostat_out_pressure      = gCoP
-            self.p.cryostat_in_pressure       = gCIP
-            self.p.reservoir_heater_power     = gRHP
-            self.p.vti_heater_power           = gVHP
-            self.p.sample_heater_power        = gVSP
+            # Update internal state mirrors and TANGO attribute caches atomically
+            with self.p._cache_lock:
+                self.p.is_controlling_field       = iCF
+                self.p.is_controlling_temperature = iCT
+                self.p.is_persistent_mode_set     = iCP
+                self.p.current_magnetic_field     = gMF
+                self.p.sample_temperature         = gST
+                self.p.vti_temperature            = gVT
+                self.p.magnet_temperature         = gMT
+                self.p.reservoir_temperature      = gRT
+                self.p.cryostat_out_pressure      = gCoP
+                self.p.cryostat_in_pressure       = gCIP
+                self.p.reservoir_heater_power     = gRHP
+                self.p.vti_heater_power           = gVHP
+                self.p.sample_heater_power        = gVSP
 
-            # Update TANGO attribute caches
-            self.p.attr_toggleMagneticFieldControl_read   = bool(iCF)
-            self.p.attr_toggleFulltemperatureControl_read = bool(iCT)
-            self.p.attr_togglePersistentMode_read         = bool(iCP)
-            self.p.attr_MagneticField_read                = gMF
-            self.p.attr_Temperature_read                  = gST
-            self.p.attr_VtiTemperature_read               = gVT
-            self.p.attr_MagnetTemperature_read            = gMT
-            self.p.attr_ReservoirTemperature_read         = gRT
-            self.p.attr_CryostatOutPressure_read          = gCoP
-            self.p.attr_CryostatInPressure_read           = gCIP
-            self.p.attr_ReservoirHeaterPower_read         = gRHP
-            self.p.attr_VtiHeaterPower_read               = gVHP
-            self.p.attr_SampleHeaterPower_read            = gVSP
+                self.p.attr_toggleMagneticFieldControl_read   = bool(iCF)
+                self.p.attr_toggleFulltemperatureControl_read = bool(iCT)
+                self.p.attr_togglePersistentMode_read         = bool(iCP)
+                self.p.attr_MagneticField_read                = gMF
+                self.p.attr_Temperature_read                  = gST
+                self.p.attr_VtiTemperature_read               = gVT
+                self.p.attr_MagnetTemperature_read            = gMT
+                self.p.attr_ReservoirTemperature_read         = gRT
+                self.p.attr_CryostatOutPressure_read          = gCoP
+                self.p.attr_CryostatInPressure_read           = gCIP
+                self.p.attr_ReservoirHeaterPower_read         = gRHP
+                self.p.attr_VtiHeaterPower_read               = gVHP
+                self.p.attr_SampleHeaterPower_read            = gVSP
 
             time.sleep(self.interval)

@@ -46,6 +46,7 @@ class AttoDRY(PyTango.LatestDeviceImpl):
         self.get_device_properties(self.get_device_class())
 
         self.on = False
+        self._cache_lock = threading.Lock()
 
         # Setpoint cache — used by AttoDRYCheck to detect convergence
         self.setField = 0.0
@@ -93,9 +94,9 @@ class AttoDRY(PyTango.LatestDeviceImpl):
     def write_MagneticField(self, attr):
         data = attr.get_write_value()
         self.setField = data
-        # Stop any previous convergence-check thread before starting a new one
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.stop()
+            self.thread.join(timeout=1.0)
         cmd = "W001:" + str(data)
         self.s.sendto(cmd.encode('utf-8'), self.server)
         self.thread = AttoDRYCheck(self)
@@ -107,9 +108,9 @@ class AttoDRY(PyTango.LatestDeviceImpl):
     def write_Temperature(self, attr):
         data = attr.get_write_value()
         self.setTemp = data
-        # Stop any previous convergence-check thread before starting a new one
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.stop()
+            self.thread.join(timeout=1.0)
         cmd = "W002:" + str(data)
         self.s.sendto(cmd.encode('utf-8'), self.server)
         self.thread = AttoDRYCheck(self)
@@ -168,13 +169,32 @@ class AttoDRY(PyTango.LatestDeviceImpl):
         self.port   = int(self.LocalPort)
         self.server = (self.AttoIP, int(self.AttoPort))
 
+        # Stop the daemon before closing the socket it uses, to avoid
+        # recvfrom errors on the old socket and port-in-use on rebind.
+        if hasattr(self, 'listener') and self.listener.is_alive():
+            self.listener.stop()
+            self.listener.join(timeout=2.0)
+        if hasattr(self, 's'):
+            try:
+                self.s.close()
+            except Exception:
+                pass
+
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.settimeout(5.0)
         self.s.bind((self.host, self.port))
 
-        self.s.sendto('start'.encode('utf-8'), self.server)
-        self.s.sendto('ON'.encode('utf-8'), self.server)
-        data, addr = self.s.recvfrom(1024)
-        data = data.decode('utf-8')
+        try:
+            self.s.sendto('start'.encode('utf-8'), self.server)
+            self.s.sendto('ON'.encode('utf-8'), self.server)
+            data, addr = self.s.recvfrom(1024)
+            data = data.decode('utf-8')
+        except socket.timeout:
+            self.info_stream('Timeout waiting for AttoDRY Windows PC response.')
+            self.on = False
+            self.set_state(PyTango.DevState.OFF)
+            return
+
         if data == 'ON':
             self.set_state(PyTango.DevState.ON)
             time.sleep(0.1)
