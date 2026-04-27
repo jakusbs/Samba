@@ -732,6 +732,87 @@ class TrajectoryPanel(QWidget):
 
         tr_root.addLayout(col3)
 
+        # ── Column 4: RTV40 Sync ──────────────────────────────────────────────
+        col4 = QVBoxLayout(); col4.setSpacing(4)
+
+        tr_rtv_grp = QGroupBox("RTV40 Sync"); rg = QGridLayout(tr_rtv_grp)
+        rg.setSpacing(3); rg.setContentsMargins(6, 6, 6, 6)
+
+        self._rtv40_en = QCheckBox("Enable RTV40 sync")
+        self._rtv40_en.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rg.addWidget(self._rtv40_en, 0, 0, 1, 3)
+
+        rg.addWidget(QLabel("Device:"), 1, 0)
+        self._rtv40_dev_lbl = QLabel("hpp-N42/pulser/RTV40")
+        self._rtv40_dev_lbl.setStyleSheet(
+            "color:#cba6f7;font-size:10px;background:#181825;"
+            "border:1px solid #313244;border-radius:4px;padding:2px 6px;")
+        rg.addWidget(self._rtv40_dev_lbl, 1, 1, 1, 2)
+
+        rg.addWidget(QLabel("Tracking:"), 2, 0)
+        self._rtv40_track_lbl = QLabel("sweep ch A")
+        self._rtv40_track_lbl.setStyleSheet("color:#a6e3a1;font-size:10px;")
+        rg.addWidget(self._rtv40_track_lbl, 2, 1, 1, 2)
+
+        rg.addWidget(QLabel("Base width:"), 3, 0)
+        self._rtv40_width = NoScrollDoubleSpinBox()
+        self._rtv40_width.setRange(0.3, 20.0); self._rtv40_width.setDecimals(3)
+        self._rtv40_width.setValue(1.0); self._rtv40_width.setSuffix(" ns")
+        self._rtv40_width.setFixedWidth(85)
+        rg.addWidget(self._rtv40_width, 3, 1)
+        _rtv40_rd = QPushButton("Read"); _rtv40_rd.setFixedWidth(40)
+        _rtv40_rd.clicked.connect(self._rtv40_read_width)
+        rg.addWidget(_rtv40_rd, 3, 2)
+
+        _sep = QLabel("── Device Settings ──")
+        _sep.setStyleSheet("color:#6c7086;font-size:9px;")
+        rg.addWidget(_sep, 4, 0, 1, 3)
+
+        rg.addWidget(QLabel("Trig src:"), 5, 0)
+        self._rtv40_trig_src = NoScrollComboBox()
+        self._rtv40_trig_src.addItems(["Off", "External", "Internal"])
+        self._rtv40_trig_src.setCurrentIndex(1)   # External
+        self._rtv40_trig_src.setFixedWidth(90)
+        rg.addWidget(self._rtv40_trig_src, 5, 1, 1, 2)
+        self._rtv40_trig_src.currentIndexChanged.connect(self._rtv40_on_trig_src)
+
+        self._rtv40_rate_lbl = QLabel("Trig rate:")
+        rg.addWidget(self._rtv40_rate_lbl, 6, 0)
+        self._rtv40_trig_rate = NoScrollDoubleSpinBox()
+        self._rtv40_trig_rate.setRange(10, 100000); self._rtv40_trig_rate.setDecimals(0)
+        self._rtv40_trig_rate.setValue(1000); self._rtv40_trig_rate.setSuffix(" Hz")
+        self._rtv40_trig_rate.setFixedWidth(90)
+        rg.addWidget(self._rtv40_trig_rate, 6, 1, 1, 2)
+
+        rg.addWidget(QLabel("Polarity:"), 7, 0)
+        self._rtv40_pol = NoScrollComboBox()
+        self._rtv40_pol.addItems(["Negative", "Positive"])
+        self._rtv40_pol.setCurrentIndex(1)   # Positive
+        self._rtv40_pol.setFixedWidth(90)
+        rg.addWidget(self._rtv40_pol, 7, 1, 1, 2)
+
+        _rtv40_apply = QPushButton("Apply to Device")
+        _rtv40_apply.setStyleSheet(
+            "background:#cba6f7;color:#1e1e2e;font-weight:bold;"
+            "border-radius:3px;padding:3px 6px;")
+        _rtv40_apply.clicked.connect(self._rtv40_apply)
+        rg.addWidget(_rtv40_apply, 8, 0, 1, 3)
+
+        self._rtv40_status = QLabel("")
+        self._rtv40_status.setStyleSheet("color:#6c7086;font-size:9px;")
+        self._rtv40_status.setWordWrap(True)
+        rg.addWidget(self._rtv40_status, 9, 0, 1, 3)
+
+        self._rtv40_dev_path = ""
+
+        col4.addWidget(tr_rtv_grp)
+        col4.addStretch()
+        tr_root.addLayout(col4)
+
+        self._rtv40_on_trig_src()
+        self._tr_ch.currentTextChanged.connect(
+            lambda ch: self._rtv40_track_lbl.setText(f"sweep ch {ch}"))
+
         self.trmoke_w.setVisible(False)
         root.addWidget(self.trmoke_w)
         self._tr_upd_info()
@@ -867,6 +948,72 @@ class TrajectoryPanel(QWidget):
         """Update the TR-MOKE device label from setup defaults."""
         if path:
             self._tr_dev_lbl.setText(path)
+
+    def set_rtv40_device(self, path: str):
+        """Update the RTV40 device label and stored path from setup defaults."""
+        if path:
+            self._rtv40_dev_path = path
+            self._rtv40_dev_lbl.setText(path)
+
+    def _rtv40_on_trig_src(self):
+        """Show trigger-rate row only when Internal trigger is selected."""
+        is_internal = self._rtv40_trig_src.currentIndex() == 2
+        self._rtv40_rate_lbl.setVisible(is_internal)
+        self._rtv40_trig_rate.setVisible(is_internal)
+
+    def _rtv40_read_width(self):
+        """Read PulseWidth from the RTV40 device and update the base-width spinbox."""
+        path = self._rtv40_dev_path or self._rtv40_dev_lbl.text().strip()
+        if not path:
+            self._rtv40_status.setText("No device path set.")
+            return
+        try:
+            from hardware import get_proxy, safe_read
+            p, err = get_proxy(path)
+            if err:
+                self._rtv40_status.setText(f"⚠ {err}")
+                return
+            val, rerr = safe_read(p, "PulseWidth")
+            if rerr:
+                self._rtv40_status.setText(f"⚠ Read error: {rerr}")
+                return
+            if val is not None:
+                self._rtv40_width.setValue(float(val))
+                self._rtv40_status.setText(f"PulseWidth = {float(val):.3f} ns")
+        except Exception as e:
+            self._rtv40_status.setText(f"⚠ {e}")
+
+    def _rtv40_apply(self):
+        """Write TriggerSource, TriggerRate, and Polarity to the RTV40 device."""
+        path = self._rtv40_dev_path or self._rtv40_dev_lbl.text().strip()
+        if not path:
+            self._rtv40_status.setText("No device path set.")
+            return
+        try:
+            from hardware import get_proxy, safe_write
+            p, err = get_proxy(path)
+            if err:
+                self._rtv40_status.setText(f"⚠ Connect: {err}")
+                return
+            src = self._rtv40_trig_src.currentIndex()   # 0=Off, 1=Ext, 2=Int
+            pol = self._rtv40_pol.currentIndex()         # 0=Neg, 1=Pos
+            errs = []
+            e = safe_write(p, "TriggerSource", src)
+            if e: errs.append(f"TrigSource: {e}")
+            if src == 2:
+                e = safe_write(p, "TriggerRate", float(self._rtv40_trig_rate.value()))
+                if e: errs.append(f"TrigRate: {e}")
+            e = safe_write(p, "Polarity", pol)
+            if e: errs.append(f"Polarity: {e}")
+            if errs:
+                self._rtv40_status.setText("⚠ " + ", ".join(errs))
+            else:
+                _src_names = {0: "Off", 1: "External", 2: "Internal"}
+                self._rtv40_status.setText(
+                    f"Applied: src={_src_names[src]}, "
+                    f"pol={'Pos' if pol else 'Neg'}")
+        except Exception as e:
+            self._rtv40_status.setText(f"⚠ {e}")
 
     def populate_monitor_combo(self, registry: list):
         """Fill AC monitor, DC monitor, DC device, and AC device combos
@@ -1378,10 +1525,8 @@ class TrajectoryPanel(QWidget):
         self.dc_int_t.setValue(  cfg.get("hyst_int_time", 2.0))
         self.dc_npts.setValue(   cfg.get("hyst_npts",     100))
         self.dc_cycles.setValue( cfg.get("hyst_cycles",   1))
-        # TR-MOKE params — device path comes from Setup Defaults, shown read-only
-        tr_dev = cfg.get("trmoke_dg645", "")
-        if tr_dev:
-            self._tr_dev_lbl.setText(tr_dev)
+        # TR-MOKE params — device path is set authoritatively by set_trmoke_device()
+        # from setup data; do NOT read it from the scan config here as that value is stale.
         ch = cfg.get("trmoke_channel", "A")
         idx = self._tr_ch.findText(ch)
         if idx >= 0: self._tr_ch.setCurrentIndex(idx)
@@ -1395,6 +1540,12 @@ class TrajectoryPanel(QWidget):
         if "trmoke_npts" in cfg:
             self._tr_npts.setValue(int(cfg["trmoke_npts"]))
         self._tr_prescale.setValue(cfg.get("trmoke_prescale", 1))
+        self._rtv40_en.setChecked(bool(cfg.get("rtv40_sync_enabled", False)))
+        self._rtv40_width.setValue(float(cfg.get("rtv40_base_width_ns", 1.0)))
+        self._rtv40_trig_src.setCurrentIndex(min(int(cfg.get("rtv40_trig_src", 1)), 2))
+        self._rtv40_trig_rate.setValue(float(cfg.get("rtv40_trig_rate", 1000.0)))
+        self._rtv40_pol.setCurrentIndex(min(int(cfg.get("rtv40_polarity", 1)), 1))
+        self._rtv40_on_trig_src()
         self._tr_upd_info()
         self._save_dir = os.path.expanduser(
             self._setup_getter().get("save_dir", "~/moke_data"))
@@ -1436,6 +1587,12 @@ class TrajectoryPanel(QWidget):
                 "trmoke_step":      self._tr_step.value(),
                 "trmoke_npts":      self._tr_npts.value(),
                 "trmoke_prescale":  self._tr_prescale.value(),
+                # RTV40 sync
+                "rtv40_sync_enabled":  self._rtv40_en.isChecked(),
+                "rtv40_base_width_ns": self._rtv40_width.value(),
+                "rtv40_trig_src":      self._rtv40_trig_src.currentIndex(),
+                "rtv40_trig_rate":     self._rtv40_trig_rate.value(),
+                "rtv40_polarity":      self._rtv40_pol.currentIndex(),
                 **self.meta.get_values(),
             }
 
