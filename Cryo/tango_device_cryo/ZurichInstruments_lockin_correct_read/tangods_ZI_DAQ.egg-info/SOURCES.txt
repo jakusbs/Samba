@@ -1,0 +1,10 @@
+setup.py
+ZI_DAQ/ThreadZI.py
+ZI_DAQ/ZI_DAQ.py
+ZI_DAQ/__init__.py
+tangods_ZI_DAQ.egg-info/PKG-INFO
+tangods_ZI_DAQ.egg-info/SOURCES.txt
+tangods_ZI_DAQ.egg-info/dependency_links.txt
+tangods_ZI_DAQ.egg-info/entry_points.txt
+tangods_ZI_DAQ.egg-info/requires.txt
+tangods_ZI_DAQ.egg-info/top_level.txt
