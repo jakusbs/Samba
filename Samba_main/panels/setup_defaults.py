@@ -222,6 +222,10 @@ class SetupDefaultsPanel(QWidget):
         self.trmoke_dg645 = _combo()
         tg.addWidget(self.trmoke_dg645,        0, 1)
 
+        tg.addWidget(QLabel("RTV40 device:"), 1, 0)
+        self.rtv40_dev = _combo()
+        tg.addWidget(self.rtv40_dev,           1, 1)
+
         cl.addWidget(tr_grp)
         cl.addStretch()
         scroll.setWidget(content)
@@ -271,6 +275,7 @@ class SetupDefaultsPanel(QWidget):
             self.relay_dev, self.relay_attr,
             self.focus_dev, self.focus_attr,
             self.trmoke_dg645,
+            self.rtv40_dev,
             self.zi_tc_attr, self.zi_order_attr, self.zi_settling_attr,
         ]
         for w in _all_combos:
@@ -294,6 +299,7 @@ class SetupDefaultsPanel(QWidget):
         keithley_entries = _entries({"current", "keithley"})
         focus_entries    = _entries({"sensor", "beckhoff", "averageIn"})
         dg645_entries    = _entries({"dg645"})
+        pulser_entries   = _entries({"pulser"})
         lockin_entries   = _entries({"lockin"})
 
         for combo, entries in [
@@ -305,6 +311,7 @@ class SetupDefaultsPanel(QWidget):
             (self.keithley_dev, keithley_entries),
             (self.focus_dev,    focus_entries),
             (self.trmoke_dg645, dg645_entries),
+            (self.rtv40_dev,    pulser_entries),
             (self.zi_dev,       lockin_entries),
         ]:
             _fill_dev_combo(combo, entries)
@@ -423,6 +430,7 @@ class SetupDefaultsPanel(QWidget):
             _set(self.focus_attr,           setup_data.get("focus_attr",         "Value"))
 
             _set_by_path(self.trmoke_dg645, setup_data.get("trmoke_dg645",     "hpp-N42/delay/DG645"))
+            _set_by_path(self.rtv40_dev,    setup_data.get("rtv40_device",     "hpp-N42/pulser/RTV40"))
 
             _set_by_path(self.zi_dev,       setup_data.get("zi_device",        ""))
             _set(self.zi_tc_attr,           setup_data.get("zi_tc_attr",       "timeconstant"))
@@ -469,6 +477,7 @@ class SetupDefaultsPanel(QWidget):
             "focus_averagein":          _get_path(self.focus_dev),
             "focus_attr":               self.focus_attr.currentText(),
             "trmoke_dg645":             _get_path(self.trmoke_dg645),
+            "rtv40_device":             _get_path(self.rtv40_dev),
             "zi_device":                _get_path(self.zi_dev),
             "zi_tc_attr":               self.zi_tc_attr.currentText(),
             "zi_order_attr":            self.zi_order_attr.currentText(),

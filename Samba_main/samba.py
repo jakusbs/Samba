@@ -544,6 +544,7 @@ class MainWindow(QMainWindow):
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
             setup.get("act2_label",  "Y"), setup.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
+        self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
@@ -668,6 +669,7 @@ class MainWindow(QMainWindow):
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
             defaults.get("act2_label",  "Y"), defaults.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
+        self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
 
     def _on_scan_mode_changed(self, mode: str):
@@ -894,6 +896,50 @@ class MainWindow(QMainWindow):
             _factors = {"ps": 1e-12, "ns": 1e-9, "µs": 1e-6}
             self._trmoke_x_factor = 1.0 / _factors.get(unit, 1e-9)
             cfg["scan_type"] = "SPATIAL"
+            if cfg.get("rtv40_sync_enabled"):
+                cfg["rtv40_device"] = setup.get("rtv40_device", "")
+                if cfg.get("rtv40_device"):
+                    # Pre-scan check: will any scan point push the width out of range?
+                    base_ns  = float(cfg.get("rtv40_base_width_ns", 1.0))
+                    start_s  = float(cfg.get("act1_start", 0.0))
+                    stop_s   = float(cfg.get("act1_stop",  0.0))
+                    total_ns = (stop_s - start_s) * 1e9
+                    min_w = base_ns + min(0.0, total_ns)
+                    max_w = base_ns + max(0.0, total_ns)
+                    issues = []
+                    if max_w > 20.0:
+                        issues.append(f"Max pulse width {max_w:.2f} ns > 20 ns hardware limit.")
+                    if min_w < 0.3:
+                        issues.append(f"Min pulse width {min_w:.2f} ns < 0.3 ns hardware limit.")
+                    if issues:
+                        reply = QMessageBox.question(
+                            self, "RTV40 width out of range",
+                            "RTV40 sync width will exceed hardware limits:\n\n"
+                            + "\n".join(issues)
+                            + "\n\nWidth will be clamped to [0.3, 20.0] ns. Continue?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                        if reply != QMessageBox.StandardButton.Yes:
+                            release_lock(self._active_setup_name)
+                            return
+                    # Check trigger source — External (1) required for DG645-gated operation
+                    try:
+                        _rp, _rp_err = get_proxy(cfg["rtv40_device"])
+                        if not _rp_err:
+                            trig, _terr = safe_read(_rp, "TriggerSource")
+                            if trig is not None and int(trig) != 1:
+                                _src_names = {0: "Off", 1: "External", 2: "Internal"}
+                                reply = QMessageBox.question(
+                                    self, "RTV40 trigger check",
+                                    f"RTV40 TriggerSource is "
+                                    f"'{_src_names.get(int(trig), trig)}' (not External).\n"
+                                    "For TR-MOKE, External trigger is typically required.\n\n"
+                                    "Continue anyway?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                                if reply != QMessageBox.StandardButton.Yes:
+                                    release_lock(self._active_setup_name)
+                                    return
+                    except Exception:
+                        pass  # fail-open: device unreachable, proceed
 
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)

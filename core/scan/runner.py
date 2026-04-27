@@ -324,6 +324,26 @@ class ScanRunner:
         _RUNNING = {tango.DevState.RUNNING} if TANGO_AVAILABLE else set()
         _RUNNING.add("RUNNING")   # SimProxy returns a string
 
+        # ── RTV40 pulse-width sync (TR-MOKE) ─────────────────────────────────
+        # width_i = base_width + (x_pos_i - act1_start)  [all in ns]
+        # Keeps the END of the RTV40 pulse at a fixed time as the DG645 delay sweeps.
+        rtv40_p       = None
+        rtv40_base_ns = None
+        rtv40_ref_s   = None
+        if (hdf_scan == "SPATIAL_X" and
+                cfg.get("rtv40_sync_enabled") and
+                cfg.get("rtv40_device", "").strip()):
+            _rtv40_dev = cfg["rtv40_device"].strip()
+            _rp, _rp_err = fresh_proxy(_rtv40_dev)
+            if _rp_err:
+                lg(f"⚠ RTV40 {_rtv40_dev}: {_rp_err} — sync disabled")
+            else:
+                rtv40_p       = _rp
+                rtv40_base_ns = float(cfg.get("rtv40_base_width_ns", 1.0))
+                rtv40_ref_s   = float(cfg.get("act1_start", 0.0))
+                lg(f"── RTV40 sync: base={rtv40_base_ns:.3f} ns  "
+                   f"ref={rtv40_ref_s * 1e9:.3f} ns ──")
+
         try:
             for iy, y_pos in enumerate(y_plan):
                 if self._abort: break
@@ -352,6 +372,12 @@ class ScanRunner:
                         x_read = time.time() - t0
                     else:
                         x_read = self._move(act1_p, fast_attr, x_pos, cfg["move_timeout"], log=lg)
+                        if rtv40_p is not None:
+                            delta_ns = (x_pos - rtv40_ref_s) * 1e9
+                            new_width_ns = max(0.3, min(20.0, rtv40_base_ns + delta_ns))
+                            _rw_err = safe_write(rtv40_p, "PulseWidth", new_width_ns)
+                            if _rw_err and count == 0:
+                                lg(f"⚠ RTV40 PulseWidth write: {_rw_err}")
                         if cfg["settle_time"] > 0:
                             time.sleep(cfg["settle_time"])
 
@@ -559,6 +585,9 @@ class ScanRunner:
             self._finalize_hdf5(hfile, count, total, x_actual, t_actual,
                                 data, x_plan, y_plan, active,
                                 x_lbl, x_unit, hdf_scan, cfg)
+            if rtv40_p is not None and rtv40_base_ns is not None:
+                safe_write(rtv40_p, "PulseWidth", rtv40_base_ns)
+                lg(f"── RTV40 reset to base width {rtv40_base_ns:.3f} ns ──")
 
         if count > 0:
             # Auto-demagnetize after FIELD scans — disabled for superconducting magnets
