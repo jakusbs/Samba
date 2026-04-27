@@ -904,8 +904,8 @@ class MainWindow(QMainWindow):
                     start_s  = float(cfg.get("act1_start", 0.0))
                     stop_s   = float(cfg.get("act1_stop",  0.0))
                     total_ns = (stop_s - start_s) * 1e9
-                    min_w = base_ns + min(0.0, total_ns)
-                    max_w = base_ns + max(0.0, total_ns)
+                    min_w = base_ns - max(0.0, total_ns)
+                    max_w = base_ns - min(0.0, total_ns)
                     issues = []
                     if max_w > 20.0:
                         issues.append(f"Max pulse width {max_w:.2f} ns > 20 ns hardware limit.")

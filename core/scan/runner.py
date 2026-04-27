@@ -325,8 +325,9 @@ class ScanRunner:
         _RUNNING.add("RUNNING")   # SimProxy returns a string
 
         # ── RTV40 pulse-width sync (TR-MOKE) ─────────────────────────────────
-        # width_i = base_width + (x_pos_i - act1_start)  [all in ns]
+        # width_i = base_width − (delay_i − start_delay)
         # Keeps the END of the RTV40 pulse at a fixed time as the DG645 delay sweeps.
+        # As delay increases (pulse start moves right), width decreases by the same amount.
         rtv40_p       = None
         rtv40_base_ns = None
         rtv40_ref_s   = None
@@ -374,7 +375,7 @@ class ScanRunner:
                         x_read = self._move(act1_p, fast_attr, x_pos, cfg["move_timeout"], log=lg)
                         if rtv40_p is not None:
                             delta_ns = (x_pos - rtv40_ref_s) * 1e9
-                            new_width_ns = max(0.3, min(20.0, rtv40_base_ns + delta_ns))
+                            new_width_ns = max(0.3, min(20.0, rtv40_base_ns - delta_ns))
                             _rw_err = safe_write(rtv40_p, "PulseWidth", new_width_ns)
                             if _rw_err and count == 0:
                                 lg(f"⚠ RTV40 PulseWidth write: {_rw_err}")
