@@ -9,15 +9,14 @@ CryoHardwarePanel replaces the standard HardwarePanel for the Cryo setup:
 AttoDRY controls:
   • MagneticField (T)  — R/W spinbox
   • Temperature (K)    — R/W spinbox (setpoint)
-  • toggleMagneticFieldControl / toggleFulltemperatureControl / togglePersistentMode
   • Readbacks: field, sample T, VTI T, magnet T
-  • "Monitor" button → opens CryoMonitorDialog
+  • "Monitor" button → opens CryoMonitorDialog (full control panel with toggles)
 """
 from typing import Optional
 
 from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-    QDoubleSpinBox, QAbstractSpinBox, QCheckBox, QWidget
+    QDoubleSpinBox, QAbstractSpinBox, QWidget
 )
 import threading
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -39,7 +38,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
     _zi_err = pyqtSignal(str)
     _ks_ok  = pyqtSignal(object, object, object, object) # (amp, frq, cpl, cur)
     _ks_err = pyqtSignal(str)
-    _ad_ok  = pyqtSignal(object, object, object, object, object, object)  # fld,tmp,vti,mgt,toggles,err
+    _ad_ok  = pyqtSignal(object, object, object, object, object)  # fld,tmp,vti,mgt,err
     _ad_err = pyqtSignal(str)
 
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
@@ -126,49 +125,11 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         adg.addWidget(self.vti_rb,   row, 0, 1, 2)
         adg.addWidget(self.mag_t_rb, row, 2, 1, 2); row += 1
 
-        # Control toggle buttons
-        _BTN_STYLE = (
-            "QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;"
-            "border-radius:4px;padding:3px 8px;}"
-            "QPushButton:checked{background:#a6e3a1;color:#1e1e2e;font-weight:bold;"
-            "border:1px solid #a6e3a1;}"
-            "QPushButton:hover{border:1px solid #89b4fa;}"
-        )
         btn_row = QHBoxLayout(); btn_row.setSpacing(4)
-        self.btn_mag_ctrl = QPushButton("Mag Ctrl")
-        self.btn_mag_ctrl.setToolTip(
-            "Toggle active magnetic field control on the superconducting magnet.\n"
-            "ON: magnet actively ramps to the field setpoint.\n"
-            "OFF: magnet stays at current field without active regulation.")
-        self.btn_mag_ctrl.setCheckable(True)
-        self.btn_mag_ctrl.setStyleSheet(_BTN_STYLE)
-        self.btn_mag_ctrl.clicked.connect(self._toggle_mag_ctrl)
-        btn_row.addWidget(self.btn_mag_ctrl)
-
-        self.btn_temp_ctrl = QPushButton("Temp Ctrl")
-        self.btn_temp_ctrl.setToolTip(
-            "Toggle full temperature control (PID controller).\n"
-            "ON: temperature is actively regulated to the setpoint.\n"
-            "OFF: heaters are off, temperature drifts freely.")
-        self.btn_temp_ctrl.setCheckable(True)
-        self.btn_temp_ctrl.setStyleSheet(_BTN_STYLE)
-        self.btn_temp_ctrl.clicked.connect(self._toggle_temp_ctrl)
-        btn_row.addWidget(self.btn_temp_ctrl)
-
-        self.btn_persist = QPushButton("Persistent Mode")
-        self.btn_persist.setToolTip(
-            "Toggle persistent mode for the superconducting magnet.\n"
-            "ON (persistent): magnet holds field without current — lower heat load.\n"
-            "OFF (driven): magnet is actively driven; required before changing the field.")
-        self.btn_persist.setCheckable(True)
-        self.btn_persist.setStyleSheet(_BTN_STYLE)
-        self.btn_persist.clicked.connect(self._toggle_persistent)
-        btn_row.addWidget(self.btn_persist)
-
-        self.btn_monitor = QPushButton("📈 Monitor")
+        self.btn_monitor = QPushButton("📈 Monitor && Control")
         self.btn_monitor.setToolTip(
-            "Open the Cryo Monitor window — real-time rolling plots (60 s window)\n"
-            "showing temperatures (K), pressures (mbar), and heater powers (W).")
+            "Open the full AttoDRY monitor and control panel.\n"
+            "Includes live plots, toggle controls, and system commands.")
         self.btn_monitor.clicked.connect(self._open_monitor)
         btn_row.addWidget(self.btn_monitor)
 
@@ -227,43 +188,6 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         e = safe_write(p, attr, val)
         if e: set_err(self.ad_status, e[:60])
         else: set_ok(self.ad_status, f"T setpoint → {val:.2f} K")
-
-    def _write_bool_ctrl(self, attr_key: str, cmd_key: str,
-                         btn, label: str):
-        """Write a boolean control attribute; fall back to toggle command on error."""
-        p, err = self._ad_proxy()
-        if err: set_err(self.ad_status, err); btn.setChecked(not btn.isChecked()); return
-        if is_sim_proxy(p): set_sim(self.ad_status); return
-        s   = self._setup()
-        val = btn.isChecked()
-        e   = safe_write(p, s.get(attr_key, ""), val)
-        if e:
-            # Fall back to toggle command
-            cmd = s.get(cmd_key, "")
-            if cmd:
-                try:
-                    p.command_inout(cmd)
-                    set_ok(self.ad_status, f"Toggled {cmd}")
-                    return
-                except Exception as exc:
-                    set_err(self.ad_status, str(exc)[:60])
-            else:
-                set_err(self.ad_status, e[:60])
-            btn.setChecked(not val)   # revert button on total failure
-        else:
-            set_ok(self.ad_status, f"{label} → {'ON' if val else 'OFF'}")
-
-    def _toggle_mag_ctrl(self):
-        self._write_bool_ctrl("attodry_attr_mag_ctrl", "attodry_cmd_mag_ctrl",
-                              self.btn_mag_ctrl, "Mag Ctrl")
-
-    def _toggle_temp_ctrl(self):
-        self._write_bool_ctrl("attodry_attr_temp_ctrl", "attodry_cmd_temp_ctrl",
-                              self.btn_temp_ctrl, "Temp Ctrl")
-
-    def _toggle_persistent(self):
-        self._write_bool_ctrl("attodry_attr_persist", "attodry_cmd_persist",
-                              self.btn_persist, "Persistent Mode")
 
     def _open_monitor(self):
         from cryo_monitor import CryoMonitorDialog
@@ -359,13 +283,11 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
 
     def _read_attodry(self):
         s = self._setup()
-        dev  = s.get("attodry_device", "")
-        fld_a = s.get("attodry_attr_field_rb",  "MagneticField")
-        tmp_a = s.get("attodry_attr_temp_rb",   "Temperature")
-        vti_a = s.get("attodry_attr_vti_temp",  "VtiTemperature")
-        mgt_a = s.get("attodry_attr_mag_temp",  "MagnetTemperature")
-        toggle_attrs = {k: s.get(k, "") for k in (
-            "attodry_attr_mag_ctrl", "attodry_attr_temp_ctrl", "attodry_attr_persist")}
+        dev   = s.get("attodry_device", "")
+        fld_a = s.get("attodry_attr_field_rb", "MagneticField")
+        tmp_a = s.get("attodry_attr_temp_rb",  "Temperature")
+        vti_a = s.get("attodry_attr_vti_temp", "VtiTemperature")
+        mgt_a = s.get("attodry_attr_mag_temp", "MagnetTemperature")
         self.ad_status.setText("Reading…")
 
         def _do():
@@ -377,30 +299,16 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
             tmp, e2 = safe_read(p, tmp_a)
             vti, _  = safe_read(p, vti_a)
             mgt, _  = safe_read(p, mgt_a)
-            toggles = {}
-            for k, attr in toggle_attrs.items():
-                if attr:
-                    val, _ = safe_read(p, attr)
-                    if val is not None:
-                        toggles[k] = bool(val)
-            first_err = e1 or e2 or None
-            self._ad_ok.emit(fld, tmp, vti, mgt, toggles, first_err)
+            self._ad_ok.emit(fld, tmp, vti, mgt, e1 or e2 or None)
 
         threading.Thread(target=_do, daemon=True).start()
 
-    def _apply_attodry_readback(self, fld, tmp, vti, mgt, toggles: dict, err_str):
+    def _apply_attodry_readback(self, fld, tmp, vti, mgt, err_str):
         self._update_dev_labels()
         if fld is not None: self.field_rb.setText(f"{fld:.4f} T")
         if tmp is not None: self.temp_rb.setText(f"{tmp:.2f} K")
         if vti is not None: self.vti_rb.setText(f"VTI: {vti:.2f} K")
         if mgt is not None: self.mag_t_rb.setText(f"Mag: {mgt:.2f} K")
-        for attr_key, btn in [
-            ("attodry_attr_mag_ctrl",  self.btn_mag_ctrl),
-            ("attodry_attr_temp_ctrl", self.btn_temp_ctrl),
-            ("attodry_attr_persist",   self.btn_persist),
-        ]:
-            if attr_key in toggles:
-                btn.setChecked(toggles[attr_key])
         if err_str:
             set_err(self.ad_status, err_str[:60])
         else:
