@@ -1,17 +1,31 @@
-# File:             AttoDRYThreadDaemon.py
-# author:           N. Kercher
-# copyright:        ETH Zurich, Switzerland, D-MATL INTERMAG
+# AttoDRYThreadDaemon.py — daemon listener thread for AttoDRY UDP packets.
 #
-# Daemon listener thread for AttoDRY UDP packets.
-# Sends "Read" every 0.2 s, parses the "ReadA...N" response,
-# and updates all attribute caches on the parent device.
+# Sends "Read" every 0.2 s, parses the CSV reply packet, and updates all
+# attribute caches on the parent device.
+#
+# Packet format (26 comma-separated fields after "Read:"):
+#   idx  field                      idx  field
+#    0   isControllingField          13  getSampleHeaterPower
+#    1   isControllingTemperature    14  getMagneticFieldSetPoint
+#    2   isPersistentModeSet         15  getUserTemperature
+#    3   getMagneticField            16  getTurbopumpFrequency
+#    4   getSampleTemperature        17  getCryostatOutPressure
+#    5   getVtiTemperature           18  isGoingToBaseTemperature
+#    6   get4KStageTemperature       19  isSampleExchangeInProgress
+#    7   get40KStageTemperature      20  isSampleReadyToExchange
+#    8   getReservoirTemperature     21  isZeroingField
+#    9   getCryostatInPressure       22  isPumping
+#   10   getDumpPressure             23  isSystemRunning
+#   11   getReservoirHeaterPower     24  isExchangeHeaterOn
+#   12   getVtiHeaterPower           25  isSampleHeaterOn
 
-import re
 import socket
 import time
 import threading
 
 import PyTango
+
+_N_FIELDS = 25
 
 
 class AttoDRYThread(threading.Thread):
@@ -20,7 +34,7 @@ class AttoDRYThread(threading.Thread):
         super(AttoDRYThread, self).__init__()
         self.daemon = True
         self.p = parent
-        self.bufsize = 256
+        self.bufsize = 1024
         self._running = True
         self.interval = 0.2
 
@@ -30,13 +44,13 @@ class AttoDRYThread(threading.Thread):
 
     def run(self):
         while self._running:
-            # Send "Read" request
+            # Send Read request
             try:
                 self.p.s.sendto("Read".encode("utf-8"), self.p.server)
             except Exception:
                 break
 
-            # Wait for a valid packet
+            # Receive reply
             try:
                 data, addr = self.p.s.recvfrom(self.bufsize)
             except socket.timeout:
@@ -51,80 +65,103 @@ class AttoDRYThread(threading.Thread):
                 time.sleep(self.interval)
                 continue
 
-            if not pkt.startswith("ReadA"):
+            if not pkt.startswith("Read:"):
                 time.sleep(self.interval)
                 continue
 
-            # Parse all fields by letter markers
-            m_iCF  = re.search(r"A(.*)B",  pkt)
-            m_iCT  = re.search(r"B(.*)C",  pkt)
-            m_iCP  = re.search(r"C(.*)D",  pkt)
-            m_gMF  = re.search(r"D(.*)E",  pkt)
-            m_gST  = re.search(r"E(.*)F",  pkt)
-            m_gVT  = re.search(r"F(.*)G",  pkt)
-            m_gMT  = re.search(r"G(.*)H",  pkt)
-            m_gRT  = re.search(r"H(.*)I",  pkt)
-            m_gCoP = re.search(r"I(.*)J",  pkt)
-            m_gCIP = re.search(r"J(.*)K",  pkt)
-            m_gRHP = re.search(r"K(.*)L",  pkt)
-            m_gVHP = re.search(r"L(.*)M",  pkt)
-            m_gVSP = re.search(r"M(.*)N",  pkt)
-
-            if not all([m_iCF, m_iCT, m_iCP, m_gMF, m_gST, m_gVT,
-                        m_gMT, m_gRT, m_gCoP, m_gCIP, m_gRHP, m_gVHP, m_gVSP]):
+            # Split off optional string section: "Read:<csv>|<err_status>|<err_msg>|<act_msg>"
+            sections = pkt.split('|')
+            parts = sections[0][5:].split(',')
+            if len(parts) < _N_FIELDS:
                 time.sleep(self.interval)
                 continue
 
             try:
-                iCF  = int(m_iCF.group(1))
-                iCT  = int(m_iCT.group(1))
-                iCP  = int(m_iCP.group(1))
-                gMF  = float(m_gMF.group(1))
-                gST  = float(m_gST.group(1))
-                gVT  = float(m_gVT.group(1))
-                gMT  = float(m_gMT.group(1))
-                gRT  = float(m_gRT.group(1))
-                gCoP = float(m_gCoP.group(1))
-                gCIP = float(m_gCIP.group(1))
-                gRHP = float(m_gRHP.group(1))
-                gVHP = float(m_gVHP.group(1))
-                gVSP = float(m_gVSP.group(1))
+                iCF  = int(parts[0])
+                iCT  = int(parts[1])
+                iCP  = int(parts[2])
+                gMF  = float(parts[3])
+                gST  = float(parts[4])
+                gVT  = float(parts[5])
+                gMT  = float(parts[6])
+                g40K = float(parts[7])
+                gRT  = float(parts[8])
+                gCIP = float(parts[9])
+                gDP  = float(parts[10])
+                gRHP = float(parts[11])
+                gVHP = float(parts[12])
+                gVSP = float(parts[13])
+                gMFS = float(parts[14])
+                gUT  = float(parts[15])
+                gTPF = float(parts[16])
+                gCoP = float(parts[17])
+                iGBT = int(parts[18])
+                iSEP = int(parts[19])
+                iSRE = int(parts[20])
+                iZF  = int(parts[21])
+                iPmp = int(parts[22])
+                iSR  = int(parts[23])
+                iSH  = int(parts[24])
             except Exception as e:
                 try:
-                    self.p.error_stream("Listener conversion error: " + str(e))
+                    self.p.error_stream("Listener parse error: " + str(e))
                 except Exception:
                     pass
                 time.sleep(self.interval)
                 continue
 
-            # Update internal state mirrors and TANGO attribute caches atomically
+            # Update all attribute caches atomically
             with self.p._cache_lock:
-                self.p.is_controlling_field       = iCF
-                self.p.is_controlling_temperature = iCT
-                self.p.is_persistent_mode_set     = iCP
-                self.p.current_magnetic_field     = gMF
-                self.p.sample_temperature         = gST
-                self.p.vti_temperature            = gVT
-                self.p.magnet_temperature         = gMT
-                self.p.reservoir_temperature      = gRT
-                self.p.cryostat_out_pressure      = gCoP
-                self.p.cryostat_in_pressure       = gCIP
-                self.p.reservoir_heater_power     = gRHP
-                self.p.vti_heater_power           = gVHP
-                self.p.sample_heater_power        = gVSP
+                # Internal mirrors used by AttoDRYCheck
+                self.p.current_magnetic_field = gMF
+                self.p.sample_temperature     = gST
 
+                # Magnetic field
+                self.p.attr_MagneticField_read         = gMF
+                self.p.attr_MagneticFieldSetpoint_read = gMFS
+
+                # Temperatures
+                self.p.attr_Temperature_read          = gST
+                self.p.attr_UserTemperature_read      = gUT
+                self.p.attr_VtiTemperature_read       = gVT
+                self.p.attr_MagnetTemperature_read    = gMT
+                self.p.attr_Stage40KTemperature_read  = g40K
+                self.p.attr_ReservoirTemperature_read = gRT
+
+                # Pressures
+                self.p.attr_CryostatInPressure_read  = gCIP
+                self.p.attr_CryostatOutPressure_read = gCoP
+                self.p.attr_DumpPressure_read        = gDP
+
+                # Heater powers
+                self.p.attr_SampleHeaterPower_read    = gVSP
+                self.p.attr_VtiHeaterPower_read       = gVHP
+                self.p.attr_ReservoirHeaterPower_read = gRHP
+
+                # Diagnostics
+                self.p.attr_TurbopumpFrequency_read = gTPF
+
+                # Control toggles
                 self.p.attr_toggleMagneticFieldControl_read   = bool(iCF)
                 self.p.attr_toggleFulltemperatureControl_read = bool(iCT)
                 self.p.attr_togglePersistentMode_read         = bool(iCP)
-                self.p.attr_MagneticField_read                = gMF
-                self.p.attr_Temperature_read                  = gST
-                self.p.attr_VtiTemperature_read               = gVT
-                self.p.attr_MagnetTemperature_read            = gMT
-                self.p.attr_ReservoirTemperature_read         = gRT
-                self.p.attr_CryostatOutPressure_read          = gCoP
-                self.p.attr_CryostatInPressure_read           = gCIP
-                self.p.attr_ReservoirHeaterPower_read         = gRHP
-                self.p.attr_VtiHeaterPower_read               = gVHP
-                self.p.attr_SampleHeaterPower_read            = gVSP
+
+                # Status flags
+                self.p.attr_GoingToBaseTemperature_read   = bool(iGBT)
+                self.p.attr_SampleExchangeInProgress_read = bool(iSEP)
+                self.p.attr_SampleReadyToExchange_read    = bool(iSRE)
+                self.p.attr_ZeroingField_read             = bool(iZF)
+                self.p.attr_Pumping_read                  = bool(iPmp)
+                self.p.attr_SystemRunning_read  = bool(iSR)
+                self.p.attr_SampleHeaterOn_read = bool(iSH)
+
+                # Error / status messages (optional string section)
+                if len(sections) >= 4:
+                    try:
+                        self.p.attr_ErrorStatus_read  = int(sections[1])
+                        self.p.attr_ErrorMessage_read = sections[2]
+                        self.p.attr_ActionMessage_read = sections[3]
+                    except Exception:
+                        pass
 
             time.sleep(self.interval)
