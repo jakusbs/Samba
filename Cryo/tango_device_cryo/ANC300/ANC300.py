@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 ANC300
-Controls an Attocube ANC300 piezo controller via a Socket TANGO proxy.
-Communicates using the ANC300 serial-over-Ethernet ASCII protocol.
-
-Fixes vs. old code:
-  - self.ANC.read() → self.ANC.Read() (capital R — TANGO command name)
+Controls an Attocube ANC300 piezo controller via a direct TCP (Telnet) connection.
+No Socket proxy needed — the TCP connection is owned by this device server.
 """
 
+import socket as _socket
 import time
 import re
 
@@ -21,29 +19,36 @@ __all__ = ["ANC300", "main"]
 class ANC300(Device):
     """
     Attocube ANC300 piezo stepper controller.
-    Connects via a Socket device that wraps a serial-over-Ethernet link.
+    Connects directly via TCP (Telnet, port 7230) — no Socket proxy required.
     Frequency (Hz), voltage (V) and mode are sent as ASCII commands.
     Position writes are relative steps (stepu/stepd).
 
     **Properties:**
-    - Proxy: TANGO path to the Socket device connected to the ANC300
+    - Hostname: IP address of the ANC300
+    - Port: TCP port (default 7230)
+    - Readtimeout: Read timeout in ms (default 1000)
     - addr_x/y/z: ANC300 axis address strings
     - password: Authorization password (default '123456')
     """
 
-    Proxy = device_property(dtype='str', default_value='hpp-N42/socket/ANC300',
-                            doc="TANGO path to Socket device")
-    addr_x = device_property(dtype='str', default_value='4',
-                             doc="ANC300 axis address for x")
-    addr_y = device_property(dtype='str', default_value='5',
-                             doc="ANC300 axis address for y")
-    addr_z = device_property(dtype='str', default_value='6',
-                             doc="ANC300 axis address for z")
-    password = device_property(dtype='str', default_value='123456',
-                               doc="ANC300 authorization password")
+    Hostname    = device_property(dtype='str', mandatory=True,
+                                  doc="IP address of the ANC300")
+    Port        = device_property(dtype='int', default_value=7230,
+                                  doc="TCP port (Telnet, default 7230)")
+    Readtimeout = device_property(dtype='int', default_value=1000,
+                                  doc="Read timeout in milliseconds")
+    addr_x      = device_property(dtype='str', default_value='4',
+                                  doc="ANC300 axis address for x")
+    addr_y      = device_property(dtype='str', default_value='5',
+                                  doc="ANC300 axis address for y")
+    addr_z      = device_property(dtype='str', default_value='6',
+                                  doc="ANC300 axis address for z")
+    password    = device_property(dtype='str', default_value='123456',
+                                  doc="ANC300 authorization password")
 
     def init_device(self):
         Device.init_device(self)
+        self._sock = None
         self._fx = 0.0
         self._fy = 0.0
         self._fz = 0.0
@@ -58,26 +63,14 @@ class ANC300(Device):
         self._Gz = False
 
         self.set_state(DevState.INIT)
-        self.ANC = tango.DeviceProxy(self.Proxy)
-
-        # Open connection and authenticate
-        self.ANC.Init()
-        time.sleep(0.1)
-        self.ANC.Read()
-        time.sleep(0.1)
-        self.ANC.Write(str(self.password))
-        time.sleep(0.1)
-        readout = self.ANC.Read()
-        print(readout)
-        if readout == '******\r\nAuthorization success\r\n> ':
-            self.set_state(DevState.ON)
-        else:
-            self.set_state(DevState.OFF)
-            self.info_stream('Could not connect to ANC300 using Ethernet...')
-            print('Could not connect to ANC300 using Ethernet...')
+        try:
+            self._connect()
+        except Exception as e:
+            self.set_state(DevState.FAULT)
+            self.set_status("Could not connect to ANC300: {}".format(e))
             return
 
-        # Read all initial values; non-fatal if any individual query fails
+        # Read initial values; non-fatal if any individual query fails
         try:
             self._fx = self._getf(self.addr_x)
             self._fy = self._getf(self.addr_y)
@@ -91,32 +84,86 @@ class ANC300(Device):
         except Exception as e:
             self.error_stream("ANC300: initial read failed (using defaults): {}".format(e))
 
+    def delete_device(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
     def always_executed_hook(self):
         pass
 
-    # ---- Helpers --------------------------------------------------------
+    # =========================================================================
+    # TCP connection helpers
+    # =========================================================================
+
+    def _connect(self):
+        """Open TCP connection, discard Telnet negotiation, authenticate."""
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.settimeout(self.Readtimeout / 1000.0)
+        s.connect((self.Hostname, self.Port))
+        self._sock = s
+
+        # Discard Telnet IAC negotiation bytes sent on connect
+        time.sleep(0.1)
+        try:
+            self._sock.recv(4096)
+        except _socket.timeout:
+            pass
+
+        # Authenticate
+        self._send(self.password)
+        time.sleep(0.1)
+        readout = self._read()
+        if 'Authorization success' in readout:
+            self.set_state(DevState.ON)
+        else:
+            self._sock.close()
+            self._sock = None
+            self.set_state(DevState.FAULT)
+            raise RuntimeError("ANC300 authorization failed — check password. Got: {!r}".format(readout))
+
+    def _send(self, cmd):
+        """Send a command with CRLF terminator."""
+        self._sock.sendall((cmd + '\r\n').encode('utf-8'))
+
+    def _read(self):
+        """Read available data from the socket."""
+        return self._sock.recv(4096).decode('utf-8', errors='ignore')
+
+    # =========================================================================
+    # Protocol helpers
+    # =========================================================================
 
     def _getf(self, addr):
-        self.ANC.Write('getf ' + addr)
+        self._send('getf ' + addr)
         time.sleep(0.1)
-        readout = self.ANC.Read()
-        nums = re.findall(r"[-+]?\d*\.\d+|\d+", readout)
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", self._read())
         return float(nums[1]) if len(nums) > 1 else 0.0
 
     def _getv(self, addr):
-        self.ANC.Write('getv ' + addr)
+        self._send('getv ' + addr)
         time.sleep(0.1)
-        readout = self.ANC.Read()
-        nums = re.findall(r"[-+]?\d*\.\d+|\d+", readout)
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", self._read())
         return float(nums[1]) if len(nums) > 1 else 0.0
 
     def _getm(self, addr):
-        self.ANC.Write('getm ' + addr)
+        self._send('getm ' + addr)
         time.sleep(0.1)
-        readout = self.ANC.Read()
-        return 'gnd' in readout
+        return 'gnd' in self._read()
 
-    # ---- Attributes: frequency ------------------------------------------
+    # =========================================================================
+    # Attributes: frequency
+    # =========================================================================
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
                memorized=True, hw_memorized=False, unit='Hz',
@@ -126,7 +173,7 @@ class ANC300(Device):
 
     @fx.write
     def fx(self, value):
-        self.ANC.Write('setf ' + self.addr_x + ' ' + str(int(value)))
+        self._send('setf ' + self.addr_x + ' ' + str(int(value)))
         self._fx = value
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
@@ -137,7 +184,7 @@ class ANC300(Device):
 
     @fy.write
     def fy(self, value):
-        self.ANC.Write('setf ' + self.addr_y + ' ' + str(int(value)))
+        self._send('setf ' + self.addr_y + ' ' + str(int(value)))
         self._fy = value
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
@@ -148,10 +195,12 @@ class ANC300(Device):
 
     @fz.write
     def fz(self, value):
-        self.ANC.Write('setf ' + self.addr_z + ' ' + str(int(value)))
+        self._send('setf ' + self.addr_z + ' ' + str(int(value)))
         self._fz = value
 
-    # ---- Attributes: voltage --------------------------------------------
+    # =========================================================================
+    # Attributes: voltage
+    # =========================================================================
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
                memorized=True, hw_memorized=False, unit='V',
@@ -161,7 +210,7 @@ class ANC300(Device):
 
     @Vx.write
     def Vx(self, value):
-        self.ANC.Write('setv ' + self.addr_x + ' ' + str(value))
+        self._send('setv ' + self.addr_x + ' ' + str(value))
         self._Vx = value
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
@@ -172,7 +221,7 @@ class ANC300(Device):
 
     @Vy.write
     def Vy(self, value):
-        self.ANC.Write('setv ' + self.addr_y + ' ' + str(value))
+        self._send('setv ' + self.addr_y + ' ' + str(value))
         self._Vy = value
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
@@ -183,109 +232,105 @@ class ANC300(Device):
 
     @Vz.write
     def Vz(self, value):
-        self.ANC.Write('setv ' + self.addr_z + ' ' + str(value))
+        self._send('setv ' + self.addr_z + ' ' + str(value))
         self._Vz = value
 
-    # ---- Attributes: position (relative steps) --------------------------
+    # =========================================================================
+    # Attributes: position (relative step counter)
+    # =========================================================================
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
-               doc="X position in steps (write moves relative to current stored position)")
+               doc="X position in steps (relative counter — resets on server restart)")
     def px(self):
         return self._px
 
     @px.write
     def px(self, value):
         steps = int(value - self._px)
-        self.ANC.Write('setm ' + self.addr_x + ' stp')
+        self._send('setm ' + self.addr_x + ' stp')
         time.sleep(0.1)
         if steps > 0:
-            self.ANC.Write('stepu ' + self.addr_x + ' ' + str(steps))
+            self._send('stepu ' + self.addr_x + ' ' + str(steps))
         elif steps < 0:
-            self.ANC.Write('stepd ' + self.addr_x + ' ' + str(abs(steps)))
-        # Only update cache after commands succeeded
+            self._send('stepd ' + self.addr_x + ' ' + str(abs(steps)))
         self._px = value
         self._Gx = False
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
-               doc="Y position in steps (write moves relative to current stored position)")
+               doc="Y position in steps (relative counter — resets on server restart)")
     def py(self):
         return self._py
 
     @py.write
     def py(self, value):
         steps = int(value - self._py)
-        self.ANC.Write('setm ' + self.addr_y + ' stp')
+        self._send('setm ' + self.addr_y + ' stp')
         time.sleep(0.1)
         if steps > 0:
-            self.ANC.Write('stepu ' + self.addr_y + ' ' + str(steps))
+            self._send('stepu ' + self.addr_y + ' ' + str(steps))
         elif steps < 0:
-            self.ANC.Write('stepd ' + self.addr_y + ' ' + str(abs(steps)))
+            self._send('stepd ' + self.addr_y + ' ' + str(abs(steps)))
         self._py = value
         self._Gy = False
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
-               doc="Z position in steps (write moves relative to current stored position)")
+               doc="Z position in steps (relative counter — resets on server restart)")
     def pz(self):
         return self._pz
 
     @pz.write
     def pz(self, value):
         steps = int(value - self._pz)
-        self.ANC.Write('setm ' + self.addr_z + ' stp')
+        self._send('setm ' + self.addr_z + ' stp')
         time.sleep(0.1)
         if steps > 0:
-            self.ANC.Write('stepu ' + self.addr_z + ' ' + str(steps))
+            self._send('stepu ' + self.addr_z + ' ' + str(steps))
         elif steps < 0:
-            self.ANC.Write('stepd ' + self.addr_z + ' ' + str(abs(steps)))
+            self._send('stepd ' + self.addr_z + ' ' + str(abs(steps)))
         self._pz = value
         self._Gz = False
 
-    # ---- Attributes: ground ---------------------------------------------
+    # =========================================================================
+    # Attributes: ground
+    # =========================================================================
 
     @attribute(dtype=bool, access=AttrWriteType.READ_WRITE,
-               doc="Ground state of x axis (write True to ground)")
+               doc="Ground state of x axis")
     def Gx(self):
         return self._Gx
 
     @Gx.write
     def Gx(self, value):
-        if value:
-            self.ANC.Write('setm ' + self.addr_x + ' gnd')
-        else:
-            self.ANC.Write('setm ' + self.addr_x + ' stp')
+        self._send('setm ' + self.addr_x + (' gnd' if value else ' stp'))
         self._Gx = value
 
     @attribute(dtype=bool, access=AttrWriteType.READ_WRITE,
-               doc="Ground state of y axis (write True to ground, False to return to stepping mode)")
+               doc="Ground state of y axis")
     def Gy(self):
         return self._Gy
 
     @Gy.write
     def Gy(self, value):
-        if value:
-            self.ANC.Write('setm ' + self.addr_y + ' gnd')
-        else:
-            self.ANC.Write('setm ' + self.addr_y + ' stp')
+        self._send('setm ' + self.addr_y + (' gnd' if value else ' stp'))
         self._Gy = value
 
     @attribute(dtype=bool, access=AttrWriteType.READ_WRITE,
-               doc="Ground state of z axis (write True to ground, False to return to stepping mode)")
+               doc="Ground state of z axis")
     def Gz(self):
         return self._Gz
 
     @Gz.write
     def Gz(self, value):
-        if value:
-            self.ANC.Write('setm ' + self.addr_z + ' gnd')
-        else:
-            self.ANC.Write('setm ' + self.addr_z + ' stp')
+        self._send('setm ' + self.addr_z + (' gnd' if value else ' stp'))
         self._Gz = value
 
-    # ---- Commands -------------------------------------------------------
+    # =========================================================================
+    # Commands
+    # =========================================================================
 
     @command()
     def Ground(self):
-        """Ground all three axes. Attempts all axes even if one fails; raises if any failed."""
+        """Ground all three axes. Attempts all axes even if one fails."""
         errors = []
         for addr, flag, name in [
             (self.addr_x, '_Gx', 'x'),
@@ -293,7 +338,7 @@ class ANC300(Device):
             (self.addr_z, '_Gz', 'z'),
         ]:
             try:
-                self.ANC.Write('setm ' + addr + ' gnd')
+                self._send('setm ' + addr + ' gnd')
                 setattr(self, flag, True)
             except Exception as e:
                 errors.append('axis {}: {}'.format(name, e))
@@ -301,8 +346,16 @@ class ANC300(Device):
             tango.Except.throw_exception(
                 'Ground failed',
                 'Some axes could not be grounded: ' + '; '.join(errors),
-                'ANC300::Ground'
-            )
+                'ANC300::Ground')
+
+    @command()
+    def Reconnect(self):
+        """Close and reopen the TCP connection to the ANC300."""
+        try:
+            self._connect()
+        except Exception as e:
+            self.set_state(DevState.FAULT)
+            self.set_status("Reconnect failed: {}".format(e))
 
 
 def main(args=None, **kwargs):
