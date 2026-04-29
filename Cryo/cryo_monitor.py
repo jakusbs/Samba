@@ -13,8 +13,10 @@ Left panel  (~430 px, scrollable):
 
 Right panel (flexible):
   • Time-window selector (1 min → 3 hr)
-  • 4 stacked rolling plots: Temperatures (K) / Pressures (mbar) /
-    Heater Powers (W) / Turbopump (Hz)
+  • 3-column grid of individual subplots — one per channel:
+      Col 0 Temperatures (K):   Sample, VTI, Magnet, 40K Stage, Reservoir
+      Col 1 Pressures (mbar):   Cryo In, Cryo Out, Dump
+      Col 2 Heaters & Pump:     Sample Htr, VTI Htr, Res Htr, Turbopump
 
 Architecture:
   QTimer (500 ms) → daemon thread reads all attrs via read_attributes() →
@@ -35,6 +37,7 @@ import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 
 from hardware import get_proxy, fresh_proxy, safe_write
 
@@ -70,33 +73,29 @@ _ALL_ATTRS = [
     "ErrorStatus", "ErrorMessage", "ActionMessage",
 ]
 
-# ── Plot channel definitions ───────────────────────────────────────────────────
-_TEMP_LINES = [
-    ("Temperature",          "Sample",    "#a6e3a1"),
-    ("VtiTemperature",       "VTI",       "#89b4fa"),
-    ("MagnetTemperature",    "Magnet",    "#fab387"),
-    ("Stage40KTemperature",  "40K Stage", "#f9e2af"),
-    ("ReservoirTemperature", "Reservoir", "#cba6f7"),
+# ── Per-channel subplot definitions: (attr, col, label, color, unit) ──────────
+# 3-column grid; rows within each column are filled top-to-bottom.
+# Col 0: Temperatures (5 rows), Col 1: Pressures (3 rows), Col 2: Heaters+Pump (4 rows)
+_CHANNEL_SUBPLOTS = [
+    # Column 0 — Temperatures
+    ("Temperature",          0, "Sample T",    "#a6e3a1", "K"),
+    ("VtiTemperature",       0, "VTI T",       "#89b4fa", "K"),
+    ("MagnetTemperature",    0, "Magnet T",    "#fab387", "K"),
+    ("Stage40KTemperature",  0, "40K Stage T", "#f9e2af", "K"),
+    ("ReservoirTemperature", 0, "Reservoir T", "#cba6f7", "K"),
+    # Column 1 — Pressures
+    ("CryostatInPressure",   1, "Cryo In",     "#89dceb", "mbar"),
+    ("CryostatOutPressure",  1, "Cryo Out",    "#f38ba8", "mbar"),
+    ("DumpPressure",         1, "Dump",        "#94e2d5", "mbar"),
+    # Column 2 — Heaters & Turbopump
+    ("SampleHeaterPower",    2, "Sample Htr",  "#a6e3a1", "W"),
+    ("VtiHeaterPower",       2, "VTI Htr",     "#89b4fa", "W"),
+    ("ReservoirHeaterPower", 2, "Res. Htr",    "#cba6f7", "W"),
+    ("TurbopumpFrequency",   2, "Turbopump",   "#f9e2af", "Hz"),
 ]
-_PRES_LINES = [
-    ("CryostatInPressure",  "Cryo In",  "#89dceb"),
-    ("CryostatOutPressure", "Cryo Out", "#f38ba8"),
-    ("DumpPressure",        "Dump",     "#94e2d5"),
-]
-_HEAT_LINES = [
-    ("SampleHeaterPower",    "Sample",    "#a6e3a1"),
-    ("VtiHeaterPower",       "VTI",       "#89b4fa"),
-    ("ReservoirHeaterPower", "Reservoir", "#cba6f7"),
-]
-_TURBO_LINES = [
-    ("TurbopumpFrequency", "Turbopump", "#f9e2af"),
-]
-_PLOT_GROUPS = [
-    ("Temperature (K)",  _TEMP_LINES),
-    ("Pressure (mbar)",  _PRES_LINES),
-    ("Heater Power (W)", _HEAT_LINES),
-    ("Turbopump (Hz)",   _TURBO_LINES),
-]
+_N_PLOT_ROWS = 5   # number of rows in the GridSpec (max column length)
+_N_PLOT_COLS = 3
+_COL_LABELS  = ["Temperatures", "Pressures", "Heaters & Pump"]
 
 # ── Boolean flag badges ────────────────────────────────────────────────────────
 _FLAGS = [
@@ -192,12 +191,12 @@ class CryoMonitorDialog(QDialog):
         self._polling = False
         self._last_msg_key = None
 
-        # Rolling time-series buffers
+        # Rolling time-series buffers (one deque per plotted attribute)
         self._time_buf: collections.deque = collections.deque(maxlen=_MAXLEN)
-        self._plot_bufs: dict = {}
-        for _, channels in _PLOT_GROUPS:
-            for attr, _, _ in channels:
-                self._plot_bufs[attr] = collections.deque(maxlen=_MAXLEN)
+        self._plot_bufs: dict = {
+            attr: collections.deque(maxlen=_MAXLEN)
+            for attr, *_ in _CHANNEL_SUBPLOTS
+        }
 
         # Toggle button registry — populated by _build_field_ctrl / _build_temp_ctrl
         self._toggle_btns: list = []
@@ -485,37 +484,46 @@ class CryoMonitorDialog(QDialog):
         parent.addWidget(grp)
 
     def _build_plots(self, parent):
-        self._fig = Figure(figsize=(10, 8), dpi=90, facecolor="#1e1e2e")
-        n = len(_PLOT_GROUPS)
+        self._fig = Figure(figsize=(12, 8), dpi=90, facecolor="#1e1e2e")
+        gs = GridSpec(_N_PLOT_ROWS, _N_PLOT_COLS,
+                      figure=self._fig,
+                      hspace=0.55, wspace=0.35,
+                      top=0.93, bottom=0.05,
+                      left=0.07, right=0.97)
+
         self._plot_lines: dict = {}
-        self._axes = []
+        self._channel_axes = []   # (ax, attr, color)
 
-        for i, (title, channels) in enumerate(_PLOT_GROUPS):
-            sharex = self._axes[0] if i > 0 else None
-            ax = self._fig.add_subplot(n, 1, i + 1, sharex=sharex)
-            ax.set_facecolor("#12121f")
-            ax.set_title(title, color="#a6adc8", fontsize=9, pad=2, loc="left")
-            ax.tick_params(colors="#aaaacc", labelsize=7)
-            for sp in ax.spines.values():
-                sp.set_edgecolor("#3a3a5c")
-            ax.grid(color="#2a2a3c", linewidth=0.5, linestyle="--", alpha=0.7)
-            if i < n - 1:
-                ax.tick_params(labelbottom=False)
+        # Group channel entries by column
+        col_channels: dict[int, list] = {c: [] for c in range(_N_PLOT_COLS)}
+        for attr, col, label, color, unit in _CHANNEL_SUBPLOTS:
+            col_channels[col].append((attr, label, color, unit))
 
-            legend_lines = []
-            for attr, label, color in channels:
-                ln, = ax.plot([], [], color=color, linewidth=1.2, label=label)
+        for col, channels in col_channels.items():
+            for row, (attr, label, color, unit) in enumerate(channels):
+                ax = self._fig.add_subplot(gs[row, col])
+                ax.set_facecolor("#12121f")
+                ax.set_title(f"{label} ({unit})",
+                             color=color, fontsize=8, pad=2)
+                ax.tick_params(colors="#aaaacc", labelsize=6)
+                for sp in ax.spines.values():
+                    sp.set_edgecolor("#3a3a5c")
+                ax.grid(color="#2a2a3c", linewidth=0.5,
+                        linestyle="--", alpha=0.7)
+                ln, = ax.plot([], [], color=color, linewidth=1.2)
                 self._plot_lines[attr] = ln
-                legend_lines.append(ln)
+                self._channel_axes.append((ax, attr, color))
 
-            if len(channels) > 1:
-                ax.legend(fontsize=7, loc="upper left",
-                          facecolor="#1e1e2e", edgecolor="#45475a",
-                          labelcolor="#cdd6f4")
-            self._axes.append(ax)
+            # Hide unused rows in this column
+            for row in range(len(channels), _N_PLOT_ROWS):
+                ax = self._fig.add_subplot(gs[row, col])
+                ax.set_visible(False)
 
-        self._axes[-1].set_xlabel("Elapsed (s)", color="#aaaacc", fontsize=8)
-        self._fig.tight_layout(pad=1.2, h_pad=0.8)
+        # Column header text
+        col_x = [0.19, 0.51, 0.83]
+        for x, lbl in zip(col_x, _COL_LABELS):
+            self._fig.text(x, 0.97, lbl, ha="center", va="top",
+                           color="#6c7086", fontsize=10, fontweight="bold")
 
         self._canvas = FigureCanvas(self._fig)
         parent.addWidget(self._canvas, stretch=1)
@@ -634,12 +642,10 @@ class CryoMonitorDialog(QDialog):
         x_hi = ts[-1] + 1.0
         x_lo = max(0.0, x_hi - window_s)
 
-        for attr, line in self._plot_lines.items():
+        for ax, attr, _ in self._channel_axes:
             vs = list(self._plot_bufs[attr])
             if len(vs) == len(ts):
-                line.set_data(ts, vs)
-
-        for ax in self._axes:
+                self._plot_lines[attr].set_data(ts, vs)
             ax.set_xlim(x_lo, x_hi)
             ax.relim()
             ax.autoscale_view(scalex=False, scaley=True)
