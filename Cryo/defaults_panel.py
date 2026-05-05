@@ -341,32 +341,59 @@ class SetupDefaultsPanel(QWidget):
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
-        # ── Stage Actuators ───────────────────────────────────────────────────
+        # ── Stage Actuators — Faraday / Voigt × ANM200 / ANC300 ─────────────
         act_grp = QGroupBox("Stage Actuators")
-        act_g   = QGridLayout(act_grp)
-        act_g.setSpacing(6); act_g.setContentsMargins(8, 8, 8, 8)
+        act_outer = QHBoxLayout(act_grp)
+        act_outer.setSpacing(10); act_outer.setContentsMargins(8, 8, 8, 8)
 
-        for col, hdr in enumerate(["", "Device", "Attr", "Label", "Unit"]):
-            lbl = QLabel(hdr)
-            lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
-            act_g.addWidget(lbl, 0, col)
+        def _make_piezo_rows(grp_layout):
+            """Add header + 3 ActuatorDefaultRow widgets to grp_layout.
+            Returns (act1_row, act2_row, actz_row)."""
+            g = grp_layout
+            for col, hdr in enumerate(["", "Device", "Attr", "Label", "Unit"]):
+                lbl = QLabel(hdr)
+                lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
+                g.addWidget(lbl, 0, col)
+            rows = []
+            for i, axis_lbl in enumerate(["Act 1 (X):", "Act 2 (Y):", "Z (focus):"], 1):
+                lbl2 = QLabel(axis_lbl); lbl2.setStyleSheet("font-weight:bold;")
+                row  = ActuatorDefaultRow(self._registry)
+                g.addWidget(lbl2, i, 0)
+                g.addWidget(row,  i, 1, 1, 4)
+                rows.append(row)
+            return rows
 
-        self.act1_row = ActuatorDefaultRow(self._registry)
-        self.act2_row = ActuatorDefaultRow(self._registry)
-        self.actz_row = ActuatorDefaultRow(self._registry)
+        def _make_geo_grp(geo_label):
+            """Build one geometry column (Faraday or Voigt) with ANM200+ANC300."""
+            geo_grp = QGroupBox(geo_label)
+            geo_v   = QVBoxLayout(geo_grp)
+            geo_v.setSpacing(6); geo_v.setContentsMargins(6, 6, 6, 6)
+            anm_grp = QGroupBox("ANM200 (fine)")
+            anm_g   = QGridLayout(anm_grp); anm_g.setSpacing(3)
+            anc_grp = QGroupBox("ANC300 (coarse)")
+            anc_g   = QGridLayout(anc_grp); anc_g.setSpacing(3)
+            anm_rows = _make_piezo_rows(anm_g)
+            anc_rows = _make_piezo_rows(anc_g)
+            geo_v.addWidget(anm_grp)
+            geo_v.addWidget(anc_grp)
+            return geo_grp, anm_rows, anc_rows
 
-        for row_idx, (name, widget) in enumerate([
-                ("Act 1 (X):", self.act1_row),
-                ("Act 2 (Y):", self.act2_row),
-                ("Z (focus):", self.actz_row),
-        ], start=1):
-            lbl = QLabel(name); lbl.setStyleSheet("font-weight:bold;")
-            act_g.addWidget(lbl,    row_idx, 0)
-            act_g.addWidget(widget, row_idx, 1, 1, 4)
+        far_grp, far_anm, far_anc = _make_geo_grp("Faraday")
+        voi_grp, voi_anm, voi_anc = _make_geo_grp("Voigt")
 
-        self.act1_row.changed.connect(self.defaults_changed)
-        self.act2_row.changed.connect(self.defaults_changed)
-        self.actz_row.changed.connect(self.defaults_changed)
+        (self.far_anm_act1, self.far_anm_act2, self.far_anm_actz) = far_anm
+        (self.far_anc_act1, self.far_anc_act2, self.far_anc_actz) = far_anc
+        (self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz) = voi_anm
+        (self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz) = voi_anc
+
+        for row in (self.far_anm_act1, self.far_anm_act2, self.far_anm_actz,
+                    self.far_anc_act1, self.far_anc_act2, self.far_anc_actz,
+                    self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz,
+                    self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz):
+            row.changed.connect(self.defaults_changed)
+
+        act_outer.addWidget(far_grp)
+        act_outer.addWidget(voi_grp)
         root.addWidget(act_grp)
 
         # ── Hardware: Keithley + AttoDRY side by side ─────────────────────────
@@ -453,9 +480,11 @@ class SetupDefaultsPanel(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
     def set_registry(self, registry: List[dict]):
         self._registry = registry
-        self.act1_row.set_registry(registry)
-        self.act2_row.set_registry(registry)
-        self.actz_row.set_registry(registry)
+        for row in (self.far_anm_act1, self.far_anm_act2, self.far_anm_actz,
+                    self.far_anc_act1, self.far_anc_act2, self.far_anc_actz,
+                    self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz,
+                    self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz):
+            row.set_registry(registry)
         self.zi_hw.set_registry(registry)
         self.ks_hw.set_registry(registry)
         self.ad_hw.set_registry(registry)
@@ -466,9 +495,21 @@ class SetupDefaultsPanel(QWidget):
 
     def load(self, setup: dict):
         """Restore all selections from a setup dict."""
-        self.act1_row.load(setup.get("act1_device", ""), setup.get("act1_attr", "x"))
-        self.act2_row.load(setup.get("act2_device", ""), setup.get("act2_attr", "y"))
-        self.actz_row.load(setup.get("z_device",    ""), setup.get("z_attr",    "z"))
+        def _load_piezo(row1, row2, rowz, blk):
+            row1.load(blk.get("act1_device", ""), blk.get("act1_attr", "x"))
+            row2.load(blk.get("act2_device", ""), blk.get("act2_attr", "y"))
+            rowz.load(blk.get("z_device",    ""), blk.get("z_attr",    "z"))
+
+        far = setup.get("stage_faraday", {})
+        voi = setup.get("stage_voigt",   {})
+        _load_piezo(self.far_anm_act1, self.far_anm_act2, self.far_anm_actz,
+                    far.get("anm200", {}))
+        _load_piezo(self.far_anc_act1, self.far_anc_act2, self.far_anc_actz,
+                    far.get("anc300", {}))
+        _load_piezo(self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz,
+                    voi.get("anm200", {}))
+        _load_piezo(self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz,
+                    voi.get("anc300", {}))
 
         zi_attrs = {tup[1]: setup.get(tup[1], tup[2]) for tup in LOCKIN_ATTR_DEFS}
         self.zi_hw.load(setup.get("zi_device", ""), zi_attrs)
@@ -484,19 +525,28 @@ class SetupDefaultsPanel(QWidget):
 
     def get_values(self) -> dict:
         """Return current selections as a dict suitable for merging into setup."""
-        act1 = self.act1_row.get()
-        act2 = self.act2_row.get()
-        actz = self.actz_row.get()
+        def _piezo_block(r1, r2, rz) -> dict:
+            a1, a2, az = r1.get(), r2.get(), rz.get()
+            return {
+                "act1_device": a1["device"], "act1_attr": a1["attr"],
+                "act1_label":  a1["label"],  "act1_unit": a1["unit"],
+                "act2_device": a2["device"], "act2_attr": a2["attr"],
+                "act2_label":  a2["label"],  "act2_unit": a2["unit"],
+                "z_device":    az["device"], "z_attr":    az["attr"],
+                "z_label":     az["label"],  "z_unit":    az["unit"],
+            }
         zi_attrs = self.zi_hw.get_attrs()
         ks_attrs = self.ks_hw.get_attrs()
         ad_attrs = self.ad_hw.get_attrs()
         return {
-            "act1_device": act1["device"], "act1_attr": act1["attr"],
-            "act1_label":  act1["label"],  "act1_unit": act1["unit"],
-            "act2_device": act2["device"], "act2_attr": act2["attr"],
-            "act2_label":  act2["label"],  "act2_unit": act2["unit"],
-            "z_device":    actz["device"], "z_attr":    actz["attr"],
-            "z_label":     actz["label"],  "z_unit":    actz["unit"],
+            "stage_faraday": {
+                "anm200": _piezo_block(self.far_anm_act1, self.far_anm_act2, self.far_anm_actz),
+                "anc300": _piezo_block(self.far_anc_act1, self.far_anc_act2, self.far_anc_actz),
+            },
+            "stage_voigt": {
+                "anm200": _piezo_block(self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz),
+                "anc300": _piezo_block(self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz),
+            },
             "zi_device":   self.zi_hw.dev_combo.currentData() or "",
             **zi_attrs,
             "keithley_device": self.ks_hw.dev_combo.currentData() or "",

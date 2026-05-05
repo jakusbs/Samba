@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: tangods-ZI_DAQ
+Version: 3.0.0
+Summary: ZI MFLI Tango device (dev4855) with DAQ module averaging
+Requires-Dist: pytango
+Requires-Dist: numpy
+Requires-Dist: zhinst
+Dynamic: requires-dist
+Dynamic: summary

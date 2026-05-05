@@ -1,0 +1,3 @@
+pytango
+numpy
+zhinst

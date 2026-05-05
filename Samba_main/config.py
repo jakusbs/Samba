@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -60,7 +60,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
+        "rtv40_device":          "hpp-N42/pulser/RTV40",
     },
     "IR": {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
@@ -93,7 +94,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
+        "rtv40_device":          "hpp-N42/pulser/RTV40",
     },
     "Cryo": {
         "magnet_device":         "",
@@ -126,7 +128,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_attr":             "y",
         "act2_label":            "Y",
         "act2_unit":             "nm",
-        "trmoke_dg645":          "intermag/dg645/1",
+        "trmoke_dg645":          "hpp-N42/delay/DG645",
     },
 }
 
@@ -189,7 +191,7 @@ def make_default_config(name: str = "scan_x") -> dict:
             {"label": "R6",        "attr": "result6", "enabled": False, "y_axis": "Y2"},
         ],
         # TR-MOKE defaults
-        "trmoke_dg645":     "intermag/dg645/1",
+        "trmoke_dg645":     "hpp-N42/delay/DG645",
         "trmoke_channel":   "A",
         "trmoke_output":    "AB",
         "trmoke_unit":      "ns",
@@ -207,6 +209,12 @@ def make_default_config(name: str = "scan_x") -> dict:
         "trmoke_notes":     "",
         "trmoke_field_A":   0.0,
         "trmoke_sensors":   [],
+        # RTV40 pulse-width sync (TR-MOKE)
+        "rtv40_sync_enabled":   False,
+        "rtv40_base_width_ns":  1.0,
+        "rtv40_trig_src":       1,      # 0=Off, 1=External, 2=Internal
+        "rtv40_trig_rate":      1000.0,
+        "rtv40_polarity":       1,      # 0=Negative, 1=Positive
     }
 
 def make_default_setup(name: str) -> dict:
@@ -274,9 +282,18 @@ def _migrate_v0_to_v1(cfg: dict):
         else: s.setdefault("y_axis", "Y1")
 
 
+def _migrate_v2_to_v3(cfg: dict):
+    """v2→v3: Add RTV40 pulse-width sync defaults."""
+    cfg.setdefault("rtv40_sync_enabled",  False)
+    cfg.setdefault("rtv40_base_width_ns", 1.0)
+    cfg.setdefault("rtv40_trig_src",      1)
+    cfg.setdefault("rtv40_trig_rate",     1000.0)
+    cfg.setdefault("rtv40_polarity",      1)
+
+
 def _migrate_v1_to_v2(cfg: dict):
     """v1→v2: Add TR-MOKE defaults."""
-    cfg.setdefault("trmoke_dg645",     "intermag/dg645/1")
+    cfg.setdefault("trmoke_dg645",     "hpp-N42/delay/DG645")
     cfg.setdefault("trmoke_channel",   "A")
     cfg.setdefault("trmoke_output",    "AB")
     cfg.setdefault("trmoke_unit",      "ns")
@@ -300,6 +317,7 @@ def _migrate_v1_to_v2(cfg: dict):
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
+    (3, _migrate_v2_to_v3),
 ]
 
 

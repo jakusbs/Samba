@@ -183,19 +183,43 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "zi_order_attr":       "filterorder",
         "zi_settling_attr":    "settlingtime",
         "attodry_device":      "hpp-N42/attoDRY/attoDRY",
-        # Stage actuator defaults (editable in Setup Defaults tab)
-        "act1_device":         "smaract2/control/IR-controller",
-        "act1_attr":           "x",
-        "act1_label":          "X",
-        "act1_unit":           "nm",
-        "act2_device":         "smaract2/control/IR-controller",
-        "act2_attr":           "y",
-        "act2_label":          "Y",
-        "act2_unit":           "nm",
-        "z_device":            "smaract2/control/IR-controller",
-        "z_attr":              "z",
-        "z_label":             "Z",
-        "z_unit":              "nm",
+        # Stage actuators — two geometry presets × two piezo types
+        "stage_faraday": {
+            "anm200": {
+                "act1_device": "hpp-N42/attocube/ANM200",
+                "act1_attr": "x", "act1_label": "X", "act1_unit": "nm",
+                "act2_device": "hpp-N42/attocube/ANM200",
+                "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
+                "z_device": "hpp-N42/attocube/ANM200",
+                "z_attr": "z", "z_label": "Z", "z_unit": "nm",
+            },
+            "anc300": {
+                "act1_device": "hpp-N42/attocube/ANC300",
+                "act1_attr": "px", "act1_label": "X", "act1_unit": "steps",
+                "act2_device": "hpp-N42/attocube/ANC300",
+                "act2_attr": "py", "act2_label": "Y", "act2_unit": "steps",
+                "z_device": "hpp-N42/attocube/ANC300",
+                "z_attr": "pz", "z_label": "Z", "z_unit": "steps",
+            },
+        },
+        "stage_voigt": {
+            "anm200": {
+                "act1_device": "hpp-N42/attocube/ANM200",
+                "act1_attr": "x", "act1_label": "X", "act1_unit": "nm",
+                "act2_device": "hpp-N42/attocube/ANM200",
+                "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
+                "z_device": "hpp-N42/attocube/ANM200",
+                "z_attr": "z", "z_label": "Z", "z_unit": "nm",
+            },
+            "anc300": {
+                "act1_device": "hpp-N42/attocube/ANC300",
+                "act1_attr": "px", "act1_label": "X", "act1_unit": "steps",
+                "act2_device": "hpp-N42/attocube/ANC300",
+                "act2_attr": "py", "act2_label": "Y", "act2_unit": "steps",
+                "z_device": "hpp-N42/attocube/ANC300",
+                "z_attr": "pz", "z_label": "Z", "z_unit": "steps",
+            },
+        },
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         # Keithley attribute names (editable in Setup Defaults tab)
         "keithley_attr_amplitude":  "amplitude",
@@ -263,6 +287,8 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_device": "smaract2/control/IR-controller",
         "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
+        "geometry": "Faraday",
+        "stage_type": "anm200",
         "zigzag": True,
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
@@ -332,6 +358,8 @@ def _migrate_config(cfg: dict):
         {"label": "R5 (Hall)", "attr": "result5", "enabled": False, "y_axis": "Y2"},
         {"label": "R6",        "attr": "result6", "enabled": False, "y_axis": "Y2"},
     ])
+    cfg.setdefault("geometry", "Faraday")
+    cfg.setdefault("stage_type", "anm200")
     for s in cfg.get("sensors", []):
         s.setdefault("plot_visible", True)
         s.setdefault("device_name", "")       # registry device name (new format)
@@ -354,6 +382,33 @@ def load_setup(name: str) -> dict:
         try:
             with open(path) as f:
                 d = json.load(f)
+            if name == "Cryo":
+                _anc_default = copy.deepcopy(
+                    SETUP_HW_DEFAULTS["Cryo"]["stage_faraday"]["anc300"])
+                # v0 migration: very old configs stored flat act1/act2/z at setup level
+                if "act1_device" in d and "stage_faraday" not in d:
+                    old_block = {
+                        "act1_device": d.pop("act1_device", ""),
+                        "act1_attr":   d.pop("act1_attr",   "x"),
+                        "act1_label":  d.pop("act1_label",  "X"),
+                        "act1_unit":   d.pop("act1_unit",   "nm"),
+                        "act2_device": d.pop("act2_device", ""),
+                        "act2_attr":   d.pop("act2_attr",   "y"),
+                        "act2_label":  d.pop("act2_label",  "Y"),
+                        "act2_unit":   d.pop("act2_unit",   "nm"),
+                        "z_device":    d.pop("z_device",    ""),
+                        "z_attr":      d.pop("z_attr",      "z"),
+                        "z_label":     d.pop("z_label",     "Z"),
+                        "z_unit":      d.pop("z_unit",      "nm"),
+                    }
+                    d["stage_faraday"] = {"anm200": old_block, "anc300": _anc_default}
+                    d["stage_voigt"]   = {
+                        "anm200": copy.deepcopy(old_block), "anc300": _anc_default}
+                # v1 migration: previous commit stored act1_device flat inside stage_faraday
+                for geo_key in ("stage_faraday", "stage_voigt"):
+                    blk = d.get(geo_key, {})
+                    if "act1_device" in blk:
+                        d[geo_key] = {"anm200": blk, "anc300": copy.deepcopy(_anc_default)}
             for k, v in SETUP_HW_DEFAULTS[name].items():
                 if k in HW_WARN_KEYS:
                     saved = d.get(k)

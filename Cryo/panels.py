@@ -1425,6 +1425,7 @@ class TrajectoryPanel(QWidget):
             type_row.addWidget(b)
         self.scan_bg.idClicked.connect(lambda _: self._on_type_changed())
         type_row.addStretch()
+        self._type_row = type_row   # exposed so samba_cryo can append extra widgets
         root.addLayout(type_row)
 
         # ── Spatial panel ─────────────────────────────────────────────────────
@@ -1526,7 +1527,7 @@ class TrajectoryPanel(QWidget):
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
         ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
         fgl.addLayout(ac_mon_row, 3, 0, 1, 2)
-        self._ac_grp.setMaximumWidth(310)
+        self._ac_grp.setMinimumWidth(260)
         horiz.addWidget(self._ac_grp)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
@@ -1605,7 +1606,7 @@ class TrajectoryPanel(QWidget):
         self._dc_mon_ch = NoScrollComboBox(); self._dc_mon_ch.setStyleSheet("font-size:10px;")
         dc_mon_row.addWidget(self._dc_mon_ch, stretch=1)
         dc_pgl.addLayout(dc_mon_row, 5, 0, 1, 4)
-        self._dc_grp.setMaximumWidth(340)
+        self._dc_grp.setMinimumWidth(280)
         horiz.addWidget(self._dc_grp)
 
         fw_root.addLayout(horiz)

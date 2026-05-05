@@ -281,12 +281,15 @@ class CryoMainWindow(QMainWindow):
             "Keithley":  setup.get("keithley_device", ""),
             "AttoDRY":   setup.get("attodry_device",  ""),
         }
-        # Also check the stage device from the active scan config
+        # Check the stage device from the active geometry + piezo block
         configs = setup.get("configs", [])
         if configs:
             idx = setup.get("active_idx", 0)
             cfg = configs[min(idx, len(configs) - 1)]
-            stage_dev = cfg.get("act1_device", "")
+            geo = cfg.get("geometry",   "Faraday")
+            st  = cfg.get("stage_type", "anm200")
+            piezo_block = setup.get(f"stage_{geo.lower()}", {}).get(st, {})
+            stage_dev = piezo_block.get("act1_device", "")
             if stage_dev:
                 candidates["Stage"] = stage_dev
 
@@ -453,7 +456,7 @@ class CryoMainWindow(QMainWindow):
         h_split.addWidget(center)
 
         self.right_panel = RightPanel(); h_split.addWidget(self.right_panel)
-        h_split.setSizes([215, 760, 360])
+        h_split.setSizes([215, 640, 480])
         h_split.setStretchFactor(0, 0)
         h_split.setStretchFactor(1, 1)
         h_split.setStretchFactor(2, 0)
@@ -470,6 +473,79 @@ class CryoMainWindow(QMainWindow):
                                          hw_panel_class=CryoHardwarePanel)
         self.data_browser = DataBrowserPanel(
             lambda: self._active_setup().get("save_dir", "~/moke_data"))
+
+        # ── Geometry & Piezo toggles — injected into the scan type row ───────
+        # Pill-button factory matching the scan type button style.
+        def _pill(label, *, checked=False, checked_color, left=False, right=False):
+            if left:
+                r = ("border-top-left-radius:6px;border-bottom-left-radius:6px;"
+                     "border-top-right-radius:0;border-bottom-right-radius:0;")
+            elif right:
+                r = ("border-top-right-radius:6px;border-bottom-right-radius:6px;"
+                     "border-top-left-radius:0;border-bottom-left-radius:0;")
+            else:
+                r = "border-radius:0;"
+            b = QPushButton(label)
+            b.setCheckable(True); b.setChecked(checked)
+            b.setFixedHeight(28)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setStyleSheet(
+                f"QPushButton{{background:#252538;border:1px solid #45475a;"
+                f"color:#6c7086;font-size:11px;font-weight:bold;padding:0 12px;{r}}}"
+                f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+                f"QPushButton:checked{{background:{checked_color};color:#1e1e2e;"
+                f"border-color:{checked_color};}}")
+            return b
+
+        geo_tip = ("Select the optical geometry for this scan.\n"
+                   "Stage actuator device paths are injected from the\n"
+                   "matching Faraday or Voigt block in Setup Defaults.")
+        self.geo_faraday_btn = _pill("Faraday", checked=True,
+                                     checked_color="#cba6f7", left=True)
+        self.geo_voigt_btn   = _pill("Voigt",   checked_color="#cba6f7", right=True)
+        for b in (self.geo_faraday_btn, self.geo_voigt_btn):
+            b.setToolTip(geo_tip)
+        self._geo_btn_grp = QButtonGroup(self)
+        self._geo_btn_grp.addButton(self.geo_faraday_btn)
+        self._geo_btn_grp.addButton(self.geo_voigt_btn)
+        self._geo_btn_grp.setExclusive(True)
+
+        piezo_tip = ("Select which piezo stage to use for this scan.\n"
+                     "ANM200 = fine scanner (nm);  ANC300 = coarse stepper (steps).")
+        self.piezo_anm_btn = _pill("ANM200", checked=True,
+                                   checked_color="#a6e3a1", left=True)
+        self.piezo_anc_btn = _pill("ANC300", checked_color="#a6e3a1", right=True)
+        for b in (self.piezo_anm_btn, self.piezo_anc_btn):
+            b.setToolTip(piezo_tip)
+        self._piezo_btn_grp = QButtonGroup(self)
+        self._piezo_btn_grp.addButton(self.piezo_anm_btn)
+        self._piezo_btn_grp.addButton(self.piezo_anc_btn)
+        self._piezo_btn_grp.setExclusive(True)
+
+        # Append to the scan type row (remove trailing stretch, add widgets, re-add)
+        tr = self.traj_panel._type_row
+        tr.takeAt(tr.count() - 1)   # remove stretch
+
+        def _row_sep():
+            f = QFrame(); f.setFrameShape(QFrame.Shape.VLine)
+            f.setFixedWidth(1); f.setFixedHeight(22)
+            f.setStyleSheet("background:#45475a;border:none;")
+            return f
+
+        def _row_lbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
+            return lbl
+
+        tr.addSpacing(12); tr.addWidget(_row_sep()); tr.addSpacing(8)
+        tr.addWidget(_row_lbl("Geometry:"))
+        tr.addSpacing(4)
+        tr.addWidget(self.geo_faraday_btn); tr.addWidget(self.geo_voigt_btn)
+        tr.addSpacing(12); tr.addWidget(_row_sep()); tr.addSpacing(8)
+        tr.addWidget(_row_lbl("Piezo:"))
+        tr.addSpacing(4)
+        tr.addWidget(self.piezo_anm_btn); tr.addWidget(self.piezo_anc_btn)
+        tr.addStretch()
 
         self.bottom_tabs.addTab(self.traj_panel,   "Trajectory")
         self.bottom_tabs.addTab(self.sl_panel,     "Scanlist")
@@ -512,6 +588,8 @@ class CryoMainWindow(QMainWindow):
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         self.defaults_panel.defaults_changed.connect(self._on_defaults_changed)
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
+        self._geo_btn_grp.buttonClicked.connect(self._on_geometry_changed)
+        self._piezo_btn_grp.buttonClicked.connect(self._on_stage_type_changed)
 
         self._browser_loaded = False
         self.bottom_tabs.currentChanged.connect(self._on_bottom_tab_changed)
@@ -602,6 +680,15 @@ class CryoMainWindow(QMainWindow):
         self.sl_panel.set_active_name(cfg.get("name","—"))
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
+        # Restore geometry + piezo toggles (blockSignals to avoid recursive saves)
+        geo = cfg.get("geometry",   "Faraday")
+        st  = cfg.get("stage_type", "anm200")
+        self._geo_btn_grp.blockSignals(True)
+        self._piezo_btn_grp.blockSignals(True)
+        (self.geo_voigt_btn if geo == "Voigt" else self.geo_faraday_btn).setChecked(True)
+        (self.piezo_anc_btn if st  == "anc300" else self.piezo_anm_btn).setChecked(True)
+        self._geo_btn_grp.blockSignals(False)
+        self._piezo_btn_grp.blockSignals(False)
         # Sync Setup Defaults panel
         self.defaults_panel.set_registry(registry)
         self.defaults_panel.load(setup)
@@ -624,6 +711,8 @@ class CryoMainWindow(QMainWindow):
         old["sensors"]        = self.right_panel.get_sensors()
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
+        old["geometry"]       = self._get_current_geometry()
+        old["stage_type"]     = self._get_current_stage_type()
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
         self._safe_save()
@@ -711,17 +800,42 @@ class CryoMainWindow(QMainWindow):
         self.status_lbl.setText("Setup defaults saved ✓")
         self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
 
+    def _get_current_geometry(self) -> str:
+        return "Faraday" if self.geo_faraday_btn.isChecked() else "Voigt"
+
+    def _get_current_stage_type(self) -> str:
+        return "anm200" if self.piezo_anm_btn.isChecked() else "anc300"
+
+    def _persist_scan_profile(self):
+        """Save geometry + stage_type from the toggles into the active config."""
+        configs = self._active_setup().get("configs", [])
+        if configs:
+            cfg = configs[self._active_cfg_idx]
+            cfg["geometry"]   = self._get_current_geometry()
+            cfg["stage_type"] = self._get_current_stage_type()
+        self._apply_defaults(self._active_setup())
+        self._safe_save()
+
+    def _on_geometry_changed(self, _btn=None):
+        self._persist_scan_profile()
+
+    def _on_stage_type_changed(self, _btn=None):
+        self._persist_scan_profile()
+
     def _apply_defaults(self, setup: dict):
         """Push setup defaults into trajectory actuators and calibration FL device."""
+        geo = self._get_current_geometry()
+        st  = self._get_current_stage_type()
+        piezo_block = setup.get(f"stage_{geo.lower()}", {}).get(st, {})
         self.traj_panel.set_actuator_defaults(
-            act1_dev=setup.get("act1_device", ""),
-            act1_attr=setup.get("act1_attr",   "x"),
-            act1_lbl=setup.get("act1_label",   "X"),
-            act1_unit=setup.get("act1_unit",   "nm"),
-            act2_dev=setup.get("act2_device", ""),
-            act2_attr=setup.get("act2_attr",   "y"),
-            act2_lbl=setup.get("act2_label",   "Y"),
-            act2_unit=setup.get("act2_unit",   "nm"),
+            act1_dev=piezo_block.get("act1_device", ""),
+            act1_attr=piezo_block.get("act1_attr",  "x"),
+            act1_lbl=piezo_block.get("act1_label",  "X"),
+            act1_unit=piezo_block.get("act1_unit",  "nm"),
+            act2_dev=piezo_block.get("act2_device", ""),
+            act2_attr=piezo_block.get("act2_attr",  "y"),
+            act2_lbl=piezo_block.get("act2_label",  "Y"),
+            act2_unit=piezo_block.get("act2_unit",  "nm"),
         )
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
@@ -773,20 +887,29 @@ class CryoMainWindow(QMainWindow):
         partial["sensors"]        = self.right_panel.get_sensors()
         partial["display_sensor"] = self.right_panel.get_display_sensor()
         partial["colormap"]       = self.right_panel.get_colormap()
-        # Inject device/attr from Setup Defaults so scan workers get the right paths
+        # Geometry + stage_type from active config (saved per-scan)
+        geo = "Faraday"; st = "anm200"
+        if configs:
+            cfg = configs[self._active_cfg_idx]
+            geo = cfg.get("geometry",   "Faraday")
+            st  = cfg.get("stage_type", "anm200")
+        partial["geometry"]   = geo
+        partial["stage_type"] = st
+        # Inject device/attr from the matching piezo block in Setup Defaults
         setup = self._active_setup()
+        piezo_block = setup.get(f"stage_{geo.lower()}", {}).get(st, {})
         for pfx, dkey, akey, lkey, ukey in [
             ("act1", "act1_device", "act1_attr", "act1_label", "act1_unit"),
             ("act2", "act2_device", "act2_attr", "act2_label", "act2_unit"),
         ]:
-            if setup.get(dkey):
-                partial.setdefault(f"{pfx}_device", setup[dkey])
-                partial.setdefault(f"{pfx}_attr",   setup[akey])
-                partial.setdefault(f"{pfx}_label",  setup.get(lkey, ""))
-                partial.setdefault(f"{pfx}_unit",   setup.get(ukey, "nm"))
-        if setup.get("z_device"):
-            partial.setdefault("z_device", setup["z_device"])
-            partial.setdefault("z_attr",   setup.get("z_attr", "z"))
+            if piezo_block.get(dkey):
+                partial.setdefault(f"{pfx}_device", piezo_block[dkey])
+                partial.setdefault(f"{pfx}_attr",   piezo_block[akey])
+                partial.setdefault(f"{pfx}_label",  piezo_block.get(lkey, ""))
+                partial.setdefault(f"{pfx}_unit",   piezo_block.get(ukey, "nm"))
+        if piezo_block.get("z_device"):
+            partial.setdefault("z_device", piezo_block["z_device"])
+            partial.setdefault("z_attr",   piezo_block.get("z_attr", "z"))
         return partial
 
     # ── Scan geometry ────────────────────────────────────────────────────────

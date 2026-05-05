@@ -1,1 +1,3 @@
-Samba_main/tango_devices/ZurichInstruments_lockin/__pycache__
+**/__pycache__/
+*.pyc
+*.pyo
