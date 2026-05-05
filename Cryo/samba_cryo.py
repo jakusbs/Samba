@@ -56,7 +56,7 @@ from panels  import (ConfigListPanel, RightPanel,
 from panels_cryo import CryoHardwarePanel
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
-from calibration import CalibrationPanel
+from calibration import CryoCalibrationPanel
 from device_registry import DeviceRegistryPanel, load_registry, registry_to_sensors
 from defaults_panel  import SetupDefaultsPanel
 import play_intro
@@ -236,6 +236,8 @@ class CryoMainWindow(QMainWindow):
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
         self._scan_total_pts:    int                      = 0
+        self._bidi_pending_rev:  bool                     = False
+        self._bidi_fwd_cfg:      dict                     = {}
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
@@ -427,8 +429,8 @@ class CryoMainWindow(QMainWindow):
             w   = widget_cls(); setattr(self, widget_attr, w); lay.addWidget(w)
             self.live_tabs.addTab(tab, title)
 
-        self.calib_panel = CalibrationPanel(self._active_setup,
-                                              config_getter=self._build_full_config)
+        self.calib_panel = CryoCalibrationPanel(self._active_setup,
+                                                  config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
 
         tlog = QWidget(); tlol = QVBoxLayout(tlog); tlol.setContentsMargins(2, 4, 2, 0)
@@ -840,6 +842,10 @@ class CryoMainWindow(QMainWindow):
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
             self.calib_panel.set_fl_device(fl_dev)
+        # ANC300 device — same device regardless of geometry, take from any piezo block
+        anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
+                   or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
+        self.calib_panel.set_anc_device(anc_dev)
 
     def _on_scan_mode_changed(self, mode):
         # Temperature sweep uses the standard FIELD engine — no DC mode needed
@@ -1044,17 +1050,84 @@ class CryoMainWindow(QMainWindow):
                 "Abort that scan first, then retry.")
             return
 
+        # ── ANM200 temperature-driven scaling ────────────────────────────────
+        if cfg.get("stage_type") == "anm200":
+            self._apply_anm200_scaling(cfg)
+
+        # ── Bidirectional setup ───────────────────────────────────────────────
+        mode, _, __ = self._scan_dims(cfg)
+        is_bidi = (cfg.get("bidirectional", False)
+                   and cfg.get("stage_type") == "anm200"
+                   and mode == "1D")
+        if is_bidi:
+            self._bidi_fwd_cfg = copy.deepcopy(cfg)
+            cfg = copy.deepcopy(cfg)
+            cfg["name"] = cfg["name"] + "_fwd"
+            self._bidi_pending_rev = True
+        else:
+            self._bidi_pending_rev = False
+
         self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
         _, n_x, n_y = self._scan_dims(cfg)
         total = n_x * n_y
         self.pbar.setMaximum(total); self.pbar.setValue(0)
-        self.pbar.setFormat("%v / %m pts")
+        self.pbar.setFormat("fwd %v / %m pts" if is_bidi else "%v / %m pts")
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
 
         self._worker = self._wire_worker(cfg, setup)
         self._scan_running = True; self._set_running(True); self._last_fn = None
+        self._worker.start()
+
+    def _apply_anm200_scaling(self, cfg: dict):
+        """Read sample temperature, interpolate ANM200 scaling [V/µm], write to device."""
+        setup = self._active_setup()
+        attodry_dev = setup.get("attodry_device", "")
+        anm_dev = cfg.get("act1_device", "")
+        if not anm_dev or not attodry_dev:
+            return
+        try:
+            from hardware import fresh_proxy, safe_read, safe_write
+            ad_p, err = fresh_proxy(attodry_dev)
+            if err:
+                log.warning("ANM200 scaling: cannot reach AttoDRY: %s", err); return
+            temp, e = safe_read(ad_p, "SampleTemperature")
+            if e or temp is None:
+                log.warning("ANM200 scaling: cannot read SampleTemperature: %s", e); return
+            # Linear interpolation between calibration points
+            # At   4 K: scaling = 1/3  V/µm  (10 V / 30 µm)
+            # At 300 K: scaling = 1/15 V/µm  (4 V  / 60 µm)
+            S_4K   = 1.0 / 3.0
+            S_300K = 4.0 / 60.0
+            t = float(temp)
+            s = S_4K + (t - 4.0) * (S_300K - S_4K) / (300.0 - 4.0)
+            s = max(S_300K, min(S_4K, s))   # clamp to calibrated range
+            anm_p, err = fresh_proxy(anm_dev)
+            if err:
+                log.warning("ANM200 scaling: cannot reach device: %s", err); return
+            safe_write(anm_p, "scaling", s)
+            log.info("ANM200 scaling set to %.5f V/µm  (T = %.1f K)", s, t)
+            self._log_append(
+                f"ANM200 scaling → {s:.5f} V/µm  (T = {t:.1f} K)", level="info")
+        except Exception as exc:
+            log.warning("ANM200 scaling update failed: %s", exc)
+
+    def _start_bidi_backward(self):
+        """Start the backward (reversed) half of a bidirectional scan."""
+        cfg = copy.deepcopy(self._bidi_fwd_cfg)
+        cfg["name"] = cfg["name"] + "_bwd"
+        cfg["act1_start"], cfg["act1_stop"] = cfg["act1_stop"], cfg["act1_start"]
+        setup = self._active_setup()
+        active = [s for s in cfg["sensors"] if s["enabled"]]
+        self._current_scan_cfg = cfg
+        self._setup_live_display(cfg, active)
+        self._alloc_scan_data(cfg, active)
+        _, n_x, n_y = self._scan_dims(cfg)
+        total = n_x * n_y
+        self.pbar.setMaximum(total); self.pbar.setValue(0)
+        self.pbar.setFormat("bwd %v / %m pts")
+        self._worker = self._wire_worker(cfg, setup)
         self._worker.start()
 
     # ── Calibration time scan ────────────────────────────────────────────────
@@ -1146,6 +1219,14 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setFormat(f"%v / %m pts  —  done")
 
     def _on_worker_finished(self):
+        # If this was the forward half of a bidirectional scan, start the backward half
+        # immediately without releasing the lock or resetting the running state.
+        if self._bidi_pending_rev:
+            self._bidi_pending_rev = False
+            self._last_fn = None
+            self._start_bidi_backward()
+            return
+
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
@@ -1173,6 +1254,7 @@ class CryoMainWindow(QMainWindow):
 
     def _abort_scan(self):
         if not self._scan_running: return
+        self._bidi_pending_rev = False   # cancel any pending backward pass
         if self._worker: self._worker.abort()
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting…")

@@ -454,6 +454,7 @@ class CalibrationPanel(QWidget):
         self._pos_status = QLabel("")
         self._pos_status.setWordWrap(True); self._pos_status.setStyleSheet("font-size:10px;")
         ctrl_l.addWidget(self._pos_status)
+        self._right_layout = rl   # exposed so subclasses can append extra columns
         rl.addWidget(ctrl_grp)
 
         # Autofocus

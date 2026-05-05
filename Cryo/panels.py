@@ -1467,9 +1467,16 @@ class TrajectoryPanel(QWidget):
         # Row 6 = below the N/Δ row (rows 0-4 = scan_cb, device, attr, start/stop, N/Δ)
         self.act1_grp.layout().addWidget(self.time_scan_lbl, 6, 0, 1, 4)
 
+        # Bidirectional checkbox — only shown for 1D ANM200 scans
+        self.bidi_cb = QCheckBox("Bidirectional  (saves _fwd + _bwd as separate files)")
+        self.bidi_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bidi_cb.setStyleSheet("QCheckBox{color:#cba6f7;font-size:10px;spacing:5px;}")
+        self.bidi_cb.setVisible(False)
+        self.act1_grp.layout().addWidget(self.bidi_cb, 7, 0, 1, 4)
+
         root.addWidget(self.spatial_w)
 
-        # Connect axis toggles → update zigzag visibility
+        # Connect axis toggles → update zigzag/bidi visibility
         self.act1_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
         self.act2_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
 
@@ -1707,6 +1714,9 @@ class TrajectoryPanel(QWidget):
 
         # Zigzag container: only visible when both axes are active
         self.zigzag_w.setVisible(both_on)
+
+        # Bidirectional: only relevant for 1D X-axis scans (act1 on, act2 off)
+        self.bidi_cb.setVisible(x_on and not y_on)
 
         # Time-scan banner inside the X axis group
         self.time_scan_lbl.setVisible(time_mode)
@@ -2020,6 +2030,7 @@ class TrajectoryPanel(QWidget):
             if self._ac_attr_combo.itemData(i) == field_attr:
                 self._ac_attr_combo.setCurrentIndex(i); break
         self.zigzag_cb.setChecked(cfg.get("zigzag", False))
+        self.bidi_cb.setChecked(cfg.get("bidirectional", False))
         self.int_time.setValue(cfg.get("integration_time", 0.1))
         self.settle.setValue(  cfg.get("settle_time",      0.05))
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
@@ -2092,7 +2103,8 @@ class TrajectoryPanel(QWidget):
             "scan_type": "FIELD" if is_field else "SPATIAL",
             "scan_x":    self.act1_grp.scan_cb.isChecked() if not is_field else False,
             "scan_y":    self.act2_grp.scan_cb.isChecked() if not is_field else False,
-            "zigzag":    self.zigzag_cb.isChecked(),
+            "zigzag":         self.zigzag_cb.isChecked(),
+            "bidirectional":  self.bidi_cb.isChecked() and self.bidi_cb.isVisible(),
         }
         p.update(self.act1_grp.get_partial("act1"))
         p.update(self.act2_grp.get_partial("act2"))
