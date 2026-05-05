@@ -456,7 +456,7 @@ class CryoMainWindow(QMainWindow):
         h_split.addWidget(center)
 
         self.right_panel = RightPanel(); h_split.addWidget(self.right_panel)
-        h_split.setSizes([215, 760, 360])
+        h_split.setSizes([215, 640, 480])
         h_split.setStretchFactor(0, 0)
         h_split.setStretchFactor(1, 1)
         h_split.setStretchFactor(2, 0)
@@ -474,74 +474,80 @@ class CryoMainWindow(QMainWindow):
         self.data_browser = DataBrowserPanel(
             lambda: self._active_setup().get("save_dir", "~/moke_data"))
 
-        # Wrap trajectory panel with a geometry toggle strip
-        traj_wrapper = QWidget()
-        traj_w_l = QVBoxLayout(traj_wrapper)
-        traj_w_l.setContentsMargins(0, 0, 0, 0); traj_w_l.setSpacing(2)
+        # ── Geometry & Piezo toggles — injected into the scan type row ───────
+        # Pill-button factory matching the scan type button style.
+        def _pill(label, *, checked=False, checked_color, left=False, right=False):
+            if left:
+                r = ("border-top-left-radius:6px;border-bottom-left-radius:6px;"
+                     "border-top-right-radius:0;border-bottom-right-radius:0;")
+            elif right:
+                r = ("border-top-right-radius:6px;border-bottom-right-radius:6px;"
+                     "border-top-left-radius:0;border-bottom-left-radius:0;")
+            else:
+                r = "border-radius:0;"
+            b = QPushButton(label)
+            b.setCheckable(True); b.setChecked(checked)
+            b.setFixedHeight(28)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setStyleSheet(
+                f"QPushButton{{background:#252538;border:1px solid #45475a;"
+                f"color:#6c7086;font-size:11px;font-weight:bold;padding:0 12px;{r}}}"
+                f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+                f"QPushButton:checked{{background:{checked_color};color:#1e1e2e;"
+                f"border-color:{checked_color};}}")
+            return b
 
-        geo_bar = QWidget(); geo_bar.setFixedHeight(32)
-        geo_bar.setStyleSheet(
-            "background:#12121f;border-bottom:1px solid #313244;")
-        geo_l = QHBoxLayout(geo_bar)
-        geo_l.setContentsMargins(8, 2, 8, 2); geo_l.setSpacing(6)
-
-        geo_lbl = QLabel("Geometry:")
-        geo_lbl.setStyleSheet(
-            "color:#89b4fa;font-size:11px;font-weight:bold;background:transparent;")
-        self.geo_faraday_btn = QPushButton("Faraday")
-        self.geo_faraday_btn.setCheckable(True); self.geo_faraday_btn.setChecked(True)
-        self.geo_faraday_btn.setFixedHeight(24)
-        self.geo_voigt_btn = QPushButton("Voigt")
-        self.geo_voigt_btn.setCheckable(True)
-        self.geo_voigt_btn.setFixedHeight(24)
+        geo_tip = ("Select the optical geometry for this scan.\n"
+                   "Stage actuator device paths are injected from the\n"
+                   "matching Faraday or Voigt block in Setup Defaults.")
+        self.geo_faraday_btn = _pill("Faraday", checked=True,
+                                     checked_color="#cba6f7", left=True)
+        self.geo_voigt_btn   = _pill("Voigt",   checked_color="#cba6f7", right=True)
+        for b in (self.geo_faraday_btn, self.geo_voigt_btn):
+            b.setToolTip(geo_tip)
         self._geo_btn_grp = QButtonGroup(self)
         self._geo_btn_grp.addButton(self.geo_faraday_btn)
         self._geo_btn_grp.addButton(self.geo_voigt_btn)
         self._geo_btn_grp.setExclusive(True)
 
-        geo_tooltip = ("Select the optical geometry for this scan.\n"
-                       "The stage actuator device paths are taken from\n"
-                       "the matching block in Setup Defaults.")
-        for btn in (self.geo_faraday_btn, self.geo_voigt_btn):
-            btn.setToolTip(geo_tooltip)
-
-        # Piezo type selector
-        _vsep = QFrame(); _vsep.setFrameShape(QFrame.Shape.VLine)
-        _vsep.setFixedWidth(1); _vsep.setFixedHeight(20)
-        _vsep.setStyleSheet("background:#313244;border:none;")
-
-        piezo_lbl = QLabel("Piezo:")
-        piezo_lbl.setStyleSheet(
-            "color:#89b4fa;font-size:11px;font-weight:bold;background:transparent;")
-        self.piezo_anm_btn = QPushButton("ANM200")
-        self.piezo_anm_btn.setCheckable(True); self.piezo_anm_btn.setChecked(True)
-        self.piezo_anm_btn.setFixedHeight(24)
-        self.piezo_anc_btn = QPushButton("ANC300")
-        self.piezo_anc_btn.setCheckable(True)
-        self.piezo_anc_btn.setFixedHeight(24)
+        piezo_tip = ("Select which piezo stage to use for this scan.\n"
+                     "ANM200 = fine scanner (nm);  ANC300 = coarse stepper (steps).")
+        self.piezo_anm_btn = _pill("ANM200", checked=True,
+                                   checked_color="#a6e3a1", left=True)
+        self.piezo_anc_btn = _pill("ANC300", checked_color="#a6e3a1", right=True)
+        for b in (self.piezo_anm_btn, self.piezo_anc_btn):
+            b.setToolTip(piezo_tip)
         self._piezo_btn_grp = QButtonGroup(self)
         self._piezo_btn_grp.addButton(self.piezo_anm_btn)
         self._piezo_btn_grp.addButton(self.piezo_anc_btn)
         self._piezo_btn_grp.setExclusive(True)
 
-        piezo_tooltip = ("Select which piezo to use for this scan.\n"
-                         "ANM200 = fine (nm); ANC300 = coarse (steps).")
-        for btn in (self.piezo_anm_btn, self.piezo_anc_btn):
-            btn.setToolTip(piezo_tooltip)
+        # Append to the scan type row (remove trailing stretch, add widgets, re-add)
+        tr = self.traj_panel._type_row
+        tr.takeAt(tr.count() - 1)   # remove stretch
 
-        geo_l.addWidget(geo_lbl)
-        geo_l.addWidget(self.geo_faraday_btn)
-        geo_l.addWidget(self.geo_voigt_btn)
-        geo_l.addSpacing(8); geo_l.addWidget(_vsep); geo_l.addSpacing(8)
-        geo_l.addWidget(piezo_lbl)
-        geo_l.addWidget(self.piezo_anm_btn)
-        geo_l.addWidget(self.piezo_anc_btn)
-        geo_l.addStretch()
+        def _row_sep():
+            f = QFrame(); f.setFrameShape(QFrame.Shape.VLine)
+            f.setFixedWidth(1); f.setFixedHeight(22)
+            f.setStyleSheet("background:#45475a;border:none;")
+            return f
 
-        traj_w_l.addWidget(geo_bar)
-        traj_w_l.addWidget(self.traj_panel)
+        def _row_lbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
+            return lbl
 
-        self.bottom_tabs.addTab(traj_wrapper,      "Trajectory")
+        tr.addSpacing(12); tr.addWidget(_row_sep()); tr.addSpacing(8)
+        tr.addWidget(_row_lbl("Geometry:"))
+        tr.addSpacing(4)
+        tr.addWidget(self.geo_faraday_btn); tr.addWidget(self.geo_voigt_btn)
+        tr.addSpacing(12); tr.addWidget(_row_sep()); tr.addSpacing(8)
+        tr.addWidget(_row_lbl("Piezo:"))
+        tr.addSpacing(4)
+        tr.addWidget(self.piezo_anm_btn); tr.addWidget(self.piezo_anc_btn)
+        tr.addStretch()
+
+        self.bottom_tabs.addTab(self.traj_panel,   "Trajectory")
         self.bottom_tabs.addTab(self.sl_panel,     "Scanlist")
         self.bottom_tabs.addTab(self.data_browser,  "Data Browser")
         self.script_console = ScriptConsolePanel()
