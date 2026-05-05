@@ -341,32 +341,42 @@ class SetupDefaultsPanel(QWidget):
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
-        # ── Stage Actuators ───────────────────────────────────────────────────
+        # ── Stage Actuators — Faraday / Voigt sub-groups ─────────────────────
         act_grp = QGroupBox("Stage Actuators")
-        act_g   = QGridLayout(act_grp)
-        act_g.setSpacing(6); act_g.setContentsMargins(8, 8, 8, 8)
+        act_outer = QHBoxLayout(act_grp)
+        act_outer.setSpacing(10); act_outer.setContentsMargins(8, 8, 8, 8)
 
-        for col, hdr in enumerate(["", "Device", "Attr", "Label", "Unit"]):
-            lbl = QLabel(hdr)
-            lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
-            act_g.addWidget(lbl, 0, col)
+        def _make_geo_subgroup(geo_name):
+            """Return (sub-QGroupBox, act1_row, act2_row, actz_row)."""
+            grp   = QGroupBox(geo_name)
+            g     = QGridLayout(grp)
+            g.setSpacing(4); g.setContentsMargins(6, 6, 6, 6)
+            for col, hdr in enumerate(["", "Device", "Attr", "Label", "Unit"]):
+                lbl = QLabel(hdr)
+                lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
+                g.addWidget(lbl, 0, col)
+            r1 = ActuatorDefaultRow(self._registry)
+            r2 = ActuatorDefaultRow(self._registry)
+            rz = ActuatorDefaultRow(self._registry)
+            for row_idx, (label, row) in enumerate([
+                    ("Act 1 (X):", r1), ("Act 2 (Y):", r2), ("Z (focus):", rz)
+            ], start=1):
+                lbl2 = QLabel(label); lbl2.setStyleSheet("font-weight:bold;")
+                g.addWidget(lbl2, row_idx, 0)
+                g.addWidget(row,  row_idx, 1, 1, 4)
+            return grp, r1, r2, rz
 
-        self.act1_row = ActuatorDefaultRow(self._registry)
-        self.act2_row = ActuatorDefaultRow(self._registry)
-        self.actz_row = ActuatorDefaultRow(self._registry)
+        far_grp, self.far_act1_row, self.far_act2_row, self.far_actz_row = \
+            _make_geo_subgroup("Faraday")
+        voi_grp, self.voi_act1_row, self.voi_act2_row, self.voi_actz_row = \
+            _make_geo_subgroup("Voigt")
 
-        for row_idx, (name, widget) in enumerate([
-                ("Act 1 (X):", self.act1_row),
-                ("Act 2 (Y):", self.act2_row),
-                ("Z (focus):", self.actz_row),
-        ], start=1):
-            lbl = QLabel(name); lbl.setStyleSheet("font-weight:bold;")
-            act_g.addWidget(lbl,    row_idx, 0)
-            act_g.addWidget(widget, row_idx, 1, 1, 4)
+        for row in (self.far_act1_row, self.far_act2_row, self.far_actz_row,
+                    self.voi_act1_row, self.voi_act2_row, self.voi_actz_row):
+            row.changed.connect(self.defaults_changed)
 
-        self.act1_row.changed.connect(self.defaults_changed)
-        self.act2_row.changed.connect(self.defaults_changed)
-        self.actz_row.changed.connect(self.defaults_changed)
+        act_outer.addWidget(far_grp)
+        act_outer.addWidget(voi_grp)
         root.addWidget(act_grp)
 
         # ── Hardware: Keithley + AttoDRY side by side ─────────────────────────
@@ -453,9 +463,9 @@ class SetupDefaultsPanel(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
     def set_registry(self, registry: List[dict]):
         self._registry = registry
-        self.act1_row.set_registry(registry)
-        self.act2_row.set_registry(registry)
-        self.actz_row.set_registry(registry)
+        for row in (self.far_act1_row, self.far_act2_row, self.far_actz_row,
+                    self.voi_act1_row, self.voi_act2_row, self.voi_actz_row):
+            row.set_registry(registry)
         self.zi_hw.set_registry(registry)
         self.ks_hw.set_registry(registry)
         self.ad_hw.set_registry(registry)
@@ -466,9 +476,14 @@ class SetupDefaultsPanel(QWidget):
 
     def load(self, setup: dict):
         """Restore all selections from a setup dict."""
-        self.act1_row.load(setup.get("act1_device", ""), setup.get("act1_attr", "x"))
-        self.act2_row.load(setup.get("act2_device", ""), setup.get("act2_attr", "y"))
-        self.actz_row.load(setup.get("z_device",    ""), setup.get("z_attr",    "z"))
+        far = setup.get("stage_faraday", {})
+        voi = setup.get("stage_voigt",   {})
+        self.far_act1_row.load(far.get("act1_device", ""), far.get("act1_attr", "x"))
+        self.far_act2_row.load(far.get("act2_device", ""), far.get("act2_attr", "y"))
+        self.far_actz_row.load(far.get("z_device",    ""), far.get("z_attr",    "z"))
+        self.voi_act1_row.load(voi.get("act1_device", ""), voi.get("act1_attr", "x"))
+        self.voi_act2_row.load(voi.get("act2_device", ""), voi.get("act2_attr", "y"))
+        self.voi_actz_row.load(voi.get("z_device",    ""), voi.get("z_attr",    "z"))
 
         zi_attrs = {tup[1]: setup.get(tup[1], tup[2]) for tup in LOCKIN_ATTR_DEFS}
         self.zi_hw.load(setup.get("zi_device", ""), zi_attrs)
@@ -484,19 +499,24 @@ class SetupDefaultsPanel(QWidget):
 
     def get_values(self) -> dict:
         """Return current selections as a dict suitable for merging into setup."""
-        act1 = self.act1_row.get()
-        act2 = self.act2_row.get()
-        actz = self.actz_row.get()
+        def _geo_block(r1, r2, rz) -> dict:
+            a1, a2, az = r1.get(), r2.get(), rz.get()
+            return {
+                "act1_device": a1["device"], "act1_attr": a1["attr"],
+                "act1_label":  a1["label"],  "act1_unit": a1["unit"],
+                "act2_device": a2["device"], "act2_attr": a2["attr"],
+                "act2_label":  a2["label"],  "act2_unit": a2["unit"],
+                "z_device":    az["device"], "z_attr":    az["attr"],
+                "z_label":     az["label"],  "z_unit":    az["unit"],
+            }
         zi_attrs = self.zi_hw.get_attrs()
         ks_attrs = self.ks_hw.get_attrs()
         ad_attrs = self.ad_hw.get_attrs()
         return {
-            "act1_device": act1["device"], "act1_attr": act1["attr"],
-            "act1_label":  act1["label"],  "act1_unit": act1["unit"],
-            "act2_device": act2["device"], "act2_attr": act2["attr"],
-            "act2_label":  act2["label"],  "act2_unit": act2["unit"],
-            "z_device":    actz["device"], "z_attr":    actz["attr"],
-            "z_label":     actz["label"],  "z_unit":    actz["unit"],
+            "stage_faraday": _geo_block(
+                self.far_act1_row, self.far_act2_row, self.far_actz_row),
+            "stage_voigt": _geo_block(
+                self.voi_act1_row, self.voi_act2_row, self.voi_actz_row),
             "zi_device":   self.zi_hw.dev_combo.currentData() or "",
             **zi_attrs,
             "keithley_device": self.ks_hw.dev_combo.currentData() or "",

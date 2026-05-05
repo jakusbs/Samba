@@ -281,12 +281,14 @@ class CryoMainWindow(QMainWindow):
             "Keithley":  setup.get("keithley_device", ""),
             "AttoDRY":   setup.get("attodry_device",  ""),
         }
-        # Also check the stage device from the active scan config
+        # Check the stage device from the active geometry block
         configs = setup.get("configs", [])
         if configs:
             idx = setup.get("active_idx", 0)
             cfg = configs[min(idx, len(configs) - 1)]
-            stage_dev = cfg.get("act1_device", "")
+            geo = cfg.get("geometry", "Faraday")
+            geo_block = setup.get(f"stage_{geo.lower()}", {})
+            stage_dev = geo_block.get("act1_device", "")
             if stage_dev:
                 candidates["Stage"] = stage_dev
 
@@ -471,7 +473,46 @@ class CryoMainWindow(QMainWindow):
         self.data_browser = DataBrowserPanel(
             lambda: self._active_setup().get("save_dir", "~/moke_data"))
 
-        self.bottom_tabs.addTab(self.traj_panel,   "Trajectory")
+        # Wrap trajectory panel with a geometry toggle strip
+        traj_wrapper = QWidget()
+        traj_w_l = QVBoxLayout(traj_wrapper)
+        traj_w_l.setContentsMargins(0, 0, 0, 0); traj_w_l.setSpacing(2)
+
+        geo_bar = QWidget(); geo_bar.setFixedHeight(32)
+        geo_bar.setStyleSheet(
+            "background:#12121f;border-bottom:1px solid #313244;")
+        geo_l = QHBoxLayout(geo_bar)
+        geo_l.setContentsMargins(8, 2, 8, 2); geo_l.setSpacing(6)
+
+        geo_lbl = QLabel("Geometry:")
+        geo_lbl.setStyleSheet(
+            "color:#89b4fa;font-size:11px;font-weight:bold;background:transparent;")
+        self.geo_faraday_btn = QPushButton("Faraday")
+        self.geo_faraday_btn.setCheckable(True); self.geo_faraday_btn.setChecked(True)
+        self.geo_faraday_btn.setFixedHeight(24)
+        self.geo_voigt_btn = QPushButton("Voigt")
+        self.geo_voigt_btn.setCheckable(True)
+        self.geo_voigt_btn.setFixedHeight(24)
+        self._geo_btn_grp = QButtonGroup(self)
+        self._geo_btn_grp.addButton(self.geo_faraday_btn)
+        self._geo_btn_grp.addButton(self.geo_voigt_btn)
+        self._geo_btn_grp.setExclusive(True)
+
+        geo_tooltip = ("Select the optical geometry for this scan.\n"
+                       "The stage actuator device paths are taken from\n"
+                       "the matching block in Setup Defaults.")
+        for btn in (self.geo_faraday_btn, self.geo_voigt_btn):
+            btn.setToolTip(geo_tooltip)
+
+        geo_l.addWidget(geo_lbl)
+        geo_l.addWidget(self.geo_faraday_btn)
+        geo_l.addWidget(self.geo_voigt_btn)
+        geo_l.addStretch()
+
+        traj_w_l.addWidget(geo_bar)
+        traj_w_l.addWidget(self.traj_panel)
+
+        self.bottom_tabs.addTab(traj_wrapper,      "Trajectory")
         self.bottom_tabs.addTab(self.sl_panel,     "Scanlist")
         self.bottom_tabs.addTab(self.data_browser,  "Data Browser")
         self.script_console = ScriptConsolePanel()
@@ -512,6 +553,7 @@ class CryoMainWindow(QMainWindow):
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         self.defaults_panel.defaults_changed.connect(self._on_defaults_changed)
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
+        self._geo_btn_grp.buttonClicked.connect(self._on_geometry_changed)
 
         self._browser_loaded = False
         self.bottom_tabs.currentChanged.connect(self._on_bottom_tab_changed)
@@ -602,6 +644,14 @@ class CryoMainWindow(QMainWindow):
         self.sl_panel.set_active_name(cfg.get("name","—"))
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
+        # Restore geometry switch (blockSignals to avoid triggering _on_geometry_changed)
+        geo = cfg.get("geometry", "Faraday")
+        self._geo_btn_grp.blockSignals(True)
+        if geo == "Voigt":
+            self.geo_voigt_btn.setChecked(True)
+        else:
+            self.geo_faraday_btn.setChecked(True)
+        self._geo_btn_grp.blockSignals(False)
         # Sync Setup Defaults panel
         self.defaults_panel.set_registry(registry)
         self.defaults_panel.load(setup)
@@ -624,6 +674,7 @@ class CryoMainWindow(QMainWindow):
         old["sensors"]        = self.right_panel.get_sensors()
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
+        old["geometry"]       = self._get_current_geometry()
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
         self._safe_save()
@@ -711,17 +762,30 @@ class CryoMainWindow(QMainWindow):
         self.status_lbl.setText("Setup defaults saved ✓")
         self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
 
+    def _get_current_geometry(self) -> str:
+        return "Faraday" if self.geo_faraday_btn.isChecked() else "Voigt"
+
+    def _on_geometry_changed(self, _btn=None):
+        """Persist the geometry choice into the active scan config and refresh actuator labels."""
+        configs = self._active_setup().get("configs", [])
+        if configs:
+            configs[self._active_cfg_idx]["geometry"] = self._get_current_geometry()
+        self._apply_defaults(self._active_setup())
+        self._safe_save()
+
     def _apply_defaults(self, setup: dict):
         """Push setup defaults into trajectory actuators and calibration FL device."""
+        geo = self._get_current_geometry()
+        geo_block = setup.get(f"stage_{geo.lower()}", {})
         self.traj_panel.set_actuator_defaults(
-            act1_dev=setup.get("act1_device", ""),
-            act1_attr=setup.get("act1_attr",   "x"),
-            act1_lbl=setup.get("act1_label",   "X"),
-            act1_unit=setup.get("act1_unit",   "nm"),
-            act2_dev=setup.get("act2_device", ""),
-            act2_attr=setup.get("act2_attr",   "y"),
-            act2_lbl=setup.get("act2_label",   "Y"),
-            act2_unit=setup.get("act2_unit",   "nm"),
+            act1_dev=geo_block.get("act1_device", ""),
+            act1_attr=geo_block.get("act1_attr",  "x"),
+            act1_lbl=geo_block.get("act1_label",  "X"),
+            act1_unit=geo_block.get("act1_unit",  "nm"),
+            act2_dev=geo_block.get("act2_device", ""),
+            act2_attr=geo_block.get("act2_attr",  "y"),
+            act2_lbl=geo_block.get("act2_label",  "Y"),
+            act2_unit=geo_block.get("act2_unit",  "nm"),
         )
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
@@ -773,20 +837,26 @@ class CryoMainWindow(QMainWindow):
         partial["sensors"]        = self.right_panel.get_sensors()
         partial["display_sensor"] = self.right_panel.get_display_sensor()
         partial["colormap"]       = self.right_panel.get_colormap()
-        # Inject device/attr from Setup Defaults so scan workers get the right paths
+        # Geometry from active config (saved per-scan; fall back to current switch)
+        geo = "Faraday"
+        if configs:
+            geo = configs[self._active_cfg_idx].get("geometry", "Faraday")
+        partial["geometry"] = geo
+        # Inject device/attr from the matching geometry block in Setup Defaults
         setup = self._active_setup()
+        geo_block = setup.get(f"stage_{geo.lower()}", {})
         for pfx, dkey, akey, lkey, ukey in [
             ("act1", "act1_device", "act1_attr", "act1_label", "act1_unit"),
             ("act2", "act2_device", "act2_attr", "act2_label", "act2_unit"),
         ]:
-            if setup.get(dkey):
-                partial.setdefault(f"{pfx}_device", setup[dkey])
-                partial.setdefault(f"{pfx}_attr",   setup[akey])
-                partial.setdefault(f"{pfx}_label",  setup.get(lkey, ""))
-                partial.setdefault(f"{pfx}_unit",   setup.get(ukey, "nm"))
-        if setup.get("z_device"):
-            partial.setdefault("z_device", setup["z_device"])
-            partial.setdefault("z_attr",   setup.get("z_attr", "z"))
+            if geo_block.get(dkey):
+                partial.setdefault(f"{pfx}_device", geo_block[dkey])
+                partial.setdefault(f"{pfx}_attr",   geo_block[akey])
+                partial.setdefault(f"{pfx}_label",  geo_block.get(lkey, ""))
+                partial.setdefault(f"{pfx}_unit",   geo_block.get(ukey, "nm"))
+        if geo_block.get("z_device"):
+            partial.setdefault("z_device", geo_block["z_device"])
+            partial.setdefault("z_attr",   geo_block.get("z_attr", "z"))
         return partial
 
     # ── Scan geometry ────────────────────────────────────────────────────────
