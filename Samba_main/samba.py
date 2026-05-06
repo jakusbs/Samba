@@ -328,6 +328,7 @@ class MainWindow(QMainWindow):
         self.calib_panel = CalibrationPanel(self._active_setup,
                                               config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
+        self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
 
         tlog = QWidget(); tlol = QVBoxLayout(tlog); tlol.setContentsMargins(2, 4, 2, 0)
         # Log filter row
@@ -442,6 +443,10 @@ class MainWindow(QMainWindow):
         elif current is self.sl_panel:
             self.sl_panel.hw.refresh()
 
+    def _on_live_tab_changed(self, _idx):
+        if self.live_tabs.currentWidget() is self.calib_panel:
+            self.calib_panel._read_all()
+
     # ── Config management ─────────────────────────────────────────────────────
     def _on_setup_changed(self, idx):
         self._save_active_config()
@@ -546,6 +551,11 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
+        self.calib_panel.configure_stage(
+            setup.get("act1_device", ""), setup.get("act1_attr", "x"),
+            setup.get("act2_device", ""), setup.get("act2_attr", "y"),
+            setup.get("z_device",    ""), setup.get("z_attr",    "position0"),
+        )
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
         self.traj_panel.load_monitor_settings(cfg)
@@ -671,6 +681,11 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
+        self.calib_panel.configure_stage(
+            defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
+            defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
+            defaults.get("z_device",    ""), defaults.get("z_attr",    "position0"),
+        )
 
     def _on_scan_mode_changed(self, mode: str):
         """Called when trajectory panel switches between SPATIAL/FIELD/DC_HYST."""

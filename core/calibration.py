@@ -413,6 +413,7 @@ class CalibrationPanel(QWidget):
         self._setup_getter  = setup_getter
         self._config_getter = config_getter
         self._af_worker = None
+        self._stage_cfg: dict = {}   # populated by configure_stage()
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(6)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -517,6 +518,9 @@ class CalibrationPanel(QWidget):
 
     # ── Axis info from config ─────────────────────────────────────────────────
     def _get_axis_info(self) -> dict:
+        if self._stage_cfg:
+            return dict(self._stage_cfg)
+        # Fallback: derive from scan config (used when configure_stage() was never called)
         s = self._setup_getter()
         configs = s.get("configs", [])
         idx = s.get("active_idx", 0)
@@ -531,6 +535,21 @@ class CalibrationPanel(QWidget):
         self._dev_lbl.setText(
             f"X: {x_dev}/{x_attr}   Y: {y_dev}/{y_attr}   Z: {z_dev}/{z_attr}")
         return {"x": (x_dev, x_attr), "y": (y_dev, y_attr), "z": (z_dev, z_attr)}
+
+    def configure_stage(self, x_dev: str, x_attr: str,
+                        y_dev: str, y_attr: str,
+                        z_dev: str, z_attr: str):
+        """Inject stage device/attribute for each axis from setup defaults.
+        Called by the main window on every setup or defaults change."""
+        self._stage_cfg = {
+            "x": (x_dev, x_attr),
+            "y": (y_dev, y_attr),
+            "z": (z_dev, z_attr),
+        }
+        self._dev_lbl.setText(
+            f"X: {x_dev or '—'}/{x_attr}   "
+            f"Y: {y_dev or '—'}/{y_attr}   "
+            f"Z: {z_dev or '—'}/{z_attr}")
 
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
@@ -581,19 +600,11 @@ class CalibrationPanel(QWidget):
         info = self._get_axis_info()
         if not info: self._set_af_err("No config"); return
 
-        # Get scan axis from config (act1_attr — the X axis of the scan)
-        s = self._setup_getter()
-        configs = s.get("configs", [])
-        idx = s.get("active_idx", 0)
-        cfg = configs[min(idx, len(configs) - 1)] if configs else {}
-        scan_attr = cfg.get("act1_attr", "x")
+        x_dev,  scan_attr = info.get("x", ("", "x"))
+        z_dev,  z_attr    = info.get("z", (x_dev, "position0"))
+        if not z_dev: z_dev = x_dev   # fall back to X device if Z not separately configured
 
-        # Stage device and Z attr
-        x_dev  = cfg.get("act1_device", "")
-        z_dev  = s.get("z_device", x_dev)
-        z_attr = s.get("z_attr", cfg.get("z_attr", "position0"))
-
-        fl_dev = s.get("focus_averagein", "").strip()
+        fl_dev = self._setup_getter().get("focus_averagein", "").strip()
         if not fl_dev: self._set_af_err("No FL sensor set — configure in Setup Defaults tab"); return
 
         self.focus_plot.clear()

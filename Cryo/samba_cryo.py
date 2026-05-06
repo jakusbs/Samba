@@ -431,6 +431,7 @@ class CryoMainWindow(QMainWindow):
         self.calib_panel = CryoCalibrationPanel(self._active_setup,
                                                   config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
+        self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
 
         tlog = QWidget(); tlol = QVBoxLayout(tlog); tlol.setContentsMargins(2, 4, 2, 0)
         log_hdr = QHBoxLayout(); log_hdr.setSpacing(6)
@@ -611,6 +612,10 @@ class CryoMainWindow(QMainWindow):
             self.traj_panel.hw.refresh()
         elif idx == TAB_SCANLIST:
             self.sl_panel.hw.refresh()
+
+    def _on_live_tab_changed(self, _idx):
+        if self.live_tabs.currentWidget() is self.calib_panel:
+            self.calib_panel._read_all()
 
     # ── Config management ─────────────────────────────────────────────────────
     def _on_new_config(self):
@@ -845,6 +850,11 @@ class CryoMainWindow(QMainWindow):
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
         self.calib_panel.set_anc_device(anc_dev)
+        self.calib_panel.configure_stage(
+            piezo_block.get("act1_device", ""), piezo_block.get("act1_attr", "x"),
+            piezo_block.get("act2_device", ""), piezo_block.get("act2_attr", "y"),
+            piezo_block.get("z_device",    ""), piezo_block.get("z_attr",    "z"),
+        )
 
     def _on_scan_mode_changed(self, mode):
         # Temperature sweep uses the standard FIELD engine — no DC mode needed
