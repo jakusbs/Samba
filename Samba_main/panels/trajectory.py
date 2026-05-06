@@ -968,8 +968,8 @@ class TrajectoryPanel(QWidget):
             self._rtv40_status.setText("No device path set.")
             return
         try:
-            from hardware import get_proxy, safe_read
-            p, err = get_proxy(path)
+            from hardware import fresh_proxy, safe_read
+            p, err = fresh_proxy(path)
             if err:
                 self._rtv40_status.setText(f"⚠ {err}")
                 return
@@ -990,8 +990,8 @@ class TrajectoryPanel(QWidget):
             self._rtv40_status.setText("No device path set.")
             return
         try:
-            from hardware import get_proxy, safe_write
-            p, err = get_proxy(path)
+            from hardware import fresh_proxy, safe_write
+            p, err = fresh_proxy(path)
             if err:
                 self._rtv40_status.setText(f"⚠ Connect: {err}")
                 return
