@@ -966,7 +966,11 @@ class ScanRunner:
         the readback deviates from the target by more than POSITION_TOLERANCE_FRAC
         of the scan range (default 1 %).
         """
-        proxy.write_attribute(attr, target)
+        # Coerce to Python float — some pytango versions reject numpy scalars
+        # with "unsupported data_format" when the C extension does type dispatch.
+        err = safe_write(proxy, attr, float(target))
+        if err:
+            raise RuntimeError(f"Move failed on '{attr}' → {target:.6g}: {err}")
         if not TANGO_AVAILABLE:
             return target
         t0 = time.time()
