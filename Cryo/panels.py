@@ -1246,6 +1246,124 @@ class FieldSegmentList(QWidget):
 # The group title area contains a checkbox (via setCheckable) that greys out
 # the whole group when the axis is disabled — no separate toggle button needed.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ScanDirectionList — compact list of up to 2 (start, stop) direction rows.
+# Each direction produces one independent scan file. npts is shared (from the
+# parent ActuatorGroup's N/Δ row). Second row pre-fills reversed.
+# ─────────────────────────────────────────────────────────────────────────────
+class ScanDirectionList(QWidget):
+    changed = pyqtSignal()
+    _MAX_ROWS = 2
+
+    _ADD_STYLE = (
+        "QPushButton{background:#313244;color:#a6e3a1;border:1px solid #45475a;"
+        "border-radius:3px;padding:1px 6px;font-size:10px;}"
+        "QPushButton:hover{background:#45475a;}"
+        "QPushButton:disabled{color:#585b70;border-color:#313244;}")
+    _DEL_STYLE = (
+        "QPushButton{color:#f38ba8;font-weight:bold;border:1px solid #45475a;"
+        "border-radius:3px;padding:0;background:#313244;font-size:11px;}"
+        "QPushButton:hover{background:#45475a;}")
+
+    def __init__(self, start: float = 0.0, stop: float = 10.0, parent=None):
+        super().__init__(parent)
+        self._rows: list = []   # list of (start_spin, stop_spin, del_btn, row_widget)
+        root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(2)
+        self._row_container = QWidget()
+        self._row_layout = QVBoxLayout(self._row_container)
+        self._row_layout.setContentsMargins(0, 0, 0, 0); self._row_layout.setSpacing(2)
+        root.addWidget(self._row_container)
+
+        btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 1, 0, 0); btn_row.setSpacing(4)
+        self._add_btn = QPushButton("＋ Retrace")
+        self._add_btn.setFixedHeight(20); self._add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._add_btn.setStyleSheet(self._ADD_STYLE)
+        self._add_btn.clicked.connect(self._add_reversed)
+        btn_row.addWidget(self._add_btn); btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        self._add_row(start, stop)
+
+    def _add_row(self, start: float, stop: float):
+        row_w = QWidget()
+        hl = QHBoxLayout(row_w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
+
+        idx_lbl = QLabel("Trace:" if len(self._rows) == 0 else "Retrace:")
+        idx_lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
+        idx_lbl.setFixedWidth(48); hl.addWidget(idx_lbl)
+
+        s_spin = NoScrollDoubleSpinBox(); s_spin.setRange(-1e9, 1e9); s_spin.setDecimals(3)
+        s_spin.setValue(start); hl.addWidget(s_spin)
+
+        arr = QLabel("→"); arr.setStyleSheet("color:#6c7086;font-size:11px;")
+        arr.setFixedWidth(14); hl.addWidget(arr)
+
+        e_spin = NoScrollDoubleSpinBox(); e_spin.setRange(-1e9, 1e9); e_spin.setDecimals(3)
+        e_spin.setValue(stop); hl.addWidget(e_spin)
+
+        del_btn = QPushButton("×"); del_btn.setFixedSize(18, 18)
+        del_btn.setStyleSheet(self._DEL_STYLE)
+        del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        del_btn.setVisible(len(self._rows) > 0)
+        hl.addWidget(del_btn)
+
+        tup = (s_spin, e_spin, del_btn, row_w)
+        self._row_layout.addWidget(row_w)
+        self._rows.append(tup)
+
+        s_spin.valueChanged.connect(self.changed)
+        e_spin.valueChanged.connect(self.changed)
+        del_btn.clicked.connect(lambda: self._remove_row(tup))
+        self._refresh_add_btn()
+        self.changed.emit()
+
+    def _add_reversed(self):
+        if not self._rows: return
+        s0, e0, *_ = self._rows[0]
+        self._add_row(e0.value(), s0.value())
+
+    def _remove_row(self, tup):
+        if len(self._rows) <= 1: return
+        self._rows.remove(tup)
+        tup[3].hide(); self._row_layout.removeWidget(tup[3]); tup[3].deleteLater()
+        # Relabel remaining rows
+        for i, (s, e, d, w) in enumerate(self._rows):
+            lbl = w.layout().itemAt(0).widget()
+            if isinstance(lbl, QLabel): lbl.setText("Trace:" if i == 0 else "Retrace:")
+            d.setVisible(i > 0)
+        self._refresh_add_btn()
+        self.changed.emit()
+
+    def _refresh_add_btn(self):
+        self._add_btn.setEnabled(len(self._rows) < self._MAX_ROWS)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+    def first_start(self) -> float:
+        return self._rows[0][0].value() if self._rows else 0.0
+
+    def first_stop(self) -> float:
+        return self._rows[0][1].value() if self._rows else 0.0
+
+    def get_directions(self) -> list:
+        """Return [[start, stop], ...] for all direction rows."""
+        return [[t[0].value(), t[1].value()] for t in self._rows]
+
+    def load_directions(self, dirs: list):
+        """Load from [[start, stop], ...]. Clears existing rows first."""
+        # Clear all rows
+        for tup in list(self._rows):
+            tup[3].hide(); self._row_layout.removeWidget(tup[3]); tup[3].deleteLater()
+        self._rows = []
+        if not dirs:
+            dirs = [[0.0, 10.0]]
+        for d in dirs[:self._MAX_ROWS]:
+            self._add_row(float(d[0]), float(d[1]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ActuatorGroup — device/attr/range controls with N ↔ Δ step toggle.
+# Start/stop are managed by ScanDirectionList (up to 2 directions per axis).
+# ─────────────────────────────────────────────────────────────────────────────
 class ActuatorGroup(QGroupBox):
     _RO_STYLE = ("background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
                  "border-radius:4px;padding:2px 4px;")
@@ -1255,7 +1373,6 @@ class ActuatorGroup(QGroupBox):
                  enabled: bool = True, registry: list = None, parent=None):
         super().__init__(title, parent)
         self._step_prefix = step_prefix
-        # Device info — set via set_device_info(); registry param kept for compat
         self._dev_path: str = dev
         self._dev_name: str = ""
         self._attr: str = attr
@@ -1285,24 +1402,19 @@ class ActuatorGroup(QGroupBox):
         g.addWidget(self._attr_display, 2, 1)
         g.addWidget(QLabel("Label:"), 2, 2)
         self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
-        self.lbl.setReadOnly(True)
-        self.lbl.setStyleSheet(self._RO_STYLE)
+        self.lbl.setReadOnly(True); self.lbl.setStyleSheet(self._RO_STYLE)
         g.addWidget(self.lbl, 2, 3)
         g.addWidget(QLabel("Unit:"), 2, 4)
         self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(35)
-        self.unit_edit.setReadOnly(True)
-        self.unit_edit.setStyleSheet(self._RO_STYLE)
+        self.unit_edit.setReadOnly(True); self.unit_edit.setStyleSheet(self._RO_STYLE)
         g.addWidget(self.unit_edit, 2, 5)
 
-        # Row 3: Start / Stop
-        g.addWidget(QLabel("Start:"), 3, 0)
-        self.start = NoScrollDoubleSpinBox(); self.start.setRange(-1e9, 1e9); self.start.setDecimals(3)
-        self.start.setValue(start); g.addWidget(self.start, 3, 1, 1, 2)
-        g.addWidget(QLabel("Stop:"), 3, 3)
-        self.stop  = NoScrollDoubleSpinBox(); self.stop.setRange(-1e9, 1e9);  self.stop.setDecimals(3)
-        self.stop.setValue(stop);  g.addWidget(self.stop,  3, 4, 1, 2)
+        # Row 3: Direction list (replaces fixed start/stop spinboxes)
+        self.dir_list = ScanDirectionList(start, stop)
+        g.addWidget(self.dir_list, 3, 0, 1, 6)
+        self.dir_list.changed.connect(self._upd)
 
-        # Row 4: N / Δ step toggle
+        # Row 4: N / Δ step toggle (shared npts across all directions)
         ns_row = QWidget(); ns_lay = QHBoxLayout(ns_row)
         ns_lay.setContentsMargins(0, 0, 0, 0); ns_lay.setSpacing(4)
         self._mode_bg = QButtonGroup(self)
@@ -1320,8 +1432,6 @@ class ActuatorGroup(QGroupBox):
             ns_lay.addWidget(w)
         ns_lay.addStretch(); g.addWidget(ns_row, 4, 0, 1, 6)
 
-        for w in [self.start, self.stop]:
-            w.valueChanged.connect(self._upd)
         self.npts_spin.valueChanged.connect(self._upd)
         self.step_spin.valueChanged.connect(self._upd)
         self._upd()
@@ -1329,25 +1439,20 @@ class ActuatorGroup(QGroupBox):
     # ── Device info ───────────────────────────────────────────────────────────
     def set_device_info(self, dev_path: str, dev_name: str, attr: str,
                         label: str, unit: str):
-        """Update the read-only device/attr display. Called from set_actuator_defaults()."""
-        self._dev_path = dev_path
-        self._dev_name = dev_name
-        self._attr     = attr
+        self._dev_path = dev_path; self._dev_name = dev_name; self._attr = attr
         self._dev_display.setText(dev_name or dev_path)
         self._attr_display.setText(attr)
-        self.lbl.setText(label)
-        self.unit_edit.setText(unit)
+        self.lbl.setText(label); self.unit_edit.setText(unit)
 
     def set_registry(self, registry: list):
-        """No-op — device info comes from Setup Defaults, not the registry."""
-        pass
+        pass   # device info comes from Setup Defaults
 
-    # ── Standard helpers ──────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
     def _on_mode(self, m):
         self.npts_spin.setVisible(m == 0); self.step_spin.setVisible(m == 1); self._upd()
 
     def _upd(self):
-        span = abs(self.stop.value() - self.start.value())
+        span = abs(self.dir_list.first_stop() - self.dir_list.first_start())
         if self.rb_n.isChecked():
             n    = max(2, self.npts_spin.value())
             step = span / (n - 1) if n > 1 else span
@@ -1358,29 +1463,36 @@ class ActuatorGroup(QGroupBox):
             self.comp_lbl.setText(f"N = {n}")
 
     def get_npts(self) -> int:
-        span = abs(self.stop.value() - self.start.value())
+        span = abs(self.dir_list.first_stop() - self.dir_list.first_start())
         if self.rb_n.isChecked(): return max(2, self.npts_spin.value())
         return max(2, int(round(span / max(1e-9, self.step_spin.value()))) + 1)
 
     def load(self, pfx: str, cfg: dict, enabled: bool = True):
-        """Restore scan range from a saved config. Device/attr come from set_device_info()."""
         self.scan_cb.setChecked(enabled)
-        self.start.setValue(cfg.get(f"{pfx}_start",  0.0))
-        self.stop.setValue( cfg.get(f"{pfx}_stop",  50000.0))
+        # Prefer explicit directions list; fall back to legacy start/stop keys
+        dirs = cfg.get(f"{pfx}_directions")
+        if dirs:
+            self.dir_list.load_directions(dirs)
+        else:
+            s = cfg.get(f"{pfx}_start", 0.0)
+            e = cfg.get(f"{pfx}_stop",  10.0)
+            self.dir_list.load_directions([[s, e]])
         self.rb_n.setChecked(True)
         self.npts_spin.setValue(int(cfg.get(f"{pfx}_npts", 51)))
         self._upd()
 
     def get_partial(self, pfx: str) -> dict:
+        dirs = self.dir_list.get_directions()
         return {
             f"{pfx}_device":      self._dev_path,
             f"{pfx}_device_name": self._dev_name,
             f"{pfx}_attr":        self._attr,
             f"{pfx}_label":       self.lbl.text(),
             f"{pfx}_unit":        self.unit_edit.text().strip() or "µm",
-            f"{pfx}_start":       self.start.value(),
-            f"{pfx}_stop":        self.stop.value(),
+            f"{pfx}_start":       dirs[0][0],   # first direction start (backward compat)
+            f"{pfx}_stop":        dirs[0][1],   # first direction stop  (backward compat)
             f"{pfx}_npts":        self.get_npts(),
+            f"{pfx}_directions":  dirs,
         }
 
 
@@ -1442,15 +1554,6 @@ class TrajectoryPanel(QWidget):
             "Y axis",
             "smaract2/control/IR-controller", "y", "Y", "nm",
             0, 50000, 51, step_prefix="Δy", enabled=False, registry=[])
-        # Zigzag container inside act2_grp — only shown when both X and Y are on
-        self.zigzag_w = QWidget()
-        zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(2)
-        self.zigzag_cb = QCheckBox("Zigzag (reverse direction on every Y line)")
-        self.zigzag_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        zz_l.addWidget(self.zigzag_cb)
-        self.zigzag_w.setVisible(False)   # hidden until both axes on
-        # Row 6 of act2_grp grid
-        self.act2_grp.layout().addWidget(self.zigzag_w, 6, 0, 1, 4)
         act_row.addWidget(self.act1_grp); act_row.addWidget(self.act2_grp)
         sp_l.addLayout(act_row)
 
@@ -1464,12 +1567,13 @@ class TrajectoryPanel(QWidget):
             "border:1px solid #6c3483;border-radius:4px;padding:5px 6px;")
         self.time_scan_lbl.setWordWrap(True)
         self.time_scan_lbl.setVisible(False)
-        # Row 6 = below the N/Δ row (rows 0-4 = scan_cb, device, attr, start/stop, N/Δ)
+        # Row 6 = below the N/Δ row (rows 0-4 = scan_cb, device, attr, dir_list, N/Δ)
         self.act1_grp.layout().addWidget(self.time_scan_lbl, 6, 0, 1, 4)
+
 
         root.addWidget(self.spatial_w)
 
-        # Connect axis toggles → update zigzag visibility
+        # Connect axis toggles → update time-scan banner visibility
         self.act1_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
         self.act2_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
 
@@ -1630,6 +1734,15 @@ class TrajectoryPanel(QWidget):
         tl.addWidget(QLabel("Int (s):"),   0, 0); self.int_time = dbl(0.001,3600,3,0.1); tl.addWidget(self.int_time, 0, 1)
         tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = dbl(0,10,3,0.05);      tl.addWidget(self.settle,   1, 1)
         tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = dbl(0.1,300,1,15.0);   tl.addWidget(self.timeout,  2, 1)
+        # Adaptive settle — extra wait proportional to step size (ANM200 creep compensation)
+        self.adap_settle_cb = QCheckBox("Adaptive settle")
+        self.adap_settle_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.adap_settle_cb.setToolTip("Extra settle per step — compensates ANM200 piezo creep")
+        tl.addWidget(self.adap_settle_cb, 3, 0, 1, 2)
+        tl.addWidget(QLabel("s/µm:"), 4, 0)
+        self.adap_settle_k = dbl(0, 10, 4, 0.05)
+        self.adap_settle_k.setToolTip("Extra seconds of settle per µm of position step")
+        tl.addWidget(self.adap_settle_k, 4, 1)
         bot.addWidget(tg)
 
         # mg — Metadata group (MOKE-specific fields)
@@ -1704,9 +1817,6 @@ class TrajectoryPanel(QWidget):
         y_on = self.act2_grp.scan_cb.isChecked()
         time_mode = (not x_on and not y_on)
         both_on   = x_on and y_on
-
-        # Zigzag container: only visible when both axes are active
-        self.zigzag_w.setVisible(both_on)
 
         # Time-scan banner inside the X axis group
         self.time_scan_lbl.setVisible(time_mode)
@@ -2019,7 +2129,8 @@ class TrajectoryPanel(QWidget):
         for i in range(self._ac_attr_combo.count()):
             if self._ac_attr_combo.itemData(i) == field_attr:
                 self._ac_attr_combo.setCurrentIndex(i); break
-        self.zigzag_cb.setChecked(cfg.get("zigzag", False))
+        self.adap_settle_cb.setChecked(cfg.get("adaptive_settle_enabled", False))
+        self.adap_settle_k.setValue(cfg.get("adaptive_settle_k", 0.05))
         self.int_time.setValue(cfg.get("integration_time", 0.1))
         self.settle.setValue(  cfg.get("settle_time",      0.05))
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
@@ -2092,7 +2203,8 @@ class TrajectoryPanel(QWidget):
             "scan_type": "FIELD" if is_field else "SPATIAL",
             "scan_x":    self.act1_grp.scan_cb.isChecked() if not is_field else False,
             "scan_y":    self.act2_grp.scan_cb.isChecked() if not is_field else False,
-            "zigzag":    self.zigzag_cb.isChecked(),
+            "adaptive_settle_enabled": self.adap_settle_cb.isChecked(),
+            "adaptive_settle_k":       self.adap_settle_k.value(),
         }
         p.update(self.act1_grp.get_partial("act1"))
         p.update(self.act2_grp.get_partial("act2"))

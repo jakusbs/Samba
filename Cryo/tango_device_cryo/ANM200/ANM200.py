@@ -110,7 +110,7 @@ class ANM200(Device):
 
     @attribute(dtype=float, access=AttrWriteType.READ_WRITE,
                memorized=True, hw_memorized=True,
-               doc="Scaling factor: distance/Voltage [µm/V]")
+               doc="Scaling factor: Voltage/distance [V/µm]. voltage = position × scaling")
     def scaling(self):
         return self._scaling
 

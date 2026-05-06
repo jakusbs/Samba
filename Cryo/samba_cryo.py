@@ -56,7 +56,7 @@ from panels  import (ConfigListPanel, RightPanel,
 from panels_cryo import CryoHardwarePanel
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
-from calibration import CalibrationPanel
+from calibration import CryoCalibrationPanel
 from device_registry import DeviceRegistryPanel, load_registry, registry_to_sensors
 from defaults_panel  import SetupDefaultsPanel
 import play_intro
@@ -236,6 +236,7 @@ class CryoMainWindow(QMainWindow):
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
         self._scan_total_pts:    int                      = 0
+        self._dir_queue:         list                     = []   # pending direction cfgs
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
@@ -427,8 +428,8 @@ class CryoMainWindow(QMainWindow):
             w   = widget_cls(); setattr(self, widget_attr, w); lay.addWidget(w)
             self.live_tabs.addTab(tab, title)
 
-        self.calib_panel = CalibrationPanel(self._active_setup,
-                                              config_getter=self._build_full_config)
+        self.calib_panel = CryoCalibrationPanel(self._active_setup,
+                                                  config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
 
         tlog = QWidget(); tlol = QVBoxLayout(tlog); tlol.setContentsMargins(2, 4, 2, 0)
@@ -840,6 +841,10 @@ class CryoMainWindow(QMainWindow):
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
             self.calib_panel.set_fl_device(fl_dev)
+        # ANC300 device — same device regardless of geometry, take from any piezo block
+        anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
+                   or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
+        self.calib_panel.set_anc_device(anc_dev)
 
     def _on_scan_mode_changed(self, mode):
         # Temperature sweep uses the standard FIELD engine — no DC mode needed
@@ -1044,20 +1049,94 @@ class CryoMainWindow(QMainWindow):
                 "Abort that scan first, then retry.")
             return
 
-        self._current_scan_cfg = cfg
-        self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
-        _, n_x, n_y = self._scan_dims(cfg)
+        # ── ANM200 temperature-driven scaling ────────────────────────────────
+        if cfg.get("stage_type") == "anm200":
+            self._apply_anm200_scaling(cfg)
+
+        # ── Build direction queue ─────────────────────────────────────────────
+        # Each axis can carry up to 2 [start, stop] directions.
+        # For 2D: directions are paired by index (zip, not product) → max 2 maps.
+        # For 1D: each direction on the active axis → up to 2 files.
+        mode, _, __ = self._scan_dims(cfg)
+        scan_x = cfg.get("scan_x", True)
+        scan_y = cfg.get("scan_y", False)
+        dirs1 = cfg.get("act1_directions", [[cfg["act1_start"], cfg["act1_stop"]]])
+        dirs2 = cfg.get("act2_directions", [[cfg["act2_start"], cfg["act2_stop"]]])
+
+        if scan_x and scan_y:
+            n = max(len(dirs1), len(dirs2))
+            combos = [(dirs1[min(i, len(dirs1)-1)], dirs2[min(i, len(dirs2)-1)]) for i in range(n)]
+        elif scan_x:
+            combos = [(d, None) for d in dirs1]
+        elif scan_y:
+            combos = [(None, d) for d in dirs2]
+        else:
+            combos = [(None, None)]   # TIME scan
+
+        use_suffix = len(combos) > 1
+        base_name  = cfg["name"]
+        cfgs = []
+        for i, (d1, d2) in enumerate(combos):
+            c = copy.deepcopy(cfg)
+            if d1 is not None:
+                c["act1_start"], c["act1_stop"] = d1[0], d1[1]
+            if d2 is not None:
+                c["act2_start"], c["act2_stop"] = d2[0], d2[1]
+            dir_name = "trace" if i == 0 else "retrace"
+            c["name"] = f"{base_name}_{dir_name}" if use_suffix else base_name
+            cfgs.append(c)
+
+        first_cfg = cfgs[0]
+        self._dir_queue = cfgs[1:]   # remaining directions run after first completes
+
+        self._current_scan_cfg = first_cfg
+        self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
+        _, n_x, n_y = self._scan_dims(first_cfg)
         total = n_x * n_y
         self.pbar.setMaximum(total); self.pbar.setValue(0)
-        self.pbar.setFormat("%v / %m pts")
+        lbl = "trace" if use_suffix else ""
+        self.pbar.setFormat(f"{lbl} %v / %m pts" if lbl else "%v / %m pts")
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
 
-        self._worker = self._wire_worker(cfg, setup)
+        self._worker = self._wire_worker(first_cfg, setup)
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
-    # ── Calibration time scan ────────────────────────────────────────────────
+    def _apply_anm200_scaling(self, cfg: dict):
+        """Read sample temperature, interpolate ANM200 scaling [V/µm], write to device."""
+        setup = self._active_setup()
+        attodry_dev = setup.get("attodry_device", "")
+        anm_dev = cfg.get("act1_device", "")
+        if not anm_dev or not attodry_dev:
+            return
+        try:
+            from hardware import fresh_proxy, safe_read, safe_write
+            ad_p, err = fresh_proxy(attodry_dev)
+            if err:
+                log.warning("ANM200 scaling: cannot reach AttoDRY: %s", err); return
+            temp, e = safe_read(ad_p, "SampleTemperature")
+            if e or temp is None:
+                log.warning("ANM200 scaling: cannot read SampleTemperature: %s", e); return
+            # Linear interpolation between calibration points
+            # At   4 K: scaling = 1/3  V/µm  (10 V / 30 µm)
+            # At 300 K: scaling = 1/15 V/µm  (4 V  / 60 µm)
+            S_4K   = 1.0 / 3.0
+            S_300K = 4.0 / 60.0
+            t = float(temp)
+            s = S_4K + (t - 4.0) * (S_300K - S_4K) / (300.0 - 4.0)
+            s = max(S_300K, min(S_4K, s))   # clamp to calibrated range
+            anm_p, err = fresh_proxy(anm_dev)
+            if err:
+                log.warning("ANM200 scaling: cannot reach device: %s", err); return
+            safe_write(anm_p, "scaling", s)
+            log.info("ANM200 scaling set to %.5f V/µm  (T = %.1f K)", s, t)
+            self._log_append(
+                f"ANM200 scaling → {s:.5f} V/µm  (T = {t:.1f} K)", level="info")
+        except Exception as exc:
+            log.warning("ANM200 scaling update failed: %s", exc)
+
+    # ── Calibration time scan ────────────────────────────────────────────
     def _start_calib_timescan(self):
         if self._scan_running: return
         self._save_active_config()
@@ -1146,6 +1225,24 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setFormat(f"%v / %m pts  —  done")
 
     def _on_worker_finished(self):
+        # If more directions are queued, start the next one without releasing the lock.
+        if self._dir_queue:
+            next_cfg = self._dir_queue.pop(0)
+            setup = self._active_setup()
+            active = [s for s in next_cfg["sensors"] if s["enabled"]]
+            self._current_scan_cfg = next_cfg
+            self._setup_live_display(next_cfg, active)
+            self._alloc_scan_data(next_cfg, active)
+            _, n_x, n_y = self._scan_dims(next_cfg)
+            total = n_x * n_y
+            self.pbar.setMaximum(total); self.pbar.setValue(0)
+            dir_suffix = next_cfg["name"].rsplit("_", 1)[-1] if "_" in next_cfg["name"] else ""
+            self.pbar.setFormat(f"{dir_suffix} %v / %m pts" if dir_suffix else "%v / %m pts")
+            self._last_fn = None
+            self._worker = self._wire_worker(next_cfg, setup)
+            self._worker.start()
+            return
+
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
@@ -1173,6 +1270,7 @@ class CryoMainWindow(QMainWindow):
 
     def _abort_scan(self):
         if not self._scan_running: return
+        self._dir_queue = []   # cancel any pending direction passes
         if self._worker: self._worker.abort()
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting…")
