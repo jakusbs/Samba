@@ -236,8 +236,7 @@ class CryoMainWindow(QMainWindow):
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
         self._scan_total_pts:    int                      = 0
-        self._bidi_pending_rev:  bool                     = False
-        self._bidi_fwd_cfg:      dict                     = {}
+        self._dir_queue:         list                     = []   # pending direction cfgs
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
@@ -1054,29 +1053,52 @@ class CryoMainWindow(QMainWindow):
         if cfg.get("stage_type") == "anm200":
             self._apply_anm200_scaling(cfg)
 
-        # ── Bidirectional setup ───────────────────────────────────────────────
+        # ── Build direction queue ─────────────────────────────────────────────
+        # Each axis can carry up to 2 [start, stop] directions.
+        # For 2D: directions are paired by index (zip, not product) → max 2 maps.
+        # For 1D: each direction on the active axis → up to 2 files.
         mode, _, __ = self._scan_dims(cfg)
-        is_bidi = (cfg.get("bidirectional", False)
-                   and cfg.get("stage_type") == "anm200"
-                   and mode == "1D")
-        if is_bidi:
-            self._bidi_fwd_cfg = copy.deepcopy(cfg)
-            cfg = copy.deepcopy(cfg)
-            cfg["name"] = cfg["name"] + "_fwd"
-            self._bidi_pending_rev = True
-        else:
-            self._bidi_pending_rev = False
+        scan_x = cfg.get("scan_x", True)
+        scan_y = cfg.get("scan_y", False)
+        dirs1 = cfg.get("act1_directions", [[cfg["act1_start"], cfg["act1_stop"]]])
+        dirs2 = cfg.get("act2_directions", [[cfg["act2_start"], cfg["act2_stop"]]])
 
-        self._current_scan_cfg = cfg
-        self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
-        _, n_x, n_y = self._scan_dims(cfg)
+        if scan_x and scan_y:
+            n = max(len(dirs1), len(dirs2))
+            combos = [(dirs1[min(i, len(dirs1)-1)], dirs2[min(i, len(dirs2)-1)]) for i in range(n)]
+        elif scan_x:
+            combos = [(d, None) for d in dirs1]
+        elif scan_y:
+            combos = [(None, d) for d in dirs2]
+        else:
+            combos = [(None, None)]   # TIME scan
+
+        use_suffix = len(combos) > 1
+        base_name  = cfg["name"]
+        cfgs = []
+        for i, (d1, d2) in enumerate(combos):
+            c = copy.deepcopy(cfg)
+            if d1 is not None:
+                c["act1_start"], c["act1_stop"] = d1[0], d1[1]
+            if d2 is not None:
+                c["act2_start"], c["act2_stop"] = d2[0], d2[1]
+            c["name"] = f"{base_name}_d{i+1}" if use_suffix else base_name
+            cfgs.append(c)
+
+        first_cfg = cfgs[0]
+        self._dir_queue = cfgs[1:]   # remaining directions run after first completes
+
+        self._current_scan_cfg = first_cfg
+        self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
+        _, n_x, n_y = self._scan_dims(first_cfg)
         total = n_x * n_y
         self.pbar.setMaximum(total); self.pbar.setValue(0)
-        self.pbar.setFormat("fwd %v / %m pts" if is_bidi else "%v / %m pts")
+        lbl = f"d1/{len(combos)}" if use_suffix else ""
+        self.pbar.setFormat(f"{lbl} %v / %m pts" if lbl else "%v / %m pts")
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
 
-        self._worker = self._wire_worker(cfg, setup)
+        self._worker = self._wire_worker(first_cfg, setup)
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1113,24 +1135,7 @@ class CryoMainWindow(QMainWindow):
         except Exception as exc:
             log.warning("ANM200 scaling update failed: %s", exc)
 
-    def _start_bidi_backward(self):
-        """Start the backward (reversed) half of a bidirectional scan."""
-        cfg = copy.deepcopy(self._bidi_fwd_cfg)
-        cfg["name"] = cfg["name"] + "_bwd"
-        cfg["act1_start"], cfg["act1_stop"] = cfg["act1_stop"], cfg["act1_start"]
-        setup = self._active_setup()
-        active = [s for s in cfg["sensors"] if s["enabled"]]
-        self._current_scan_cfg = cfg
-        self._setup_live_display(cfg, active)
-        self._alloc_scan_data(cfg, active)
-        _, n_x, n_y = self._scan_dims(cfg)
-        total = n_x * n_y
-        self.pbar.setMaximum(total); self.pbar.setValue(0)
-        self.pbar.setFormat("bwd %v / %m pts")
-        self._worker = self._wire_worker(cfg, setup)
-        self._worker.start()
-
-    # ── Calibration time scan ────────────────────────────────────────────────
+    # ── Calibration time scan ────────────────────────────────────────────
     def _start_calib_timescan(self):
         if self._scan_running: return
         self._save_active_config()
@@ -1219,12 +1224,22 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setFormat(f"%v / %m pts  —  done")
 
     def _on_worker_finished(self):
-        # If this was the forward half of a bidirectional scan, start the backward half
-        # immediately without releasing the lock or resetting the running state.
-        if self._bidi_pending_rev:
-            self._bidi_pending_rev = False
+        # If more directions are queued, start the next one without releasing the lock.
+        if self._dir_queue:
+            next_cfg = self._dir_queue.pop(0)
+            setup = self._active_setup()
+            active = [s for s in next_cfg["sensors"] if s["enabled"]]
+            self._current_scan_cfg = next_cfg
+            self._setup_live_display(next_cfg, active)
+            self._alloc_scan_data(next_cfg, active)
+            _, n_x, n_y = self._scan_dims(next_cfg)
+            total = n_x * n_y
+            self.pbar.setMaximum(total); self.pbar.setValue(0)
+            done_idx  = next_cfg["name"].rsplit("_d", 1)[-1] if "_d" in next_cfg["name"] else "?"
+            self.pbar.setFormat(f"d{done_idx}/? %v / %m pts")
             self._last_fn = None
-            self._start_bidi_backward()
+            self._worker = self._wire_worker(next_cfg, setup)
+            self._worker.start()
             return
 
         release_lock(self._active_setup_name)
@@ -1254,7 +1269,7 @@ class CryoMainWindow(QMainWindow):
 
     def _abort_scan(self):
         if not self._scan_running: return
-        self._bidi_pending_rev = False   # cancel any pending backward pass
+        self._dir_queue = []   # cancel any pending direction passes
         if self._worker: self._worker.abort()
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting…")

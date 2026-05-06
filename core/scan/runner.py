@@ -352,9 +352,12 @@ class ScanRunner:
                     st(f"Moving {cfg['act2_label']} → {y_pos:.4g}")
                     self._move(act2_p, cfg["act2_attr"], y_pos, cfg["move_timeout"], log=lg)
 
-                rev    = cfg.get("zigzag", False) and iy % 2 == 1 and hdf_scan == "SPATIAL_XY"
-                x_seq  = x_plan[::-1] if rev else x_plan
-                ix_seq = list(range(n_x-1, -1, -1)) if rev else list(range(n_x))
+                x_seq  = x_plan
+                ix_seq = list(range(n_x))
+                _prev_x_pos = None   # for adaptive settle tracking (reset each row)
+                _adap_k     = float(cfg.get("adaptive_settle_k", 0.0)) if cfg.get("adaptive_settle_enabled") else 0.0
+                if _adap_k > 0 and count == 0:
+                    lg(f"── Adaptive settle: k = {_adap_k:.4f} s/µm ──")
 
                 for ix, x_pos in zip(ix_seq, x_seq):
                     if self._abort: break
@@ -381,6 +384,12 @@ class ScanRunner:
                                 lg(f"⚠ RTV40 PulseWidth write: {_rw_err}")
                         if cfg["settle_time"] > 0:
                             time.sleep(cfg["settle_time"])
+                        # Adaptive settle: extra wait proportional to position step
+                        if _adap_k > 0 and _prev_x_pos is not None:
+                            extra = _adap_k * abs(x_pos - _prev_x_pos)
+                            if extra > 0:
+                                time.sleep(extra)
+                    _prev_x_pos = x_pos
 
                     x_actual[iy, ix] = x_read
 

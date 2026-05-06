@@ -289,7 +289,10 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
         "geometry": "Faraday",
         "stage_type": "anm200",
-        "zigzag": True,
+        "act1_directions": [[-10.0, 10.0]],
+        "act2_directions": [[-10.0, 10.0]],
+        "adaptive_settle_enabled": False,
+        "adaptive_settle_k": 0.05,
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
@@ -374,6 +377,13 @@ def _migrate_config(cfg: dict):
         if s.get("y_axis") == "Left Y":  s["y_axis"] = "Y1"
         elif s.get("y_axis") == "Right Y": s["y_axis"] = "Y2"
         else: s.setdefault("y_axis", "Y1")
+    # Scan direction lists — backfill from legacy start/stop if absent
+    if "act1_directions" not in cfg:
+        cfg["act1_directions"] = [[cfg.get("act1_start", -10.0), cfg.get("act1_stop", 10.0)]]
+    if "act2_directions" not in cfg:
+        cfg["act2_directions"] = [[cfg.get("act2_start", -10.0), cfg.get("act2_stop", 10.0)]]
+    cfg.setdefault("adaptive_settle_enabled", False)
+    cfg.setdefault("adaptive_settle_k", 0.05)
 
 def load_setup(name: str) -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
