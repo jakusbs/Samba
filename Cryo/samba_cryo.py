@@ -1082,7 +1082,8 @@ class CryoMainWindow(QMainWindow):
                 c["act1_start"], c["act1_stop"] = d1[0], d1[1]
             if d2 is not None:
                 c["act2_start"], c["act2_stop"] = d2[0], d2[1]
-            c["name"] = f"{base_name}_d{i+1}" if use_suffix else base_name
+            dir_name = "trace" if i == 0 else "retrace"
+            c["name"] = f"{base_name}_{dir_name}" if use_suffix else base_name
             cfgs.append(c)
 
         first_cfg = cfgs[0]
@@ -1093,7 +1094,7 @@ class CryoMainWindow(QMainWindow):
         _, n_x, n_y = self._scan_dims(first_cfg)
         total = n_x * n_y
         self.pbar.setMaximum(total); self.pbar.setValue(0)
-        lbl = f"d1/{len(combos)}" if use_suffix else ""
+        lbl = "trace" if use_suffix else ""
         self.pbar.setFormat(f"{lbl} %v / %m pts" if lbl else "%v / %m pts")
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
@@ -1235,8 +1236,8 @@ class CryoMainWindow(QMainWindow):
             _, n_x, n_y = self._scan_dims(next_cfg)
             total = n_x * n_y
             self.pbar.setMaximum(total); self.pbar.setValue(0)
-            done_idx  = next_cfg["name"].rsplit("_d", 1)[-1] if "_d" in next_cfg["name"] else "?"
-            self.pbar.setFormat(f"d{done_idx}/? %v / %m pts")
+            dir_suffix = next_cfg["name"].rsplit("_", 1)[-1] if "_" in next_cfg["name"] else ""
+            self.pbar.setFormat(f"{dir_suffix} %v / %m pts" if dir_suffix else "%v / %m pts")
             self._last_fn = None
             self._worker = self._wire_worker(next_cfg, setup)
             self._worker.start()

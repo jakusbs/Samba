@@ -1275,7 +1275,7 @@ class ScanDirectionList(QWidget):
         root.addWidget(self._row_container)
 
         btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 1, 0, 0); btn_row.setSpacing(4)
-        self._add_btn = QPushButton("＋ Direction")
+        self._add_btn = QPushButton("＋ Retrace")
         self._add_btn.setFixedHeight(20); self._add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._add_btn.setStyleSheet(self._ADD_STYLE)
         self._add_btn.clicked.connect(self._add_reversed)
@@ -1288,9 +1288,9 @@ class ScanDirectionList(QWidget):
         row_w = QWidget()
         hl = QHBoxLayout(row_w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
 
-        idx_lbl = QLabel(f"D{len(self._rows)+1}:")
+        idx_lbl = QLabel("Trace:" if len(self._rows) == 0 else "Retrace:")
         idx_lbl.setStyleSheet("color:#6c7086;font-size:10px;font-weight:bold;")
-        idx_lbl.setFixedWidth(22); hl.addWidget(idx_lbl)
+        idx_lbl.setFixedWidth(48); hl.addWidget(idx_lbl)
 
         s_spin = NoScrollDoubleSpinBox(); s_spin.setRange(-1e9, 1e9); s_spin.setDecimals(3)
         s_spin.setValue(start); hl.addWidget(s_spin)
@@ -1329,7 +1329,7 @@ class ScanDirectionList(QWidget):
         # Relabel remaining rows
         for i, (s, e, d, w) in enumerate(self._rows):
             lbl = w.layout().itemAt(0).widget()
-            if isinstance(lbl, QLabel): lbl.setText(f"D{i+1}:")
+            if isinstance(lbl, QLabel): lbl.setText("Trace:" if i == 0 else "Retrace:")
             d.setVisible(i > 0)
         self._refresh_add_btn()
         self.changed.emit()
