@@ -312,8 +312,8 @@ class CryoMainWindow(QMainWindow):
             # Parallel mode: poll from GUI thread so splash stays responsive
             status_callback(f"Checking {len(threads)} device(s)…")
             reported: set = set()
-            deadline = time.monotonic() + _PROBE_TIMEOUT + 2.0
-            while len(reported) < len(threads) and time.monotonic() < deadline:
+            deadline = _time.monotonic() + _PROBE_TIMEOUT + 2.0
+            while len(reported) < len(threads) and _time.monotonic() < deadline:
                 for name, t in threads.items():
                     if name not in reported and not t.is_alive():
                         reported.add(name)
@@ -321,7 +321,7 @@ class CryoMainWindow(QMainWindow):
                         ok = not err and not is_sim_proxy(proxy)
                         status_callback(f"{'✓' if ok else '⚠'} {name}: {'OK' if ok else 'unavailable'}")
                 QApplication.instance().processEvents()
-                time.sleep(0.05)
+                _time.sleep(0.05)
             # Threads still running past deadline: mark as timeout
             for name in threads:
                 if name not in reported:

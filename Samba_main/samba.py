@@ -197,8 +197,8 @@ class MainWindow(QMainWindow):
         if status_callback:
             status_callback(f"Checking {len(threads)} device(s)…")
             reported: set = set()
-            deadline = time.monotonic() + _PROBE_TIMEOUT + 2.0
-            while len(reported) < len(threads) and time.monotonic() < deadline:
+            deadline = _time.monotonic() + _PROBE_TIMEOUT + 2.0
+            while len(reported) < len(threads) and _time.monotonic() < deadline:
                 for name, t in threads.items():
                     if name not in reported and not t.is_alive():
                         reported.add(name)
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
                         ok = not err and not is_sim_proxy(proxy)
                         status_callback(f"{'✓' if ok else '⚠'} {name}: {'OK' if ok else 'unavailable'}")
                 QApplication.instance().processEvents()
-                time.sleep(0.05)
+                _time.sleep(0.05)
             for name in threads:
                 if name not in reported:
                     results[name] = (None, "connection timed out")
