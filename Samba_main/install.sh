@@ -12,6 +12,15 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Resolve real user (handles both  sudo bash install.sh  and  bash install.sh) ──
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_USER="$(whoami)"
+    REAL_HOME="$HOME"
+fi
+
 # ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BOLD='\033[1m'; NC='\033[0m'
@@ -135,12 +144,14 @@ ok "launch_samba.sh  →  $LAUNCH"
 hdr "[ 4 / 5 ]  Desktop entry"
 
 ICON_SRC="$SCRIPT_DIR/samba_icon_256.png"
-ICON_DEST="$HOME/.local/share/icons/hicolor/256x256/apps/samba.png"
+ICON_DEST="$REAL_HOME/.local/share/icons/hicolor/256x256/apps/samba.png"
+APPS_DIR="$REAL_HOME/.local/share/applications"
+ICONS_DIR="$REAL_HOME/.local/share/icons/hicolor/256x256/apps"
 
-mkdir -p ~/.local/share/applications
-mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+mkdir -p "$APPS_DIR"
+mkdir -p "$ICONS_DIR"
 
-cat > ~/.local/share/applications/samba.desktop << DESK_EOF
+cat > "$APPS_DIR/samba.desktop" << DESK_EOF
 [Desktop Entry]
 Name=SAMBA
 Comment=SAMBA — ETH Zürich Intermag Lab
@@ -154,20 +165,28 @@ DESK_EOF
 
 if [ -f "$ICON_SRC" ]; then
     cp "$ICON_SRC" "$ICON_DEST"
-    gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$REAL_HOME/.local/share/icons/hicolor" 2>/dev/null || true
     ok "Icon installed"
 else
     warn "samba_icon_256.png not found — desktop entry will have no icon"
 fi
 
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
-ok "Desktop entry installed"
+# Fix ownership so the real user owns their own files when run via sudo
+if [ -n "$SUDO_USER" ]; then
+    chown -R "$REAL_USER:" "$APPS_DIR/samba.desktop" "$ICON_DEST" 2>/dev/null || true
+fi
+
+update-desktop-database "$APPS_DIR" 2>/dev/null || true
+ok "Desktop entry installed  →  $APPS_DIR/samba.desktop"
 
 # ── Config directory ──────────────────────────────────────────────────────────
 hdr "[ 5 / 5 ]  Config directory"
 
-CONFIG_DIR="$HOME/.config/moke_scan"
+CONFIG_DIR="$REAL_HOME/.config/moke_scan"
 mkdir -p "$CONFIG_DIR"
+if [ -n "$SUDO_USER" ]; then
+    chown "$REAL_USER:" "$CONFIG_DIR" 2>/dev/null || true
+fi
 ok "$CONFIG_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
