@@ -75,9 +75,7 @@ def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
         if not device_path or not attr:
             return None
         try:
-            p, err = get_proxy(device_path)
-            if err:
-                return None
+            p = get_proxy(device_path)
             val, rerr = safe_read(p, attr)
             return val if not rerr else None
         except Exception:
