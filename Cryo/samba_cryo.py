@@ -50,6 +50,7 @@ except ImportError:
 from config  import SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup, make_default_config
 from hardware import get_proxy, safe_read, evict_proxy, _pcache
 from scan    import ScanWorker, ScanlistWorker
+from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel)
@@ -66,6 +67,78 @@ try:
 except Exception:
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardware snapshot helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) -> dict:
+    """Read key hardware state immediately before a Cryo scan starts.
+
+    ``scan_type`` == "FIELD" suppresses hw_field_mT (field is being swept).
+    ``is_temp_sweep`` == True suppresses hw_temperature_K (temp is being swept).
+    """
+    snap: dict = {}
+
+    def _read(device_path: str, attr: str):
+        if not device_path or not attr:
+            return None
+        try:
+            p, err = get_proxy(device_path)
+            if err:
+                return None
+            val, rerr = safe_read(p, attr)
+            return val if not rerr else None
+        except Exception:
+            return None
+
+    # Keithley AC excitation state
+    k_dev = setup.get("keithley_device", "")
+    for hw_key, attr_key in [
+        ("hw_keithley_amplitude_mA",  "keithley_amplitude_attr"),
+        ("hw_keithley_frequency_Hz",  "keithley_frequency_attr"),
+        ("hw_keithley_range",         "keithley_range_attr"),
+        ("hw_keithley_compliance_V",  "keithley_compliance_attr"),
+    ]:
+        v = _read(k_dev, setup.get(attr_key, ""))
+        if v is not None:
+            snap[hw_key] = v
+
+    # Lock-in amplifier settings
+    zi_dev = setup.get("zi_device", "")
+    for hw_key, attr_key in [
+        ("hw_zi_tc_s",       "zi_tc_attr"),
+        ("hw_zi_order",      "zi_order_attr"),
+        ("hw_zi_settling_s", "zi_settling_attr"),
+    ]:
+        v = _read(zi_dev, setup.get(attr_key, ""))
+        if v is not None:
+            snap[hw_key] = v
+
+    # Field at scan start — skip when field is swept
+    if scan_type != "FIELD" and not is_temp_sweep:
+        v = _read(setup.get("attodry_device", ""),
+                  setup.get("attodry_attr_field_rb", "MagneticField"))
+        if v is not None:
+            snap["hw_field_mT"] = v * 1000.0  # T → mT
+
+    # Temperature — skip when temperature is being swept
+    if not is_temp_sweep:
+        v = _read(setup.get("attodry_device", ""),
+                  setup.get("attodry_attr_temp_rb", "Temperature"))
+        if v is not None:
+            snap["hw_temperature_K"] = v
+
+    # Stage position at scan start
+    v = _read(setup.get("act1_device", ""), setup.get("act1_attr", ""))
+    if v is not None:
+        snap["hw_act1_pos"] = v
+    v = _read(setup.get("act2_device", ""), setup.get("act2_attr", ""))
+    if v is not None:
+        snap["hw_act2_pos"] = v
+
+    return snap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1145,6 +1218,18 @@ class CryoMainWindow(QMainWindow):
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
 
+        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
+        attodry_dev = setup.get("attodry_device", "")
+        is_temp_sweep = (
+            first_cfg.get("scan_type") == "FIELD"
+            and bool(attodry_dev)
+            and first_cfg.get("act1_device", "") == attodry_dev
+        )
+        hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
+                                    is_temp_sweep=is_temp_sweep)
+        for c in cfgs:
+            c.update(hw_snap)
+
         self._worker = self._wire_worker(first_cfg, setup)
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
@@ -1271,6 +1356,15 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setFormat(f"%v / %m pts  —  done")
 
     def _on_worker_finished(self):
+        # Append to lab notebook for this completed scan direction
+        if self._last_fn and self._current_scan_cfg and not getattr(self, '_calib_timescan', False):
+            setup = self._active_setup()
+            nb = _nb_path(setup.get("save_dir", "~/moke_data"), "Cryo")
+            entry = dict(self._current_scan_cfg)
+            entry["_scan_start_time"] = self._scan_start_time
+            entry["_hdf5_path"] = os.path.abspath(self._last_fn)
+            append_measurement(nb, entry)
+
         # If more directions are queued, start the next one without releasing the lock.
         if self._dir_queue:
             next_cfg = self._dir_queue.pop(0)
@@ -1284,6 +1378,7 @@ class CryoMainWindow(QMainWindow):
             self.pbar.setMaximum(total); self.pbar.setValue(0)
             dir_suffix = next_cfg["name"].rsplit("_", 1)[-1] if "_" in next_cfg["name"] else ""
             self.pbar.setFormat(f"{dir_suffix} %v / %m pts" if dir_suffix else "%v / %m pts")
+            self._scan_start_time = _time.time()
             self._last_fn = None
             self._worker = self._wire_worker(next_cfg, setup)
             self._worker.start()

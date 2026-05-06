@@ -29,7 +29,7 @@ v3.3 — Async trigger + corrected timestamps:
   • 10 ms guard delay between state→done and readout prevents reading a stale
     output buffer on devices that report "not RUNNING" before registers update.
 """
-import copy, os, time, traceback
+import copy, os, re, time, traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -47,6 +47,24 @@ except ImportError:
 
 from config import MAX_RETRIES, RETRY_DELAY, X_TIME
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, demagnetize_magnet
+
+
+def _make_filename(cfg: dict) -> str:
+    """Return HDF5 filename: HHMMSS_SCANTYPE_SampleID_ConfigName.h5
+
+    sample_id is omitted when empty.  Special characters are replaced with '_'.
+    """
+    ts         = datetime.now().strftime("%H%M%S")
+    scan_type  = cfg.get("scan_type", "SPATIAL")
+    sample_raw = cfg.get("sample_id", "").strip()
+    sample     = re.sub(r"[^\w-]", "_", sample_raw).strip("_")
+    name       = cfg.get("name", "scan")
+    parts = [ts, scan_type]
+    if sample:
+        parts.append(sample)
+    parts.append(name)
+    return "_".join(parts) + ".h5"
+
 
 # How often to flush to disk for 1D scans (every N points)
 FLUSH_INTERVAL = 10
@@ -192,8 +210,7 @@ class ScanRunner:
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         day_dir = os.path.join(base, datetime.now().strftime("%Y%m%d"))
         os.makedirs(day_dir, exist_ok=True)
-        filename = os.path.join(day_dir,
-                                f"{cfg['name']}_{datetime.now().strftime('%H%M%S')}.h5")
+        filename = os.path.join(day_dir, _make_filename(cfg))
 
         # ── Open HDF5 immediately — crash-safe from the first point ───────────
         hfile = self._open_hdf5(filename, x_plan, y_plan, active,
@@ -756,8 +773,7 @@ class ScanRunner:
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         day_dir = os.path.join(base, datetime.now().strftime("%Y%m%d"))
         os.makedirs(day_dir, exist_ok=True)
-        filename = os.path.join(
-            day_dir, f"{cfg['name']}_{datetime.now().strftime('%H%M%S')}.h5")
+        filename = os.path.join(day_dir, _make_filename(cfg))
 
         try:
             import json as _json
@@ -787,6 +803,24 @@ class ScanRunner:
             meta.attrs["noDC"]             = bool(cfg.get("noDC",  False))
             meta.attrs["mirror_shift_mm"]  = float(cfg.get("mirror_shift", 0.0))
             meta.attrs["channels_json"]    = _json.dumps(hyst_chs)
+
+            # Hardware snapshot (hw_* keys added by samba.py before scan)
+            _HW_KEYS = [
+                "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
+                "hw_keithley_range",        "hw_keithley_compliance_V",
+                "hw_zi_tc_s",               "hw_zi_order",
+                "hw_zi_settling_s",         "hw_relay_state",
+                "hw_field_mT",              "hw_act1_pos",
+                "hw_act2_pos",              "hw_temperature_K",
+            ]
+            for k in _HW_KEYS:
+                v = cfg.get(k)
+                if v is not None:
+                    try:
+                        meta.attrs[k] = v
+                    except Exception:
+                        meta.attrs[k] = str(v)
+
             # Scalar results written at completion
             for s in ("Hc", "Hshift", "Mr", "Ms"):
                 meta.attrs[s] = float("nan")
@@ -1085,6 +1119,40 @@ class ScanRunner:
             meta.attrs["sensors_json"] = _json.dumps(
                 [{k: v for k, v in s.items() if k != "plot_visible"}
                  for s in sensors])
+
+            # ── Step sizes ────────────────────────────────────────────────────
+            if not is_field and not is_time:
+                for pfx, npts_key in [("act1", n_x), ("act2", n_y if is_2d else None)]:
+                    npts = npts_key
+                    if npts and npts > 1:
+                        start = cfg.get(f"{pfx}_start")
+                        stop  = cfg.get(f"{pfx}_stop")
+                        if start is not None and stop is not None:
+                            meta.attrs[f"{pfx}_step"] = (stop - start) / (npts - 1)
+                            meta.attrs[f"{pfx}_step_unit"] = cfg.get(f"{pfx}_unit", "")
+            if is_field:
+                segs = cfg.get("field_segments", [])
+                total_pts = sum(max(1, int(s[2])) for s in segs) if segs else n_x
+                if total_pts > 1 and segs:
+                    span = segs[-1][1] - segs[0][0]
+                    meta.attrs["field_step_A"] = span / (total_pts - 1)
+
+            # ── Hardware snapshot (hw_* keys added by samba.py before scan) ──
+            _HW_KEYS = [
+                "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
+                "hw_keithley_range",        "hw_keithley_compliance_V",
+                "hw_zi_tc_s",               "hw_zi_order",
+                "hw_zi_settling_s",         "hw_relay_state",
+                "hw_field_mT",              "hw_act1_pos",
+                "hw_act2_pos",              "hw_temperature_K",
+            ]
+            for k in _HW_KEYS:
+                v = cfg.get(k)
+                if v is not None:
+                    try:
+                        meta.attrs[k] = v
+                    except Exception:
+                        meta.attrs[k] = str(v)
 
             # ── /data/ ────────────────────────────────────────────────────────
             # Axis dataset key is derived from the scan label so the name is

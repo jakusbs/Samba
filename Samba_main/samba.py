@@ -35,6 +35,7 @@ except ImportError:
 from config  import SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup, make_default_config
 from hardware import get_proxy, safe_read, evict_proxy
 from scan    import ScanWorker, ScanlistWorker
+from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
@@ -52,6 +53,79 @@ except Exception as _e:
     log.warning("setup_lock import failed (%s) — locking disabled", _e)
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardware snapshot helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
+    """Read key hardware state immediately before a scan starts.
+
+    Returns a dict of hw_* keys that the scan runner writes into HDF5 metadata
+    and that the lab notebook records.  All reads are best-effort — a failed
+    device read leaves the corresponding key absent (not an error).
+
+    ``scan_type`` controls which keys are suppressed:
+      - FIELD: hw_field_mT skipped (field is the swept axis)
+    """
+    snap: dict = {}
+
+    def _read(device_path: str, attr: str):
+        if not device_path or not attr:
+            return None
+        try:
+            p, err = get_proxy(device_path)
+            if err:
+                return None
+            val, rerr = safe_read(p, attr)
+            return val if not rerr else None
+        except Exception:
+            return None
+
+    # Keithley AC excitation state
+    k_dev  = setup.get("keithley_device", "")
+    for hw_key, attr_key in [
+        ("hw_keithley_amplitude_mA",  "keithley_amplitude_attr"),
+        ("hw_keithley_frequency_Hz",  "keithley_frequency_attr"),
+        ("hw_keithley_range",         "keithley_range_attr"),
+        ("hw_keithley_compliance_V",  "keithley_compliance_attr"),
+    ]:
+        v = _read(k_dev, setup.get(attr_key, ""))
+        if v is not None:
+            snap[hw_key] = v
+
+    # Lock-in amplifier settings
+    zi_dev = setup.get("zi_device", "")
+    for hw_key, attr_key in [
+        ("hw_zi_tc_s",       "zi_tc_attr"),
+        ("hw_zi_order",      "zi_order_attr"),
+        ("hw_zi_settling_s", "zi_settling_attr"),
+    ]:
+        v = _read(zi_dev, setup.get(attr_key, ""))
+        if v is not None:
+            snap[hw_key] = v
+
+    # Relay position
+    v = _read(setup.get("relay_device", ""), setup.get("relay_attr", ""))
+    if v is not None:
+        snap["hw_relay_state"] = v
+
+    # Field at scan start — skip when field is being swept
+    if scan_type != "FIELD":
+        v = _read(setup.get("magnet_device", ""), setup.get("magnet_field_attr", ""))
+        if v is not None:
+            snap["hw_field_mT"] = v
+
+    # Stage position at scan start
+    v = _read(setup.get("act1_device", ""), setup.get("act1_attr", ""))
+    if v is not None:
+        snap["hw_act1_pos"] = v
+    v = _read(setup.get("act2_device", ""), setup.get("act2_attr", ""))
+    if v is not None:
+        snap["hw_act2_pos"] = v
+
+    return snap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1032,6 +1106,9 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass  # fail-open: device unreachable, proceed
 
+        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
+        cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
+
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)
         if cfg.get("scan_type") == "DC_HYST":
@@ -1171,6 +1248,15 @@ class MainWindow(QMainWindow):
         except Exception:
             log.debug("Data browser refresh failed after scan", exc_info=True)
         if self._last_fn:
+            # Lab notebook
+            setup = self._active_setup()
+            nb = _nb_path(setup.get("save_dir", "~/moke_data"),
+                          self._active_setup_name)
+            if self._current_scan_cfg:
+                entry = dict(self._current_scan_cfg)
+                entry["_scan_start_time"] = self._scan_start_time
+                entry["_hdf5_path"] = os.path.abspath(self._last_fn)
+                append_measurement(nb, entry)
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
         self._update_estimate()
