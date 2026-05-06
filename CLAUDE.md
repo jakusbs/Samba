@@ -1042,3 +1042,77 @@ Implementation details:
 - **Keithley range combo**: `setMinimumWidth(84)` (was `setFixedWidth(70)`); Set button `setFixedWidth(44)` (was 30) — dropdown no longer clipped
 - **Field Sweep / Temperature Sweep groups**: removed `setMaximumWidth` caps, use `setMinimumWidth` so groups expand with window width
 - **Right plotting panel**: initial `QSplitter` sizes changed from `[215, 760, 360]` to `[215, 640, 480]` for a wider measurement view
+
+---
+
+## 20. Recent Changes (May 2026) — Startup, Calibration, Installer & Bug Fixes
+
+### Trace / Retrace scan directions (Cryo)
+
+`Cryo/panels.py` — `ScanDirectionList` labels renamed from D1/D2 to Trace/Retrace:
+- First row always labelled `"Trace:"`, second `"Retrace:"`; add button text changed to `"＋ Retrace"`
+- File suffixes in `samba_cryo.py`: `_trace.h5` / `_retrace.h5` when more than one direction queued
+- Progress bar label shows `trace` / `retrace` during multi-direction scans
+
+### Calibration tab — stage positioning from setup defaults
+
+**Problem:** The "Stage positioning" group was reading device/attribute from the scan config, which could be stale or missing (especially for Cryo's nested geometry structure).
+
+**Fix:** New `configure_stage()` public method on `CalibrationPanel` (`core/calibration.py`):
+
+```python
+calib_panel.configure_stage(x_dev, x_attr, y_dev, y_attr, z_dev, z_attr)
+```
+
+- Stores axes in `self._stage_cfg`; `_get_axis_info()` returns this immediately if set, falls back to old scan-config reading otherwise
+- Called in `Samba_main/samba.py` on setup load and defaults edit (uses flat `act1_device`/`z_device` setup keys)
+- Called in `Cryo/samba_cryo.py` in `_apply_defaults()` (uses resolved `stage_{geo}[stage_type]` piezo block)
+- Switching geometry/piezo in Cryo re-calls `_apply_defaults()` which updates the calibration stage config automatically
+- `_start_autofocus()` updated to use `_get_axis_info()` instead of reading config directly
+
+**Auto-read on tab click:** Both apps connect `live_tabs.currentChanged` to `_on_live_tab_changed()` which calls `calib_panel._read_all()` when the Calibration tab is selected.
+
+**Non-blocking `_read_all`:** `_read_all()` now runs TANGO reads in a daemon thread and posts widget updates back to the GUI thread via `QTimer.singleShot(0, ...)` — prevents "not responding" freezes when devices are unreachable.
+
+### Splash screen — parallel TANGO probe
+
+**Problem:** On startup without a TANGO connection, `_probe_devices()` was called after the splash closed and ran sequentially on the GUI thread — each device timed out in ~9 s causing a complete freeze.
+
+**Fix (both apps):** `_probe_devices(status_callback=None)` redesigned:
+- Probes run in parallel **daemon threads** (one per device)
+- When `status_callback` is provided, the GUI thread polls every 50 ms with `processEvents()` and invokes the callback as each thread finishes → splash shows live status lines (`✓ Stage: OK` / `⚠ AttoDRY: unavailable`)
+- Called from `main()` after window construction, before `finish_splash(min_seconds=3)`
+- Skipped entirely in simulation mode (pytango not installed)
+- Cryo probes: Stage, AttoDRY, Keithley
+- Samba_main probes: Stage, Lock-in, Magnet, Keithley (deduplicated across setups)
+
+### numpy.float64 coercion in scan runner
+
+`core/scan/runner.py` — `_move()` now coerces the target position to Python `float` before writing:
+
+```python
+err = safe_write(proxy, attr, float(target))
+```
+
+**Cause:** `np.linspace()` produces `numpy.float64` scalars. On machines where pytango runs in green mode (thread-pool executor with strict C-level type dispatch), `write_attribute(attr, numpy.float64)` raises `TypeError: unsupported data_format`. Python built-in `float` is accepted by all pytango versions.
+
+### RTV40 panel bug fix
+
+`Samba_main/panels/trajectory.py` — `_rtv40_read_width()` and `_rtv40_apply()` were calling `p, err = get_proxy(path)` but `get_proxy` returns a **single** proxy, not a tuple.
+
+Python's tuple-unpack protocol falls back to `__getitem__`, so pytango's DeviceProxy was indexed as `proxy[0]` and `proxy[1]`, internally calling `read_attribute(0)` — producing the error `"incompatible function arguments ... invoked with: RTV40(...), 0"`.
+
+**Fix:** Use `fresh_proxy(path)` which correctly returns `(proxy, error_string)`.
+
+### Installer rewrite (Samba_main)
+
+`Samba_main/install.sh` rewritten to match `Cryo/install.sh`:
+- Takes optional conda env name as argument (default: `base`), saved to `.install_config`
+- Finds conda automatically across common install locations
+- Creates the env if it doesn't exist; installs packages via `pip` inside the env
+- Installs system Qt libs (`libxcb-*`) via `apt-get` when run as root
+- Generates `launch_samba.sh` that activates the correct conda env before launching
+- Desktop entry `Icon=` points directly to the project directory (avoids `cp` permission errors)
+- Detects `$SUDO_USER` → uses real user's home for desktop/icon/config paths; `chown` fixes ownership
+
+**Usage:** `bash install.sh Tango` or `sudo bash install.sh Tango`
