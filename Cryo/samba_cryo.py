@@ -1559,7 +1559,7 @@ def main():
         win._probe_devices(status_callback=lambda msg: update_splash(splash, msg))
 
     update_splash(splash, "Ready!")
-    finish_splash(splash, win, min_seconds=0)
+    finish_splash(splash, win, min_seconds=3)
 
     if not TANGO_AVAILABLE:
         QMessageBox.information(win, "Simulation Mode",

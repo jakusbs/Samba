@@ -160,6 +160,82 @@ class MainWindow(QMainWindow):
     def _active_setup(self) -> dict:
         return self._setups[self._active_setup_name]
 
+    def _probe_devices(self, status_callback=None):
+        """Check critical hardware devices at startup and warn if any are unreachable.
+
+        When *status_callback* is provided probes run in parallel background threads
+        and the callback is invoked on the GUI thread as each result arrives.
+        Without a callback, probes block and show a QMessageBox for unavailable devices.
+        """
+        import threading as _threading
+        from hardware import fresh_proxy, is_sim_proxy
+
+        # Collect one representative path per device type across all setups
+        candidates: dict = {}
+        for setup in self._setups.values():
+            for key, label in [
+                ("act1_device",   "Stage"),
+                ("zi_device",     "Lock-in"),
+                ("magnet_device", "Magnet"),
+                ("keithley_device", "Keithley"),
+            ]:
+                path = setup.get(key, "").strip()
+                if path and label not in candidates:
+                    candidates[label] = path
+
+        _PROBE_TIMEOUT = 6.0
+
+        results: dict = {}
+        threads: dict = {}
+        for name, path in candidates.items():
+            def _probe(n=name, p=path):
+                results[n] = fresh_proxy(p)
+            t = _threading.Thread(target=_probe, daemon=True)
+            t.start()
+            threads[name] = t
+
+        if status_callback:
+            status_callback(f"Checking {len(threads)} device(s)…")
+            reported: set = set()
+            deadline = time.monotonic() + _PROBE_TIMEOUT + 2.0
+            while len(reported) < len(threads) and time.monotonic() < deadline:
+                for name, t in threads.items():
+                    if name not in reported and not t.is_alive():
+                        reported.add(name)
+                        proxy, err = results.get(name, (None, "timeout"))
+                        ok = not err and not is_sim_proxy(proxy)
+                        status_callback(f"{'✓' if ok else '⚠'} {name}: {'OK' if ok else 'unavailable'}")
+                QApplication.instance().processEvents()
+                time.sleep(0.05)
+            for name in threads:
+                if name not in reported:
+                    results[name] = (None, "connection timed out")
+        else:
+            for t in threads.values():
+                t.join(_PROBE_TIMEOUT)
+
+        unavailable = []
+        for name, path in candidates.items():
+            proxy, err = results.get(name, (None, "timeout"))
+            if err or is_sim_proxy(proxy):
+                log.warning("Startup probe: %s (%s) — %s", name, path, err or "unreachable")
+                unavailable.append(f"{name} ({path})")
+            else:
+                log.info("Startup probe: %s (%s) — OK", name, path)
+
+        if unavailable:
+            log.warning("Startup probe: %d device(s) unavailable", len(unavailable))
+            if not status_callback:
+                msg = (
+                    "The following devices could not be reached at startup:\n\n"
+                    + "\n".join(f"  • {d}" for d in unavailable)
+                    + "\n\nScans will run in simulation mode for these devices.\n"
+                    "Check your TANGO_HOST and device server status."
+                )
+                QMessageBox.warning(self, "Hardware Unavailable", msg)
+        else:
+            log.info("Startup probe: all critical devices reachable")
+
     # ── UI layout ─────────────────────────────────────────────────────────────
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -1405,9 +1481,12 @@ def main():
     if _app_icon:
         win.setWindowIcon(_app_icon)
 
+    if TANGO_AVAILABLE:
+        win._probe_devices(status_callback=lambda msg: update_splash(splash, msg))
+
     update_splash(splash, "Ready!")
 
-    # Show window after splash finishes (3 second minimum display)
+    # Show window after splash; probe runs above so 3 s covers short probe times too
     finish_splash(splash, win, min_seconds=3)
 
     if not TANGO_AVAILABLE:
