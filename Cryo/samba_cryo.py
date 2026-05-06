@@ -92,14 +92,16 @@ def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) 
             return None
 
     # Keithley AC excitation state
+    # Cryo uses keithley_attr_* keys; Samba_main uses keithley_*_attr keys.
     k_dev = setup.get("keithley_device", "")
-    for hw_key, attr_key in [
-        ("hw_keithley_amplitude_mA",  "keithley_amplitude_attr"),
-        ("hw_keithley_frequency_Hz",  "keithley_frequency_attr"),
-        ("hw_keithley_range",         "keithley_range_attr"),
-        ("hw_keithley_compliance_V",  "keithley_compliance_attr"),
+    for hw_key, attr_key_cryo, attr_key_main in [
+        ("hw_keithley_amplitude_mA",  "keithley_attr_amplitude",  "keithley_amplitude_attr"),
+        ("hw_keithley_frequency_Hz",  "keithley_attr_frequency",  "keithley_frequency_attr"),
+        ("hw_keithley_range",         "keithley_attr_range",      "keithley_range_attr"),
+        ("hw_keithley_compliance_V",  "keithley_attr_compliance", "keithley_compliance_attr"),
     ]:
-        v = _read(k_dev, setup.get(attr_key, ""))
+        attr = setup.get(attr_key_cryo) or setup.get(attr_key_main, "")
+        v = _read(k_dev, attr)
         if v is not None:
             snap[hw_key] = v
 
@@ -1177,8 +1179,8 @@ class CryoMainWindow(QMainWindow):
         mode, _, __ = self._scan_dims(cfg)
         scan_x = cfg.get("scan_x", True)
         scan_y = cfg.get("scan_y", False)
-        dirs1 = cfg.get("act1_directions", [[cfg["act1_start"], cfg["act1_stop"]]])
-        dirs2 = cfg.get("act2_directions", [[cfg["act2_start"], cfg["act2_stop"]]])
+        dirs1 = cfg.get("act1_directions", [[cfg.get("act1_start", 0.0), cfg.get("act1_stop", 0.0)]])
+        dirs2 = cfg.get("act2_directions", [[cfg.get("act2_start", 0.0), cfg.get("act2_stop", 0.0)]])
 
         if scan_x and scan_y:
             n = max(len(dirs1), len(dirs2))
@@ -1225,6 +1227,16 @@ class CryoMainWindow(QMainWindow):
         )
         hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
                                     is_temp_sweep=is_temp_sweep)
+        # Temperature sweep start/stop/step for the lab notebook
+        if is_temp_sweep:
+            segs = first_cfg.get("field_segments", [])
+            if segs:
+                t_start = segs[0][0];  t_stop = segs[-1][1]
+                t_pts = sum(max(1, int(s[2])) for s in segs)
+                hw_snap["_temp_sweep_start_K"] = t_start
+                hw_snap["_temp_sweep_stop_K"]  = t_stop
+                hw_snap["_temp_sweep_step_K"]  = (
+                    (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
         for c in cfgs:
             c.update(hw_snap)
 
