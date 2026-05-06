@@ -115,13 +115,14 @@ def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
         if v is not None:
             snap["hw_field_mT"] = v
 
-    # Stage position at scan start
-    v = _read(setup.get("act1_device", ""), setup.get("act1_attr", ""))
-    if v is not None:
-        snap["hw_act1_pos"] = v
-    v = _read(setup.get("act2_device", ""), setup.get("act2_attr", ""))
-    if v is not None:
-        snap["hw_act2_pos"] = v
+    # Stage position at scan start — only relevant for SPATIAL scans
+    if scan_type not in ("FIELD", "DC_HYST"):
+        v = _read(setup.get("act1_device", ""), setup.get("act1_attr", ""))
+        if v is not None:
+            snap["hw_act1_pos"] = v
+        v = _read(setup.get("act2_device", ""), setup.get("act2_attr", ""))
+        if v is not None:
+            snap["hw_act2_pos"] = v
 
     return snap
 
@@ -1254,6 +1255,11 @@ class MainWindow(QMainWindow):
                 entry = dict(self._current_scan_cfg)
                 entry["_scan_start_time"] = self._scan_start_time
                 entry["_hdf5_path"] = os.path.abspath(self._last_fn)
+                # Strip Cryo-only keys that may linger in migrated configs
+                for _k in ("geometry", "stage_type",
+                           "hw_temperature_K",
+                           "_temp_sweep_start_K", "_temp_sweep_stop_K", "_temp_sweep_step_K"):
+                    entry.pop(_k, None)
                 append_measurement(nb, entry)
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None

@@ -86,29 +86,49 @@ def _compute_derived(entry: dict) -> dict:
         out.setdefault("_time", "")
 
     scan_type = entry.get("scan_type", "SPATIAL")
+    is_temp_sweep = "_temp_sweep_start_K" in entry   # FIELD engine driving AttoDRY temp
+    is_field      = scan_type == "FIELD" and not is_temp_sweep
+    is_dc_hyst    = scan_type == "DC_HYST"
+    is_spatial    = scan_type not in ("FIELD", "DC_HYST")
+
+    # Override displayed scan type for temp sweeps
+    if is_temp_sweep:
+        out["scan_type"] = "TEMP_SWEEP"
 
     # Point counts
-    n_x = int(entry.get("act1_npts", 1))
-    n_y = int(entry.get("act2_npts", 1))
-    scan_2d = entry.get("scan_x", True) and entry.get("scan_y", False)
-    if scan_type == "FIELD":
+    if is_field or is_temp_sweep:
         n_x = int(entry.get("field_npts", 1)); n_y = 1
+    elif is_dc_hyst:
+        n_x = int(entry.get("hyst_npts", 1)); n_y = 1
+    else:
+        n_x = int(entry.get("act1_npts", 1))
+        n_y = int(entry.get("act2_npts", 1))
+    scan_2d = is_spatial and entry.get("scan_x", True) and entry.get("scan_y", False)
     out["_n_x"] = n_x
     out["_n_y"] = n_y if scan_2d else 1
     out["_n_total"] = out["_n_x"] * out["_n_y"]
 
-    # Step sizes for spatial axes
+    # Step sizes — only meaningful for spatial axes
     for pfx in ("act1", "act2"):
-        start = entry.get(f"{pfx}_start")
-        stop  = entry.get(f"{pfx}_stop")
-        npts  = int(entry.get(f"{pfx}_npts", 1))
-        if start is not None and stop is not None and npts > 1:
-            out[f"_{pfx}_step"] = (stop - start) / (npts - 1)
+        if is_spatial:
+            start = entry.get(f"{pfx}_start")
+            stop  = entry.get(f"{pfx}_stop")
+            npts  = int(entry.get(f"{pfx}_npts", 1))
+            if start is not None and stop is not None and npts > 1:
+                out[f"_{pfx}_step"] = (stop - start) / (npts - 1)
+            else:
+                out[f"_{pfx}_step"] = ""
         else:
-            out.setdefault(f"_{pfx}_step", "")
+            out[f"_{pfx}_step"] = ""
+            # Blank act1/act2 range columns for non-spatial scans so the CSV
+            # doesn't show spatial ranges that don't apply.
+            if not is_spatial:
+                out.setdefault(f"{pfx}_start", "")
+                out.setdefault(f"{pfx}_stop",  "")
+                out.setdefault(f"{pfx}_unit",  "")
 
-    # Field sweep parameters
-    if scan_type == "FIELD":
+    # Field sweep start/stop/step — real field scan only (not temp sweep)
+    if is_field:
         segs = entry.get("field_segments", [])
         if segs:
             start_A = segs[0][0];  stop_A = segs[-1][1]
@@ -121,9 +141,9 @@ def _compute_derived(entry: dict) -> dict:
             out["_field_stop"]  = entry.get("field_stop_A", "")
             out["_field_step"]  = ""
     else:
-        out.setdefault("_field_start", "")
-        out.setdefault("_field_stop", "")
-        out.setdefault("_field_step", "")
+        out["_field_start"] = ""
+        out["_field_stop"]  = ""
+        out["_field_step"]  = ""
 
     return out
 
