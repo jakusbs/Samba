@@ -263,26 +263,26 @@ class CryoMainWindow(QMainWindow):
 
         self._restore_geometry()
 
-        # Schedule a startup device probe shortly after the window appears
-        QTimer.singleShot(800, self._probe_devices)
         # Read hardware panels once the window is shown
         QTimer.singleShot(400, self._initial_hw_read)
 
-    def _probe_devices(self):
+    def _probe_devices(self, status_callback=None):
         """Check critical hardware devices at startup and warn if any are unreachable.
 
-        Runs a quick fresh_proxy() on each device listed in the active setup.
-        SimProxy responses indicate a device is offline or misconfigured.
-        Results are logged; a non-blocking message is shown if issues are found.
+        When *status_callback* is provided (a callable accepting a str), probes run
+        in parallel background threads and the callback is invoked on the GUI thread
+        as each result arrives — suitable for updating a splash screen.
+        Without a callback, probes run sequentially (blocking) and a QMessageBox is
+        shown for any unavailable devices.
         """
+        import threading as _threading
         from hardware import fresh_proxy, is_sim_proxy
         setup = self._active_setup()
 
         candidates = {
-            "Keithley":  setup.get("keithley_device", ""),
-            "AttoDRY":   setup.get("attodry_device",  ""),
+            "Keithley": setup.get("keithley_device", ""),
+            "AttoDRY":  setup.get("attodry_device",  ""),
         }
-        # Check the stage device from the active geometry + piezo block
         configs = setup.get("configs", [])
         if configs:
             idx = setup.get("active_idx", 0)
@@ -294,28 +294,64 @@ class CryoMainWindow(QMainWindow):
             if stage_dev:
                 candidates["Stage"] = stage_dev
 
+        _PROBE_TIMEOUT = 6.0   # seconds — shorter than default CORBA timeout
+
+        results: dict = {}
+        threads: dict = {}
+        for name, path in candidates.items():
+            if not path:
+                results[name] = (None, "no path configured")
+                continue
+            def _probe(n=name, p=path):
+                results[n] = fresh_proxy(p)
+            t = _threading.Thread(target=_probe, daemon=True)
+            t.start()
+            threads[name] = t
+
+        if status_callback:
+            # Parallel mode: poll from GUI thread so splash stays responsive
+            status_callback(f"Checking {len(threads)} device(s)…")
+            reported: set = set()
+            deadline = time.monotonic() + _PROBE_TIMEOUT + 2.0
+            while len(reported) < len(threads) and time.monotonic() < deadline:
+                for name, t in threads.items():
+                    if name not in reported and not t.is_alive():
+                        reported.add(name)
+                        proxy, err = results.get(name, (None, "timeout"))
+                        ok = not err and not is_sim_proxy(proxy)
+                        status_callback(f"{'✓' if ok else '⚠'} {name}: {'OK' if ok else 'unavailable'}")
+                QApplication.instance().processEvents()
+                time.sleep(0.05)
+            # Threads still running past deadline: mark as timeout
+            for name in threads:
+                if name not in reported:
+                    results[name] = (None, "connection timed out")
+        else:
+            for t in threads.values():
+                t.join(_PROBE_TIMEOUT)
+
         unavailable = []
         for name, path in candidates.items():
+            proxy, err = results.get(name, (None, "timeout"))
             if not path:
                 log.warning("Startup probe: %s — no device path configured", name)
                 unavailable.append(f"{name}: no path")
-                continue
-            p, err = fresh_proxy(path)
-            if err or is_sim_proxy(p):
+            elif err or is_sim_proxy(proxy):
                 log.warning("Startup probe: %s (%s) — %s", name, path, err or "unreachable")
                 unavailable.append(f"{name} ({path})")
             else:
                 log.info("Startup probe: %s (%s) — OK", name, path)
 
         if unavailable:
-            msg = (
-                "The following devices could not be reached at startup:\n\n"
-                + "\n".join(f"  • {d}" for d in unavailable)
-                + "\n\nScans will run in simulation mode for these devices.\n"
-                "Check your TANGO_HOST and device server status."
-            )
             log.warning("Startup probe: %d device(s) unavailable", len(unavailable))
-            QMessageBox.warning(self, "Hardware Unavailable", msg)
+            if not status_callback:
+                msg = (
+                    "The following devices could not be reached at startup:\n\n"
+                    + "\n".join(f"  • {d}" for d in unavailable)
+                    + "\n\nScans will run in simulation mode for these devices.\n"
+                    "Check your TANGO_HOST and device server status."
+                )
+                QMessageBox.warning(self, "Hardware Unavailable", msg)
         else:
             log.info("Startup probe: all critical devices reachable")
 
@@ -1519,8 +1555,11 @@ def main():
     if _app_icon:
         win.setWindowIcon(_app_icon)
 
+    if TANGO_AVAILABLE:
+        win._probe_devices(status_callback=lambda msg: update_splash(splash, msg))
+
     update_splash(splash, "Ready!")
-    finish_splash(splash, win, min_seconds=3)
+    finish_splash(splash, win, min_seconds=0)
 
     if not TANGO_AVAILABLE:
         QMessageBox.information(win, "Simulation Mode",
