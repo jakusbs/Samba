@@ -1,207 +1,233 @@
 #!/bin/bash
-# install.sh — SAMBA full installer
-# Run once from the project directory:  bash install.sh
+# install.sh — SAMBA installer
+# Installs system libraries, Python packages, and the desktop launcher.
 #
-# What it does:
-#   1. Checks Python version (3.8+ required)
-#   2. Installs all required Python packages
-#   3. Generates a launch script with the correct Python and project path
-#   4. Creates a GNOME desktop entry (taskbar / application menu)
-#   5. Sets up the config directory (~/.config/moke_scan)
+# Usage:  sudo bash install.sh [conda_env]
+#   conda_env  conda environment to install packages into (default: base)
+# Example: sudo bash install.sh Tango
 
 set -e
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── Resolve real user (handles both  sudo bash install.sh  and  bash install.sh) ──
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ICON_PATH="$SCRIPT_DIR/samba_icon_256.png"
+CONFIG_FILE="$SCRIPT_DIR/.install_config"
+
+# Load saved env preference, then override with CLI arg if provided
+SAVED_ENV=""
+[ -f "$CONFIG_FILE" ] && SAVED_ENV=$(grep '^CONDA_ENV=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2)
+CONDA_ENV="${1:-${SAVED_ENV:-base}}"
+
+# Persist the choice for future runs
+echo "CONDA_ENV=$CONDA_ENV" > "$CONFIG_FILE"
+
+# Resolve real user when called with sudo
 if [ -n "$SUDO_USER" ]; then
     REAL_USER="$SUDO_USER"
     REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
-    REAL_USER="$(whoami)"
+    REAL_USER="$USER"
     REAL_HOME="$HOME"
 fi
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+# ── Helpers ───────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'
 BOLD='\033[1m'; NC='\033[0m'
-ok()  { echo -e "  ${GREEN}✓${NC} $1"; }
-warn(){ echo -e "  ${YELLOW}⚠${NC} $1"; }
-err() { echo -e "  ${RED}✗${NC} $1"; }
-hdr() { echo -e "\n${BOLD}$1${NC}"; }
 
-echo -e "${BOLD}"
-echo "  ╔══════════════════════════════════╗"
-echo "  ║       SAMBA Installer            ║"
-echo "  ║  ETH Zürich — Intermag Lab       ║"
-echo "  ╚══════════════════════════════════╝"
-echo -e "${NC}"
-echo "  Project directory: $SCRIPT_DIR"
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}!${NC}  $1"; }
+step() { echo -e "\n${BOLD}▶  $1${NC}"; }
 
-# ── Detect Python ─────────────────────────────────────────────────────────────
-hdr "[ 1 / 5 ]  Python"
+# ── Banner ────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║      SAMBA  —  Installer             ║${NC}"
+echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
+echo "   Project dir : $SCRIPT_DIR"
+echo "   Install user: $REAL_USER  (home: $REAL_HOME)"
+echo "   Conda env   : $CONDA_ENV"
 
-# Prefer the Python that called this script; fall back to python3
-PYTHON="${PYTHON:-$(command -v python3 2>/dev/null || command -v python)}"
-if [ -z "$PYTHON" ]; then
-    err "No Python found. Install Python 3.8+ or set PYTHON=/path/to/python."
+# ── 1. Check icon exists ──────────────────────────────────────────────────────
+if [ ! -f "$ICON_PATH" ]; then
+    fail "samba_icon_256.png not found in $SCRIPT_DIR"
     exit 1
 fi
 
-PY_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PY_MAJOR=$("$PYTHON" -c "import sys; print(sys.version_info.major)")
-PY_MINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]; }; then
-    err "Python 3.8+ required — found $PY_VER at $PYTHON"
-    exit 1
-fi
-
-PYTHON_PATH=$("$PYTHON" -c "import sys; print(sys.executable)")
-ok "Python $PY_VER  →  $PYTHON_PATH"
-
-# Warn if running as root without an explicit environment
-if [ "$(id -u)" -eq 0 ] && [ -z "$CONDA_DEFAULT_ENV" ] && [ -z "$VIRTUAL_ENV" ]; then
-    warn "Running as root with the system Python — this is not recommended."
-    warn "Packages installed here may conflict with the OS or not be user-visible."
-    warn "Preferred: run  bash install.sh <conda_env>  as a normal user."
-fi
-
-# Warn if running outside a conda / venv environment
-if [ -z "$CONDA_DEFAULT_ENV" ] && [ -z "$VIRTUAL_ENV" ]; then
-    warn "No active conda or venv environment detected — installing to system Python."
-    warn "Consider activating your environment first."
-fi
-
-# ── Python packages ───────────────────────────────────────────────────────────
-hdr "[ 2 / 5 ]  Python packages"
-
-# Bootstrap pip if missing (common on bare Debian/Ubuntu system Python)
-if ! "$PYTHON" -m pip --version &>/dev/null; then
-    warn "pip not found — attempting to install it…"
-    if command -v apt-get &>/dev/null; then
-        apt-get install -y python3-pip &>/dev/null \
-            && ok "pip installed via apt-get" \
-            || warn "apt-get install python3-pip failed — try manually: sudo apt-get install python3-pip"
+# ── 2. System packages ────────────────────────────────────────────────────────
+step "System packages (apt)"
+if command -v apt-get &>/dev/null; then
+    SYS_PKGS="libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxkbcommon-x11-0"
+    if [ "$(id -u)" -eq 0 ]; then
+        apt-get install -y $SYS_PKGS 2>&1 \
+            | grep -E "^(Get:|Inst |Setting up)" | sed 's/^/     /' || true
+        ok "System packages installed"
     else
-        "$PYTHON" -m ensurepip --upgrade &>/dev/null \
-            && ok "pip bootstrapped via ensurepip" \
-            || warn "Could not install pip — install manually then re-run install.sh"
+        warn "Not running as root — skipping system packages"
+        warn "If Qt fails to start, run:  sudo apt install $SYS_PKGS"
     fi
+else
+    warn "apt-get not found — skipping (non-Debian system)"
 fi
 
-# Format: "pip_package_name:import_name"
-PACKAGES=(
-    "PyQt6:PyQt6"
-    "numpy:numpy"
-    "matplotlib:matplotlib"
-    "h5py:h5py"
-    "pytango:tango"
-)
-
-FAILED=()
-for entry in "${PACKAGES[@]}"; do
-    pip_name="${entry%%:*}"
-    import_name="${entry##*:}"
-    if "$PYTHON" -c "import $import_name" 2>/dev/null; then
-        ver=$("$PYTHON" -c "import $import_name; print(getattr($import_name, '__version__', '?'))" 2>/dev/null || echo "?")
-        ok "$pip_name  ($ver)"
-    else
-        echo "    Installing $pip_name ..."
-        if "$PYTHON" -m pip install "$pip_name" -q; then
-            ok "$pip_name  installed"
-        else
-            warn "$pip_name  install FAILED — you may need to install it manually"
-            FAILED+=("$pip_name")
-        fi
+# ── 3. Find conda ─────────────────────────────────────────────────────────────
+step "Conda"
+CONDA_BASE=""
+for candidate in \
+    "$REAL_HOME/miniforge3" "$REAL_HOME/miniconda3" "$REAL_HOME/anaconda3" \
+    "$HOME/miniforge3"      "$HOME/miniconda3"      "$HOME/anaconda3" \
+    "/opt/miniforge3" "/opt/miniconda3" "/opt/conda"; do
+    if [ -f "$candidate/etc/profile.d/conda.sh" ]; then
+        CONDA_BASE="$candidate"; break
     fi
 done
 
-if [ ${#FAILED[@]} -gt 0 ]; then
-    echo ""
-    warn "The following packages could not be installed automatically:"
-    for pkg in "${FAILED[@]}"; do
-        echo "      pip install $pkg"
-    done
-    if [[ " ${FAILED[*]} " == *" pytango "* ]]; then
-        warn "pytango sometimes requires a conda install instead:"
-        echo "      conda install -c tango-controls pytango"
-    fi
+if [ -z "$CONDA_BASE" ]; then
+    fail "conda not found — install miniforge/miniconda/anaconda first"
+    exit 1
 fi
+ok "Found conda at $CONDA_BASE"
 
-# ── Launch script ─────────────────────────────────────────────────────────────
-hdr "[ 3 / 5 ]  Launch script"
+# ── 4. Create env if needed, install Python packages ─────────────────────────
+step "Python packages  (env: $CONDA_ENV)"
+
+INSTALL_CMD="
+    source '$CONDA_BASE/etc/profile.d/conda.sh'
+
+    # Create the env if it does not yet exist
+    if ! conda env list 2>/dev/null | grep -qE '^${CONDA_ENV}[[:space:]]'; then
+        echo '     Creating conda env ${CONDA_ENV} (python 3.11)...'
+        conda create -y -q -n '${CONDA_ENV}' python=3.11
+    fi
+
+    conda activate '${CONDA_ENV}'
+
+    # Install all packages via pip
+    FAILED_PKGS=()
+    for entry in PyQt6:PyQt6 numpy:numpy matplotlib:matplotlib h5py:h5py pytango:tango; do
+        pip_name=\${entry%%:*}
+        import_name=\${entry##*:}
+        if python -c \"import \$import_name\" 2>/dev/null; then
+            ver=\$(python -c \"import \$import_name; print(getattr(\$import_name, '__version__', 'ok'))\" 2>/dev/null || echo ok)
+            echo \"     \033[0;32m✓\033[0m  \$pip_name  (\$ver)\"
+        else
+            echo \"     Installing \$pip_name ...\"
+            if python -m pip install \"\$pip_name\" -q; then
+                echo \"     \033[0;32m✓\033[0m  \$pip_name  installed\"
+            else
+                echo \"     \033[1;33m!\033[0m  \$pip_name  pip install failed\"
+                FAILED_PKGS+=(\"\$pip_name\")
+            fi
+        fi
+    done
+
+    if [ \${#FAILED_PKGS[@]} -gt 0 ]; then
+        echo \"\"
+        echo \"     \033[1;33m!\033[0m  Could not install: \${FAILED_PKGS[*]}\"
+        if [[ \" \${FAILED_PKGS[*]} \" == *\" pytango \"* ]]; then
+            echo \"     \033[1;33m!\033[0m  Try:  conda install -c conda-forge pytango\"
+        fi
+    fi
+"
+
+if [ -n "$SUDO_USER" ]; then
+    sudo -u "$SUDO_USER" bash -c "$INSTALL_CMD"
+else
+    bash -c "$INSTALL_CMD"
+fi
+ok "Python packages installed"
+
+# ── 5. Verify imports ─────────────────────────────────────────────────────────
+step "Verifying imports"
+
+VERIFY_CMD="
+    source '$CONDA_BASE/etc/profile.d/conda.sh'
+    conda activate '$CONDA_ENV'
+    python3 - <<'PYEOF'
+import importlib, sys
+results = []
+for pkg, import_name in [
+        ('numpy',      'numpy'),
+        ('matplotlib', 'matplotlib'),
+        ('h5py',       'h5py'),
+        ('PyQt6',      'PyQt6'),
+        ('pytango',    'tango'),
+]:
+    try:
+        m = importlib.import_module(import_name)
+        ver = getattr(m, '__version__', 'ok')
+        print(f'     \033[0;32m✓\033[0m  {pkg} {ver}')
+    except ImportError as e:
+        print(f'     \033[0;31m✗\033[0m  {pkg}  ({e})')
+        sys.exit(1)
+PYEOF
+"
+
+if [ -n "$SUDO_USER" ]; then
+    sudo -u "$SUDO_USER" bash -c "$VERIFY_CMD"
+else
+    bash -c "$VERIFY_CMD"
+fi
+ok "All imports verified"
+
+# ── 6. Launch script ──────────────────────────────────────────────────────────
+step "Launch script"
 
 LAUNCH="$SCRIPT_DIR/launch_samba.sh"
 cat > "$LAUNCH" << LAUNCH_EOF
 #!/bin/bash
 # Auto-generated by install.sh — re-run install.sh to regenerate
+CONDA_ENV="\${1:-$CONDA_ENV}"
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "\$CONDA_ENV"
 cd "$SCRIPT_DIR"
-exec "$PYTHON_PATH" "$SCRIPT_DIR/samba.py"
+exec python "$SCRIPT_DIR/samba.py"
 LAUNCH_EOF
 chmod +x "$LAUNCH"
+[ -n "$SUDO_USER" ] && chown "$REAL_USER":"$REAL_USER" "$LAUNCH"
 ok "launch_samba.sh  →  $LAUNCH"
 
-# ── Desktop entry ─────────────────────────────────────────────────────────────
-hdr "[ 4 / 5 ]  Desktop entry"
+# ── 7. Desktop launcher ───────────────────────────────────────────────────────
+step "Desktop launcher"
 
-ICON_SRC="$SCRIPT_DIR/samba_icon_256.png"
-ICON_DEST="$REAL_HOME/.local/share/icons/hicolor/256x256/apps/samba.png"
 APPS_DIR="$REAL_HOME/.local/share/applications"
-ICONS_DIR="$REAL_HOME/.local/share/icons/hicolor/256x256/apps"
-
 mkdir -p "$APPS_DIR"
-mkdir -p "$ICONS_DIR"
-
-cat > "$APPS_DIR/samba.desktop" << DESK_EOF
+cat > "$APPS_DIR/samba.desktop" << EOF
 [Desktop Entry]
 Name=SAMBA
 Comment=SAMBA — ETH Zürich Intermag Lab
-Exec=$LAUNCH
-Icon=$ICON_DEST
+Exec=bash $SCRIPT_DIR/launch_samba.sh $CONDA_ENV
+Icon=$ICON_PATH
 Terminal=false
 Type=Application
 Categories=Science;Education;
 StartupWMClass=samba
-DESK_EOF
+EOF
+chmod +x "$APPS_DIR/samba.desktop"
+[ -n "$SUDO_USER" ] && chown "$REAL_USER":"$REAL_USER" "$APPS_DIR/samba.desktop"
 
-if [ -f "$ICON_SRC" ]; then
-    cp "$ICON_SRC" "$ICON_DEST"
-    gtk-update-icon-cache -f -t "$REAL_HOME/.local/share/icons/hicolor" 2>/dev/null || true
-    ok "Icon installed"
-else
-    warn "samba_icon_256.png not found — desktop entry will have no icon"
-fi
+ICONS_DIR="$REAL_HOME/.local/share/icons/hicolor/256x256/apps"
+mkdir -p "$ICONS_DIR"
+cp "$ICON_PATH" "$ICONS_DIR/samba.png"
+[ -n "$SUDO_USER" ] && chown "$REAL_USER":"$REAL_USER" "$ICONS_DIR/samba.png"
 
-# Fix ownership so the real user owns their own files when run via sudo
-if [ -n "$SUDO_USER" ]; then
-    chown -R "$REAL_USER:" "$APPS_DIR/samba.desktop" "$ICON_DEST" 2>/dev/null || true
-fi
-
+gtk-update-icon-cache -f -t "$REAL_HOME/.local/share/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$APPS_DIR" 2>/dev/null || true
-ok "Desktop entry installed  →  $APPS_DIR/samba.desktop"
+ok "Desktop entry created"
 
-# ── Config directory ──────────────────────────────────────────────────────────
-hdr "[ 5 / 5 ]  Config directory"
+# ── 8. Config directory ───────────────────────────────────────────────────────
+step "Config directory"
 
 CONFIG_DIR="$REAL_HOME/.config/moke_scan"
 mkdir -p "$CONFIG_DIR"
-if [ -n "$SUDO_USER" ]; then
-    chown "$REAL_USER:" "$CONFIG_DIR" 2>/dev/null || true
-fi
+[ -n "$SUDO_USER" ] && chown "$REAL_USER":"$REAL_USER" "$CONFIG_DIR"
 ok "$CONFIG_DIR"
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}  ══════════════════════════════════${NC}"
-if [ ${#FAILED[@]} -eq 0 ]; then
-    echo -e "${GREEN}${BOLD}  Installation complete!${NC}"
-else
-    echo -e "${YELLOW}${BOLD}  Installation complete (with warnings).${NC}"
-fi
-echo -e "${BOLD}  ══════════════════════════════════${NC}"
+echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║   Installation complete!             ║${NC}"
+echo -e "${GREEN}${BOLD}╚══════════════════════════════════════╝${NC}"
 echo ""
-echo "  Launch from terminal:"
-echo "    bash $LAUNCH"
-echo ""
-echo "  Or find SAMBA in the application menu"
-echo "  (log out and back in if it doesn't appear)."
+echo "   Application menu : SAMBA"
+echo "   Terminal launch  : bash $SCRIPT_DIR/launch_samba.sh $CONDA_ENV"
 echo ""
