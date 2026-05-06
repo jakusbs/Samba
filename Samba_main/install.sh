@@ -49,6 +49,13 @@ fi
 PYTHON_PATH=$("$PYTHON" -c "import sys; print(sys.executable)")
 ok "Python $PY_VER  →  $PYTHON_PATH"
 
+# Warn if running as root without an explicit environment
+if [ "$(id -u)" -eq 0 ] && [ -z "$CONDA_DEFAULT_ENV" ] && [ -z "$VIRTUAL_ENV" ]; then
+    warn "Running as root with the system Python — this is not recommended."
+    warn "Packages installed here may conflict with the OS or not be user-visible."
+    warn "Preferred: run  bash install.sh <conda_env>  as a normal user."
+fi
+
 # Warn if running outside a conda / venv environment
 if [ -z "$CONDA_DEFAULT_ENV" ] && [ -z "$VIRTUAL_ENV" ]; then
     warn "No active conda or venv environment detected — installing to system Python."
@@ -57,6 +64,20 @@ fi
 
 # ── Python packages ───────────────────────────────────────────────────────────
 hdr "[ 2 / 5 ]  Python packages"
+
+# Bootstrap pip if missing (common on bare Debian/Ubuntu system Python)
+if ! "$PYTHON" -m pip --version &>/dev/null; then
+    warn "pip not found — attempting to install it…"
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y python3-pip &>/dev/null \
+            && ok "pip installed via apt-get" \
+            || warn "apt-get install python3-pip failed — try manually: sudo apt-get install python3-pip"
+    else
+        "$PYTHON" -m ensurepip --upgrade &>/dev/null \
+            && ok "pip bootstrapped via ensurepip" \
+            || warn "Could not install pip — install manually then re-run install.sh"
+    fi
+fi
 
 # Format: "pip_package_name:import_name"
 PACKAGES=(

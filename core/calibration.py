@@ -6,7 +6,7 @@ The digit-jog controls allow precise positioning via per-digit ▲/▼ buttons.
 The autofocus routine optimises the Z position by maximising a fluorescence
 signal, plotting FL vs Z in real time.
 """
-import time, traceback
+import time, traceback, threading
 import numpy as np
 from typing import Optional
 
@@ -567,18 +567,33 @@ class CalibrationPanel(QWidget):
     def _read_all(self):
         info = self._get_axis_info()
         if not info: self._set_pos_err("No config available"); return
-        results = []
-        for key, jog in [("x", self.jog_x), ("y", self.jog_y), ("z", self.jog_z)]:
-            dev, attr = info.get(key, ("", ""))
-            if not dev: results.append(f"{key}: no device"); continue
-            p, err = fresh_proxy(dev)
-            if err: results.append(f"{key}: {err[:20]}"); continue
-            v, e = safe_read(p, attr)
-            if e: results.append(f"{key}({attr}): {e[:20]}")
-            elif v is not None:
-                jog.set_value(v); jog.update_readback(v)
-                results.append(f"{key}={v:.3f}")
-        self._set_pos_ok("Read: " + "  ".join(results))
+        self._set_pos_ok("Reading…")
+
+        jog_map = {"x": self.jog_x, "y": self.jog_y, "z": self.jog_z}
+
+        def _do():
+            results = []
+            updates = {}   # axis → value (for GUI jog widgets)
+            for key, jog in jog_map.items():
+                dev, attr = info.get(key, ("", ""))
+                if not dev: results.append(f"{key}: no device"); continue
+                p, err = fresh_proxy(dev)
+                if err: results.append(f"{key}: {err[:20]}"); continue
+                v, e = safe_read(p, attr)
+                if e: results.append(f"{key}({attr}): {e[:20]}")
+                elif v is not None:
+                    updates[key] = v
+                    results.append(f"{key}={v:.3f}")
+
+            def _apply():
+                for axis, val in updates.items():
+                    w = jog_map[axis]
+                    w.set_value(val); w.update_readback(val)
+                self._set_pos_ok("Read: " + "  ".join(results))
+
+            QTimer.singleShot(0, _apply)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def get_axis_info(self) -> dict:
         return self._get_axis_info()
