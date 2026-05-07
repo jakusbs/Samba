@@ -1220,27 +1220,23 @@ class CryoMainWindow(QMainWindow):
         self.log_text.clear()
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
-        attodry_dev = setup.get("attodry_device", "")
-        is_temp_sweep = (
-            first_cfg.get("scan_type") == "FIELD"
-            and bool(attodry_dev)
-            and first_cfg.get("act1_device", "") == attodry_dev
-        )
+        # Temperature sweep is identified by the presence of "temp_start" —
+        # a key that only get_config_partial() adds for temperature sweeps,
+        # not for field sweeps.  Checking act1_device == attodry_dev is wrong
+        # because temperature sweep configs don't set act1_device at all.
+        is_temp_sweep = "temp_start" in first_cfg
         hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
                                     is_temp_sweep=is_temp_sweep)
         # Temperature sweep flag + start/stop/step for the lab notebook.
-        # Store _is_temp_sweep unconditionally so _compute_derived can
-        # always detect it, even when field_segments is empty.
         if is_temp_sweep:
             hw_snap["_is_temp_sweep"] = True
-            segs = first_cfg.get("field_segments", [])
-            if segs:
-                t_start = segs[0][0];  t_stop = segs[-1][1]
-                t_pts = sum(max(1, int(s[2])) for s in segs)
-                hw_snap["_temp_sweep_start_K"] = t_start
-                hw_snap["_temp_sweep_stop_K"]  = t_stop
-                hw_snap["_temp_sweep_step_K"]  = (
-                    (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
+            t_start = first_cfg.get("temp_start", 0.0)
+            t_stop  = first_cfg.get("temp_stop",  0.0)
+            t_pts   = int(first_cfg.get("temp_npts", 1))
+            hw_snap["_temp_sweep_start_K"] = t_start
+            hw_snap["_temp_sweep_stop_K"]  = t_stop
+            hw_snap["_temp_sweep_step_K"]  = (
+                (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
         for c in cfgs:
             c.update(hw_snap)
 
