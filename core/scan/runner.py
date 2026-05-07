@@ -53,9 +53,13 @@ def _make_filename(cfg: dict) -> str:
     """Return HDF5 filename: HHMMSS_SCANTYPE_SampleID_ConfigName.h5
 
     sample_id is omitted when empty.  Special characters are replaced with '_'.
+    Temperature sweeps use TEMP_SWEEP instead of FIELD.
     """
-    ts         = datetime.now().strftime("%H%M%S")
-    scan_type  = cfg.get("scan_type", "SPATIAL")
+    ts = datetime.now().strftime("%H%M%S")
+    if cfg.get("_is_temp_sweep"):
+        scan_type = "TEMP_SWEEP"
+    else:
+        scan_type = cfg.get("scan_type", "SPATIAL")
     sample_raw = cfg.get("sample_id", "").strip()
     sample     = re.sub(r"[^\w-]", "_", sample_raw).strip("_")
     name       = cfg.get("name", "scan")
@@ -64,6 +68,40 @@ def _make_filename(cfg: dict) -> str:
         parts.append(sample)
     parts.append(name)
     return "_".join(parts) + ".h5"
+
+
+def _write_hw_metadata(meta, cfg: dict) -> None:
+    """Write hardware snapshot and temperature-sweep keys into an HDF5 group."""
+    # hw_* keys: keithley, lock-in, relay, field, stage positions, temperature
+    _HW_KEYS = [
+        "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
+        "hw_keithley_range",        "hw_keithley_compliance_V",
+        "hw_zi_tc_s",               "hw_zi_order",
+        "hw_zi_settling_s",         "hw_relay_state",
+        "hw_field_mT",              "hw_act1_pos",
+        "hw_act2_pos",              "hw_temperature_K",
+    ]
+    for k in _HW_KEYS:
+        v = cfg.get(k)
+        if v is not None:
+            try:
+                meta.attrs[k] = v
+            except Exception:
+                meta.attrs[k] = str(v)
+    # Temperature sweep keys (Cryo) — stored with clean names (no leading _)
+    _TEMP_KEYS = {
+        "_is_temp_sweep":      "is_temp_sweep",
+        "_temp_sweep_start_K": "temp_sweep_start_K",
+        "_temp_sweep_stop_K":  "temp_sweep_stop_K",
+        "_temp_sweep_step_K":  "temp_sweep_step_K",
+    }
+    for src, dst in _TEMP_KEYS.items():
+        v = cfg.get(src)
+        if v is not None and v != "":
+            try:
+                meta.attrs[dst] = v
+            except Exception:
+                meta.attrs[dst] = str(v)
 
 
 # How often to flush to disk for 1D scans (every N points)
@@ -804,22 +842,8 @@ class ScanRunner:
             meta.attrs["mirror_shift_mm"]  = float(cfg.get("mirror_shift", 0.0))
             meta.attrs["channels_json"]    = _json.dumps(hyst_chs)
 
-            # Hardware snapshot (hw_* keys added by samba.py before scan)
-            _HW_KEYS = [
-                "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
-                "hw_keithley_range",        "hw_keithley_compliance_V",
-                "hw_zi_tc_s",               "hw_zi_order",
-                "hw_zi_settling_s",         "hw_relay_state",
-                "hw_field_mT",              "hw_act1_pos",
-                "hw_act2_pos",              "hw_temperature_K",
-            ]
-            for k in _HW_KEYS:
-                v = cfg.get(k)
-                if v is not None:
-                    try:
-                        meta.attrs[k] = v
-                    except Exception:
-                        meta.attrs[k] = str(v)
+            # Hardware snapshot + temperature-sweep keys
+            _write_hw_metadata(meta, cfg)
 
             # Scalar results written at completion
             for s in ("Hc", "Hshift", "Mr", "Ms"):
@@ -1137,22 +1161,8 @@ class ScanRunner:
                     span = segs[-1][1] - segs[0][0]
                     meta.attrs["field_step_A"] = span / (total_pts - 1)
 
-            # ── Hardware snapshot (hw_* keys added by samba.py before scan) ──
-            _HW_KEYS = [
-                "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
-                "hw_keithley_range",        "hw_keithley_compliance_V",
-                "hw_zi_tc_s",               "hw_zi_order",
-                "hw_zi_settling_s",         "hw_relay_state",
-                "hw_field_mT",              "hw_act1_pos",
-                "hw_act2_pos",              "hw_temperature_K",
-            ]
-            for k in _HW_KEYS:
-                v = cfg.get(k)
-                if v is not None:
-                    try:
-                        meta.attrs[k] = v
-                    except Exception:
-                        meta.attrs[k] = str(v)
+            # ── Hardware snapshot + temperature-sweep keys ────────────────────
+            _write_hw_metadata(meta, cfg)
 
             # ── /data/ ────────────────────────────────────────────────────────
             # Axis dataset key is derived from the scan label so the name is
