@@ -89,17 +89,23 @@ def _compute_derived(entry: dict) -> dict:
     # _is_temp_sweep is set explicitly by samba_cryo; fall back to checking
     # for the derived key so old entries without the flag still work.
     is_temp_sweep = bool(entry.get("_is_temp_sweep")) or "_temp_sweep_start_K" in entry
-    is_field      = scan_type == "FIELD" and not is_temp_sweep
-    is_dc_hyst    = scan_type == "DC_HYST"
-    is_spatial    = scan_type not in ("FIELD", "DC_HYST")
+    # TIME scan: SPATIAL config with both axes deselected
+    is_time    = (scan_type == "SPATIAL"
+                  and not entry.get("scan_x", True)
+                  and not entry.get("scan_y", False))
+    is_field   = scan_type == "FIELD" and not is_temp_sweep
+    is_dc_hyst = scan_type == "DC_HYST"
+    is_spatial = scan_type not in ("FIELD", "DC_HYST") and not is_time
 
-    # Override displayed scan type for temp sweeps
+    # Override displayed scan type
     if is_temp_sweep:
         out["scan_type"] = "TEMP_SWEEP"
+    elif is_time:
+        out["scan_type"] = "TIME"
 
     # Point counts
-    if is_field or is_temp_sweep:
-        n_x = int(entry.get("field_npts", 1)); n_y = 1
+    if is_field or is_temp_sweep or is_time:
+        n_x = int(entry.get("act1_npts", entry.get("field_npts", 1))); n_y = 1
     elif is_dc_hyst:
         n_x = int(entry.get("hyst_npts", 1)); n_y = 1
     else:
@@ -121,7 +127,7 @@ def _compute_derived(entry: dict) -> dict:
             else:
                 out[f"_{pfx}_step"] = ""
         else:
-            # Non-spatial scan: blank act range columns regardless of what
+            # Non-spatial / TIME scan: blank act range columns regardless of what
             # the cfg dict carries (trajectory panel may include stale values)
             out[f"_{pfx}_step"]    = ""
             out[f"{pfx}_start"]    = ""

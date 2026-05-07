@@ -58,6 +58,9 @@ def _make_filename(cfg: dict) -> str:
     ts = datetime.now().strftime("%H%M%S")
     if cfg.get("_is_temp_sweep"):
         scan_type = "TEMP_SWEEP"
+    elif (cfg.get("scan_type", "SPATIAL") == "SPATIAL"
+          and not cfg.get("scan_x", True) and not cfg.get("scan_y", False)):
+        scan_type = "TIME"
     else:
         scan_type = cfg.get("scan_type", "SPATIAL")
     sample_raw = cfg.get("sample_id", "").strip()
