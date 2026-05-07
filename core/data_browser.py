@@ -110,6 +110,28 @@ class ScanFile:
                     "is_dc_hyst":       is_dc,
                 }
 
+                # ── Hardware snapshot & step-size attrs ───────────────────────
+                _meta_src = f.get("metadata", f)
+                for k in (
+                    "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
+                    "hw_keithley_range",        "hw_keithley_compliance_V",
+                    "hw_zi_tc_s",               "hw_zi_order",
+                    "hw_zi_settling_s",         "hw_relay_state",
+                    "hw_field_mT",              "hw_act1_pos",
+                    "hw_act2_pos",              "hw_temperature_K",
+                    "act1_step", "act2_step",   "field_step_A",
+                    "is_temp_sweep",
+                    "temp_sweep_start_K", "temp_sweep_stop_K", "temp_sweep_step_K",
+                    "geometry", "stage_type", "field_segments_json",
+                ):
+                    v = _meta_src.attrs.get(k)
+                    if v is not None:
+                        self.meta[k] = v
+
+                # Normalise scan_type for display
+                if self.meta.get("is_temp_sweep"):
+                    self.meta["scan_type"] = "TEMP_SWEEP"
+
                 # ── DC extra scalars ──────────────────────────────────────────
                 if is_dc:
                     src = f.get("metadata", f)
@@ -483,7 +505,7 @@ class DataBrowserPanel(QWidget):
         meta_grp = QGroupBox("Metadata")
         meta_l = QVBoxLayout(meta_grp); meta_l.setContentsMargins(6, 6, 6, 6)
         self.meta_text = QTextEdit(); self.meta_text.setReadOnly(True)
-        self.meta_text.setMaximumHeight(120)
+        self.meta_text.setMaximumHeight(240)
         self.meta_text.setStyleSheet(
             "QTextEdit{background:#12121f;border:1px solid #313244;"
             "border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;"
@@ -657,6 +679,73 @@ class DataBrowserPanel(QWidget):
         if m.get("operator"):  lines.append(f"Operator: {m['operator']}")
         if m.get("sample_id"): lines.append(f"Sample:   {m['sample_id']}")
         if m.get("notes"):     lines.append(f"Notes:    {m['notes']}")
+        if m.get("geometry") or m.get("stage_type"):
+            parts = []
+            if m.get("geometry"):   parts.append(m["geometry"])
+            if m.get("stage_type"): parts.append(m["stage_type"])
+            lines.append(f"Geometry: {' / '.join(parts)}")
+
+        def _gfmt(v): return f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+
+        # Temperature sweep range (temp sweeps only — suppress redundant field step)
+        if m.get("is_temp_sweep"):
+            t0 = m.get("temp_sweep_start_K", "?")
+            t1 = m.get("temp_sweep_stop_K",  "?")
+            ts = m.get("temp_sweep_step_K",  "?")
+            lines.append(f"Temp range: {_gfmt(t0)} → {_gfmt(t1)} K  (step {_gfmt(ts)} K)")
+
+        # Field scan range (real field scans only)
+        is_field_scan = (m.get("scan_type") == "FIELD")
+        if is_field_scan:
+            segs_json = m.get("field_segments_json", "")
+            if segs_json:
+                try:
+                    import json as _json
+                    segs = _json.loads(segs_json)
+                    f0 = segs[0][0];  f1 = segs[-1][1]
+                    step = m.get("field_step_A")
+                    step_str = f"  (step {_gfmt(step)} A)" if step is not None else ""
+                    lines.append(f"Field range: {_gfmt(f0)} → {_gfmt(f1)} A{step_str}")
+                except Exception:
+                    if m.get("field_step_A") is not None:
+                        lines.append(f"Field step: {_gfmt(m['field_step_A'])} A")
+
+        # Spatial step sizes
+        step_rows = []
+        for key, label in (("act1_step", "Act1 step"), ("act2_step", "Act2 step")):
+            v = m.get(key)
+            if v is not None and v != "":
+                step_rows.append(f"{label}: {_gfmt(v)}")
+        if step_rows:
+            lines.append("─" * 28)
+            lines.extend(step_rows)
+
+        # Hardware snapshot
+        _HW_DISPLAY = [
+            ("hw_keithley_amplitude_mA", "Keithley amp",   "mA"),
+            ("hw_keithley_frequency_Hz", "Keithley freq",  "Hz"),
+            ("hw_keithley_range",        "Keithley range", ""),
+            ("hw_keithley_compliance_V", "Keithley compl", "V"),
+            ("hw_zi_tc_s",               "ZI TC",          "s"),
+            ("hw_zi_order",              "ZI order",       ""),
+            ("hw_zi_settling_s",         "ZI settling",    "s"),
+            ("hw_relay_state",           "Relay",          ""),
+            ("hw_field_mT",              "Field @start",   "mT"),
+            ("hw_temperature_K",         "Temp @start",    "K"),
+            ("hw_act1_pos",              "Act1 @start",    ""),
+            ("hw_act2_pos",              "Act2 @start",    ""),
+        ]
+        hw_rows = []
+        for key, label, unit in _HW_DISPLAY:
+            v = m.get(key)
+            if v is not None and v != "":
+                val = f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+                hw_rows.append(f"{label}: {val}{' ' + unit if unit else ''}")
+        if hw_rows:
+            lines.append("─" * 28)
+            lines.append("Hardware at scan start:")
+            lines.extend(hw_rows)
+
         self.meta_text.setPlainText("\n".join(l for l in lines if l))
 
         # Populate column combos
