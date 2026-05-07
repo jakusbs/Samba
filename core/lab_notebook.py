@@ -86,7 +86,9 @@ def _compute_derived(entry: dict) -> dict:
         out.setdefault("_time", "")
 
     scan_type = entry.get("scan_type", "SPATIAL")
-    is_temp_sweep = "_temp_sweep_start_K" in entry   # FIELD engine driving AttoDRY temp
+    # _is_temp_sweep is set explicitly by samba_cryo; fall back to checking
+    # for the derived key so old entries without the flag still work.
+    is_temp_sweep = bool(entry.get("_is_temp_sweep")) or "_temp_sweep_start_K" in entry
     is_field      = scan_type == "FIELD" and not is_temp_sweep
     is_dc_hyst    = scan_type == "DC_HYST"
     is_spatial    = scan_type not in ("FIELD", "DC_HYST")

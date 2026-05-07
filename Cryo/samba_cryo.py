@@ -1228,8 +1228,11 @@ class CryoMainWindow(QMainWindow):
         )
         hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
                                     is_temp_sweep=is_temp_sweep)
-        # Temperature sweep start/stop/step for the lab notebook
+        # Temperature sweep flag + start/stop/step for the lab notebook.
+        # Store _is_temp_sweep unconditionally so _compute_derived can
+        # always detect it, even when field_segments is empty.
         if is_temp_sweep:
+            hw_snap["_is_temp_sweep"] = True
             segs = first_cfg.get("field_segments", [])
             if segs:
                 t_start = segs[0][0];  t_stop = segs[-1][1]
