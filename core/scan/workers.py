@@ -15,14 +15,16 @@ from core.scan.runner import ScanRunner
 
 
 class ScanWorker(QThread):
-    point_done     = pyqtSignal(int, int, float, dict)
-    progress       = pyqtSignal(int, int)
-    status_msg     = pyqtSignal(str)
-    log_msg        = pyqtSignal(str)
-    scan_done      = pyqtSignal(str)
-    scan_aborted   = pyqtSignal()
-    error_msg      = pyqtSignal(str)
-    dc_loop_ready  = pyqtSignal(object, object)   # (field_arr, y_bufs dict)
+    point_done        = pyqtSignal(int, int, float, dict)
+    point_retrace     = pyqtSignal(int, int, float, dict)   # interleaved 2D retrace points
+    progress          = pyqtSignal(int, int)
+    status_msg        = pyqtSignal(str)
+    log_msg           = pyqtSignal(str)
+    scan_done         = pyqtSignal(str)
+    scan_done_retrace = pyqtSignal(str)   # emitted when interleaved retrace file is ready
+    scan_aborted      = pyqtSignal()
+    error_msg         = pyqtSignal(str)
+    dc_loop_ready     = pyqtSignal(object, object)   # (field_arr, y_bufs dict)
 
     def __init__(self, cfg: dict, setup: dict):
         super().__init__()
@@ -36,13 +38,17 @@ class ScanWorker(QThread):
     def run(self):
         try:
             fn = self._runner.run({
-                'point':    self.point_done.emit,
-                'progress': self.progress.emit,
-                'status':   self.status_msg.emit,
-                'log':      self.log_msg.emit,
-                'dc_loop':  self.dc_loop_ready.emit,
+                'point':         self.point_done.emit,
+                'point_retrace': self.point_retrace.emit,
+                'progress':      self.progress.emit,
+                'status':        self.status_msg.emit,
+                'log':           self.log_msg.emit,
+                'dc_loop':       self.dc_loop_ready.emit,
             })
             (self.scan_done if fn else self.scan_aborted).emit(*(fn,) if fn else ())
+            rfn = getattr(self._runner, '_retrace_filename', None)
+            if rfn:
+                self.scan_done_retrace.emit(rfn)
         except Exception:
             self.error_msg.emit(traceback.format_exc())
 

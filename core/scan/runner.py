@@ -403,7 +403,145 @@ class ScanRunner:
                 lg(f"── RTV40 sync: base={rtv40_base_ns:.3f} ns  "
                    f"ref={rtv40_ref_s * 1e9:.3f} ns ──")
 
+        pt_retrace = cbs.get('point_retrace', lambda *a: None)
+        self._retrace_filename = None   # set below if interleaved mode runs
+
         try:
+          if cfg.get("_interleaved_2d") and hdf_scan == "SPATIAL_XY":
+            # ── Interleaved 2D: per-row (or per-column) trace + retrace ─────
+            interleave_axis = cfg.get("_interleave_axis", "x")
+            retrace_cfg      = copy.deepcopy(cfg)
+            retrace_cfg["name"] = cfg.get("_retrace_name",
+                                          cfg["name"] + "_retrace")
+            retrace_filename = os.path.join(day_dir, _make_filename(retrace_cfg))
+            hfile2 = self._open_hdf5(retrace_filename, x_plan, y_plan, active,
+                                     x_lbl, x_unit, hdf_scan, retrace_cfg)
+            if hfile2 is None:
+                err2 = getattr(self, '_hdf5_error', 'unknown')
+                st(f"⚠ Could not create retrace file: {err2}")
+                hfile2 = None
+            else:
+                self._retrace_filename = retrace_filename
+
+            count_r   = 0
+            total_all = total * 2   # trace + retrace combined progress
+            move_t    = cfg["move_timeout"]
+            settle    = cfg["settle_time"]
+
+            try:
+              if interleave_axis == "x":
+                # Outer loop = Y (slow axis), inner = X+ (trace) then X- (retrace)
+                retrace_x = x_plan[::-1]
+                for iy, y_pos in enumerate(y_plan):
+                    if self._abort: break
+                    st(f"Moving {cfg['act2_label']} → {y_pos:.4g}")
+                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+
+                    # ── Trace sweep (x+) ─────────────────────────────────────
+                    for ix, x_pos in enumerate(x_plan):
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
+                        for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
+                        self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count += 1
+                        pt(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[trace {count}/{total}]  x={x_read:.4g}{x_unit}")
+
+                    # ── Retrace sweep (x-) ───────────────────────────────────
+                    for j, x_pos in enumerate(retrace_x):
+                        ix = n_x - 1 - j   # spatial index same as trace
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        if hfile2 is not None:
+                            self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count_r += 1
+                        pt_retrace(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[retrace {count_r}/{total}]  x={x_read:.4g}{x_unit}")
+
+                    try: hfile.flush()
+                    except Exception: pass
+                    if hfile2 is not None:
+                        try: hfile2.flush()
+                        except Exception: pass
+
+              else:
+                # interleave_axis == "y"
+                # Outer loop = X (slow axis), inner = Y+ (trace) then Y- (retrace)
+                retrace_y = y_plan[::-1]
+                for ix, x_pos in enumerate(x_plan):
+                    if self._abort: break
+                    x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                    if settle > 0: time.sleep(settle)
+                    st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
+
+                    # ── Trace sweep (y+) ─────────────────────────────────────
+                    for iy, y_pos in enumerate(y_plan):
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
+                        for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
+                        self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count += 1
+                        pt(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[trace {count}/{total}]  y={y_pos:.4g}")
+
+                    # ── Retrace sweep (y-) ───────────────────────────────────
+                    for j, y_pos in enumerate(retrace_y):
+                        iy = n_y - 1 - j   # spatial index same as trace
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        if hfile2 is not None:
+                            self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count_r += 1
+                        pt_retrace(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[retrace {count_r}/{total}]  y={y_pos:.4g}")
+
+                    try: hfile.flush()
+                    except Exception: pass
+                    if hfile2 is not None:
+                        try: hfile2.flush()
+                        except Exception: pass
+
+            finally:
+                if hfile2 is not None:
+                    self._finalize_hdf5(hfile2, count_r, total,
+                                        x_actual, t_actual, data, x_plan, y_plan,
+                                        active, x_lbl, x_unit, hdf_scan, retrace_cfg)
+
+          else:
             for iy, y_pos in enumerate(y_plan):
                 if self._abort: break
                 if hdf_scan == "SPATIAL_XY":
@@ -1015,6 +1153,122 @@ class ScanRunner:
             except Exception as fe:
                 lg(f"⚠ HDF5 close failed: {fe}")
         return result_fn
+
+    # ── Shared trigger → poll → read sequence ────────────────────────────────
+    def _trigger_poll_read(self, devp, dev_sensors, trigger_devs,
+                           int_time, t0, _RUNNING, move_timeout, lg):
+        """Fire async triggers, wait for completion (Phase A + B), read sensors.
+
+        trigger_devs is modified in-place: devices whose trigger command fails
+        are permanently removed so they don't block future points.
+        Returns (vals_dict, t_elapsed_s).
+        """
+        trigger_failed = []
+        if trigger_devs:
+            use_async = True
+            for dev_path, tcmd in trigger_devs.items():
+                try:
+                    devp[dev_path].command_inout_asynch(tcmd)
+                except AttributeError:
+                    use_async = False; break
+                except Exception as e:
+                    lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
+                    trigger_failed.append(dev_path)
+            t_trigger = time.time() - t0
+
+            if not use_async:
+                for dev_path, tcmd in trigger_devs.items():
+                    if dev_path in trigger_failed: continue
+                    try:
+                        devp[dev_path].command_inout(tcmd)
+                    except Exception as e:
+                        lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
+                        trigger_failed.append(dev_path)
+                t_trigger = time.time() - t0
+        else:
+            t_trigger = time.time() - t0
+
+        for dp in trigger_failed:
+            lg(f"  → Removing {dp} from triggered devices")
+            trigger_devs.pop(dp, None)
+
+        if trigger_devs:
+            triggered = set(trigger_devs.keys()) - set(trigger_failed)
+
+            # Phase A — wait for entry into RUNNING
+            not_yet_running = set(triggered)
+            t_start = time.time()
+            while not_yet_running and (time.time() - t_start
+                                       < TRIGGER_START_GUARD_MS / 1000.0):
+                if self._abort: break
+                confirmed = set()
+                for dp in not_yet_running:
+                    try:
+                        if devp[dp].state() in _RUNNING: confirmed.add(dp)
+                    except Exception: confirmed.add(dp)
+                not_yet_running -= confirmed
+                if not_yet_running: time.sleep(0.002)
+
+            # Phase B — wait for exit from RUNNING
+            remaining = set(triggered)
+            t_wait = time.time()
+            _fails = {dp: 0 for dp in remaining}
+            while remaining and (time.time() - t_wait < move_timeout):
+                if self._abort: break
+                done = set()
+                for dp in remaining:
+                    try:
+                        ds = devp[dp].state()
+                        _fails[dp] = 0
+                        if ds not in _RUNNING: done.add(dp)
+                    except Exception as e:
+                        _fails[dp] += 1
+                        if _fails[dp] >= 5:
+                            lg(f"⚠ State poll failed {_fails[dp]}× for {dp}: "
+                               f"{type(e).__name__} — giving up")
+                            done.add(dp)
+                        else:
+                            time.sleep(0.05)
+                remaining -= done
+                if remaining: time.sleep(0.01)
+            if remaining:
+                lg(f"⚠ Timeout waiting for: " + ", ".join(remaining))
+        else:
+            time.sleep(int_time)
+
+        time.sleep(READOUT_GUARD_MS / 1000.0)
+
+        # Batch read per device
+        vals: Dict[str, float] = {}
+        for dev_path, sensors_on_dev in dev_sensors.items():
+            unique_attrs = list(dict.fromkeys(s["attribute"] for s in sensors_on_dev))
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    if len(unique_attrs) == 1:
+                        av  = devp[dev_path].read_attribute(unique_attrs[0])
+                        raw = av.value
+                        attr_to_val = {unique_attrs[0]:
+                            float(raw[0]) if hasattr(raw, "__len__") else float(raw)}
+                    else:
+                        attr_vals = devp[dev_path].read_attributes(unique_attrs)
+                        attr_to_val = {}
+                        for av, attr in zip(attr_vals, unique_attrs):
+                            raw = av.value
+                            attr_to_val[attr] = (
+                                float(raw[0]) if hasattr(raw, "__len__") else float(raw))
+                    for s in sensors_on_dev:
+                        vals[s["label"]] = attr_to_val[s["attribute"]]
+                    break
+                except Exception as e:
+                    if attempt == MAX_RETRIES:
+                        lg(f"⚠ Read {dev_path} {unique_attrs}: {e}")
+                        for s in sensors_on_dev: vals[s["label"]] = np.nan
+                    else:
+                        time.sleep(RETRY_DELAY)
+
+        t_elapsed = t_trigger + int_time / 2.0
+        vals[X_TIME] = t_elapsed
+        return vals, t_elapsed
 
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,
