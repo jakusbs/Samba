@@ -93,9 +93,20 @@ class ScanlistWorker(QThread):
 
     def _run_list(self):
         relay_p = get_proxy(self.setup.get("relay_device", ""))
-        mag_p     = get_proxy(self.setup.get("magnet_device", ""))
-        mag_cur   = self.setup.get("magnet_current_attr", "current_polar")
-        mag_fld   = self.setup.get("magnet_field_attr", "field_polar_corr")
+
+        # Field flip device selection:
+        # - samba_main: magnet_device (Beckhoff), write current (A), read field (T)
+        # - Cryo: magnet_device is empty → fall back to attodry_device,
+        #   write/read MagneticField (T) directly
+        _mag_dev = self.setup.get("magnet_device", "")
+        if _mag_dev:
+            mag_cur = self.setup.get("magnet_current_attr", "current_polar")
+            mag_fld = self.setup.get("magnet_field_attr",   "field_polar_corr")
+        else:
+            _mag_dev = self.setup.get("attodry_device", "")
+            mag_cur  = self.setup.get("attodry_attr_field_set", "MagneticField")
+            mag_fld  = self.setup.get("attodry_attr_field_rb",  "MagneticField")
+        mag_p = get_proxy(_mag_dev)
 
         relay_attr = self.setup.get("relay_attr", "switchvar")
         try:
