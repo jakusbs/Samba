@@ -124,7 +124,41 @@ class ScanlistWorker(QThread):
                         self.log_msg.emit(f"⚠ field flip write: {err}")
                     else:
                         self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {neg_val:.4f} A")
-                    time.sleep(0.1)
+                        # Poll field readback until within tolerance of target
+                        tol     = self.setup.get("field_settle_tol",     0.02)
+                        timeout = self.setup.get("field_settle_timeout", 300.0)
+                        t_flip  = time.time()
+                        last_log = t_flip
+                        # Estimate target field from negated current (0.15 T/A fallback)
+                        target_fld_est = -cur_val * 0.15
+                        v0, _ = safe_read(mag_p, mag_fld)
+                        if v0 is not None:
+                            target_fld_est = -v0
+                        while not self._abort:
+                            elapsed = time.time() - t_flip
+                            if elapsed > timeout:
+                                self.log_msg.emit(
+                                    f"⚠ Field settle timeout after {timeout:.0f} s")
+                                break
+                            fv, ferr = safe_read(mag_p, mag_fld)
+                            if ferr:
+                                time.sleep(0.5); continue
+                            if abs(target_fld_est) > 1e-6:
+                                err_frac = abs(fv - target_fld_est) / abs(target_fld_est)
+                            else:
+                                err_frac = abs(fv - target_fld_est)
+                            if time.time() - last_log >= 10.0:
+                                self.log_msg.emit(
+                                    f"  Waiting for field: {fv:+.4f} T "
+                                    f"(target {target_fld_est:+.4f} T, "
+                                    f"{err_frac*100:.1f}% off, {elapsed:.0f} s)")
+                                last_log = time.time()
+                            if err_frac <= tol:
+                                self.log_msg.emit(
+                                    f"Field settled: {fv:+.4f} T "
+                                    f"({err_frac*100:.2f}% off target, {elapsed:.1f} s)")
+                                break
+                            time.sleep(0.5)
 
             v, _ = safe_read(mag_p, mag_fld)
             field_T = v if v is not None else 0.0
