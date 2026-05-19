@@ -1510,10 +1510,61 @@ class CryoMainWindow(QMainWindow):
         if err:
             QMessageBox.warning(self, "Invalid scan parameters", err); return
 
-        self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
-        self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
+        sl = self.sl_panel.get_settings()
 
-        self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
+        # ── Build per-cycle config list (same direction logic as _start_scan) ──
+        scan_x = cfg.get("scan_x", True)
+        scan_y = cfg.get("scan_y", False)
+        dirs1 = cfg.get("act1_directions",
+                        [[cfg.get("act1_start", 0.0), cfg.get("act1_stop", 0.0)]])
+        dirs2 = cfg.get("act2_directions",
+                        [[cfg.get("act2_start", 0.0), cfg.get("act2_stop", 0.0)]])
+        base_name = cfg["name"]
+
+        if scan_x and scan_y:
+            x_has_retrace = len(dirs1) > 1
+            y_has_retrace = len(dirs2) > 1
+            if x_has_retrace or y_has_retrace:
+                interleave_axis = "x" if x_has_retrace else "y"
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                c["name"]             = f"{base_name}_trace"
+                c["_interleaved_2d"]  = True
+                c["_interleave_axis"] = interleave_axis
+                c["_retrace_name"]    = f"{base_name}_retrace"
+                cfg_list = [c]
+            else:
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                cfg_list = [c]
+        elif scan_x:
+            use_sfx = len(dirs1) > 1
+            cfg_list = []
+            for idx, d1 in enumerate(dirs1):
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = d1
+                if use_sfx:
+                    c["name"] = f"{base_name}_{'trace' if idx == 0 else 'retrace'}"
+                cfg_list.append(c)
+        elif scan_y:
+            use_sfx = len(dirs2) > 1
+            cfg_list = []
+            for idx, d2 in enumerate(dirs2):
+                c = copy.deepcopy(cfg)
+                c["act2_start"], c["act2_stop"] = d2
+                if use_sfx:
+                    c["name"] = f"{base_name}_{'trace' if idx == 0 else 'retrace'}"
+                cfg_list.append(c)
+        else:
+            cfg_list = [copy.deepcopy(cfg)]
+
+        first_cfg = cfg_list[0]
+        self._current_scan_cfg = first_cfg
+        self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
+
+        self._sl_worker = ScanlistWorker(cfg_list, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"])
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)

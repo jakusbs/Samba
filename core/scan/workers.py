@@ -69,10 +69,13 @@ class ScanlistWorker(QThread):
     error_msg     = pyqtSignal(str)
     relay_changed = pyqtSignal(int)   # emitted whenever relay state is written
 
-    def __init__(self, cfg: dict, setup: dict, n_scans: int,
+    def __init__(self, cfg_or_list, setup: dict, n_scans: int,
                  list_name: str, relay_flip: bool, field_flip: bool):
         super().__init__()
-        self.cfg = cfg; self.setup = setup; self.n_scans = n_scans
+        # Accept either a single config dict or a per-cycle list of configs.
+        # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
+        self.cfg_list = cfg_or_list if isinstance(cfg_or_list, list) else [cfg_or_list]
+        self.setup = setup; self.n_scans = n_scans
         self.list_name = list_name
         self.relay_flip = relay_flip; self.field_flip = field_flip
         self._abort = False; self._runner = None
@@ -108,11 +111,12 @@ class ScanlistWorker(QThread):
         txt_path = os.path.join(sl_dir, f"{self.list_name}_{ts}.txt")
 
         results = []
+        scan_idx = 0   # global counter across all cycles × directions
         for i in range(self.n_scans):
             if self._abort: break
             # ── Field flip ────────────────────────────────────────────────────
-            # Skip the flip on scan 0 so the first scan runs at the current
-            # field; flipping starts from scan 1 onward.
+            # Skip the flip on cycle 0; flipping starts from cycle 1 onward.
+            # Flip happens once per cycle, BEFORE trace AND retrace.
             if self.field_flip and i > 0:
                 cur_val, cur_err = safe_read(mag_p, mag_cur)
                 if cur_err:
@@ -129,7 +133,6 @@ class ScanlistWorker(QThread):
                         timeout = self.setup.get("field_settle_timeout", 300.0)
                         t_flip  = time.time()
                         last_log = t_flip
-                        # Estimate target field from negated current (0.15 T/A fallback)
                         target_fld_est = -cur_val * 0.15
                         v0, _ = safe_read(mag_p, mag_fld)
                         if v0 is not None:
@@ -163,34 +166,43 @@ class ScanlistWorker(QThread):
             v, _ = safe_read(mag_p, mag_fld)
             field_T = v if v is not None else 0.0
 
-            self.status_msg.emit(
-                f"Scanlist {i+1}/{self.n_scans}  "
-                f"relay={'1(−1)' if self._relay_state else '0(+1)'}  "
-                f"field={field_T:+.3f} T")
+            # ── Run all directions in this cycle (trace, then retrace if present) ──
+            for sc_template in self.cfg_list:
+                if self._abort: break
 
-            try:
-                relay_p.write_attribute(relay_attr, self._relay_state)
-                self.relay_changed.emit(self._relay_state)
-            except Exception as e:
-                self.log_msg.emit(f"⚠ relay: {e}")
+                name = sc_template.get("name", "")
+                if   name.endswith("_trace"):   dir_lbl = " [trace]"
+                elif name.endswith("_retrace"): dir_lbl = " [retrace]"
+                else:                           dir_lbl = ""
 
-            sc = copy.deepcopy(self.cfg)
+                self.status_msg.emit(
+                    f"Cycle {i+1}/{self.n_scans}{dir_lbl}  "
+                    f"relay={'1(−1)' if self._relay_state else '0(+1)'}  "
+                    f"field={field_T:+.3f} T")
 
-            self._runner = ScanRunner(sc, self.setup)
-            fn = self._runner.run({
-                'point':    self.point_done.emit,
-                'progress': self.progress.emit,
-                'status':   self.status_msg.emit,
-                'log':      self.log_msg.emit,
-            })
+                try:
+                    relay_p.write_attribute(relay_attr, self._relay_state)
+                    self.relay_changed.emit(self._relay_state)
+                except Exception as e:
+                    self.log_msg.emit(f"⚠ relay: {e}")
 
-            relay_sign = +1 if self._relay_state == 0 else -1
-            if fn:
-                results.append((fn, relay_sign, field_T))
-                self.scan_done.emit(i, fn)
+                sc = copy.deepcopy(sc_template)
+                self._runner = ScanRunner(sc, self.setup)
+                fn = self._runner.run({
+                    'point':    self.point_done.emit,
+                    'progress': self.progress.emit,
+                    'status':   self.status_msg.emit,
+                    'log':      self.log_msg.emit,
+                })
+
+                relay_sign = +1 if self._relay_state == 0 else -1
+                if fn:
+                    results.append((fn, relay_sign, field_T))
+                    self.scan_done.emit(scan_idx, fn)
+                scan_idx += 1
+                self.cycle_done.emit(i)   # reset live display between directions
+
             self.list_progress.emit(i + 1, self.n_scans)
-            self.cycle_done.emit(i)
-
             if self.relay_flip: self._relay_state = 1 - self._relay_state
 
         # Auto-demagnetize after scanlist — disabled for superconducting magnets
