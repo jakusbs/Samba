@@ -300,26 +300,71 @@ def read_calibration(folder, filename='calibration.txt'):
         line 4 : theta (1st harmonic phase offset, deg)
 
     Returns ``(sln, R1, R2, theta)`` where ``sln`` is in µrad/mV.
-    If the file doesn't exist, a template is written and ``(1.0, 1.0, 1.0, 0.0)``
-    is returned with a warning.
+    If the file doesn't exist, the user is prompted interactively to enter the
+    values; the file is then written so subsequent runs skip the prompt.
     """
     path = os.path.join(folder, filename)
     if not os.path.exists(path):
-        template = (
+        print(f'\nNo calibration file found at:\n  {path}')
+        print('Please enter the calibration values manually.\n')
+
+        while True:
+            try:
+                raw = input('  6 mV readings at micrometer ticks 0 5 10 15 20 25'
+                            ' (space-separated):\n  > ').strip()
+                calib_mV_input = np.fromstring(raw, dtype=float, sep=' ')
+                if calib_mV_input.size != 6:
+                    print(f'  Expected 6 values, got {calib_mV_input.size}. Try again.')
+                    continue
+                break
+            except ValueError:
+                print('  Could not parse — enter 6 numbers separated by spaces.')
+
+        while True:
+            try:
+                R1_input = float(input('\n  R1 — resistance of the NM/M system (Ω):\n  > '))
+                break
+            except ValueError:
+                print('  Enter a single number.')
+
+        while True:
+            try:
+                R2_input = float(input('\n  R2 — resistance of M only (reference, Ω):\n  > '))
+                break
+            except ValueError:
+                print('  Enter a single number.')
+
+        while True:
+            try:
+                theta_input = float(input('\n  theta — 1st-harmonic phase offset (deg):\n  > '))
+                break
+            except ValueError:
+                print('  Enter a single number.')
+
+        content = (
             '# 6 calibration mV readings at micrometer ticks 0 5 10 15 20 25\n'
-            '0 1 2 3 4 5\n'
-            '# R1 (NM/M)\n1.0\n'
-            '# R2 (M only)\n1.0\n'
-            '# theta (1st-harmonic phase offset, deg)\n0.0\n'
+            + ' '.join(f'{v}' for v in calib_mV_input) + '\n'
+            + '# R1 (NM/M)\n' + repr(R1_input) + '\n'
+            + '# R2 (M only)\n' + repr(R2_input) + '\n'
+            + '# theta (1st-harmonic phase offset, deg)\n' + repr(theta_input) + '\n'
         )
         try:
             with open(path, 'w') as f:
-                f.write(template)
-            warnings.warn(f'read_calibration: template written to {path} — '
-                          f'edit it with real values and re-run.')
+                f.write(content)
+            print(f'\n  Calibration saved to {path}')
         except Exception as e:
-            warnings.warn(f'read_calibration: could not write template: {e}')
-        return 1.0, 1.0, 1.0, 0.0
+            warnings.warn(f'read_calibration: could not write calibration file: {e}')
+
+        slope = _moke_calibrate(_CALIB_X_TICKS[:calib_mV_input.size], calib_mV_input)
+        if slope == 0 or not np.isfinite(slope):
+            warnings.warn('read_calibration: zero/NaN slope from entered values — using sln=1.0')
+            sln = 1.0
+        else:
+            sln = (1.0 / slope) * np.pi / 180.0 * 1e6
+        print(f'    slope      = {slope:.4g} mV/deg  →  sln = {sln:.4g} µrad/mV')
+        print(f'    R1, R2     = {R1_input:.4g}, {R2_input:.4g}')
+        print(f'    theta (1ω) = {theta_input:.4g} deg')
+        return sln, R1_input, R2_input, theta_input
 
     # Strip comment lines, keep first 4 data lines
     rows = []
