@@ -1,10 +1,5 @@
 """
 analyze_samba.py — SOT/MOKE analysis class for SAMBA HDF5 and Salsa NXS data.
-
-Catppuccin Mocha line colors:
-  DL  : #a6e3a1 (green)
-  Oe  : #89b4fa (blue)
-  refl: #f38ba8 (red)
 """
 
 import os
@@ -26,13 +21,21 @@ from samba_io import (
 )
 
 # ---------------------------------------------------------------------------
-# Catppuccin Mocha palette
+# Color palette — matching old analysis style
 # ---------------------------------------------------------------------------
-_C_DL    = '#a6e3a1'   # green
-_C_OE    = '#89b4fa'   # blue
-_C_REFL  = '#f38ba8'   # red
-_C_DL_FIT = '#40b08e'  # darker green for fit line
-_C_OE_FIT = '#4a9fd4'  # darker blue for fit line
+_C_SUM     = '#000000'   # black   — sum  (Oe, field-independent)
+_C_DIFF    = '#2ca02c'   # green   — diff (DL, field-dependent)
+_C_POS     = '#d62728'   # red     — positive-field average
+_C_NEG     = '#1f77b4'   # blue    — negative-field average
+_C_REAL    = '#1f77b4'   # blue    — real / X1
+_C_IMAG    = '#d62728'   # red     — imag / Y1
+_C_REFL    = '#8c564b'   # brown   — reflection overlay on Kerr plots
+_C_DL_FIT  = '#17becf'   # cyan    — DL constant fit line
+_C_OE_FIT  = '#ff7f0e'   # orange  — Oe log fit line
+_C_NOT_USED = '#d62728'  # red     — points excluded from fit
+_C_EDGE_R  = '#1f77b4'   # blue    — reflection curve in edge plot
+_C_EDGE_D  = '#ff7f0e'   # orange  — derivative in edge plot
+_C_EDGE_PT = '#2ca02c'   # green   — edge markers and annotations
 
 
 class SambaSOTAnalysis:
@@ -504,7 +507,81 @@ class SambaSOTAnalysis:
         self.width = float(width)
         print(f"  Edges: {edges[0]:.2f} – {edges[1]:.2f}  "
               f"width = {width:.2f}  center = {self.dev_center:.2f}")
+        self._plot_edges_vis(x_arr, reflec_arr)
         return self
+
+    def _plot_edges_vis(self, x_arr: np.ndarray,
+                        reflec_arr: np.ndarray) -> None:
+        """Plot reflection profile + derivative with annotated edge positions."""
+        if self.edges is None:
+            return
+
+        x = np.asarray(x_arr, dtype=float)
+        r = np.asarray(reflec_arr, dtype=float)
+        order = np.argsort(x)
+        x = x[order]
+        r = r[order]
+
+        dr = np.gradient(r, x)
+
+        x1_edge, x2_edge = self.edges
+        width = self.width
+
+        # reflection values at detected edges (for annotation dots)
+        r_at_edge = interp1d(x, r, bounds_error=False, fill_value='extrapolate')
+        r1 = float(r_at_edge(x1_edge))
+        r2 = float(r_at_edge(x2_edge))
+        mid_x = (x1_edge + x2_edge) / 2.0
+        mid_r = (r1 + r2) / 2.0
+
+        fig, ax1 = plt.subplots(figsize=(10, 6), dpi=150)
+
+        ax1.plot(x, r, 'v-', color=_C_EDGE_R, linewidth=1.2, label='reflection')
+        ax1.set_xlabel(f'x [{self.x_unit}]')
+        ax1.set_ylabel('reflection [a.u.]')
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = ax1.twinx()
+        ax2.plot(x, dr, 'v-', color=_C_EDGE_D, linewidth=1.2,
+                 alpha=0.85, label='1st derivative')
+        ax2.set_ylabel('d(reflection)/dx', color=_C_EDGE_D)
+        ax2.tick_params(axis='y', colors=_C_EDGE_D)
+
+        # Edge markers on the reflection curve
+        ax1.scatter([x1_edge, x2_edge], [r1, r2],
+                    color=_C_EDGE_PT, s=80, zorder=6)
+
+        # Annotation line between edge dots
+        ax1.annotate('', xy=(x2_edge, r2), xytext=(x1_edge, r1),
+                     arrowprops=dict(arrowstyle='-', color=_C_EDGE_PT, lw=1.5))
+
+        # Labels: left edge, right edge, width in middle
+        r_range = np.ptp(r)
+        offset = r_range * 0.04
+        ax1.annotate(f'{x1_edge:.2f}{self.x_unit}',
+                     xy=(x1_edge, r1), xytext=(x1_edge, r1 - offset),
+                     color=_C_EDGE_PT, fontsize=11, fontweight='bold',
+                     ha='center', va='top')
+        ax1.annotate(f'{x2_edge:.2f}{self.x_unit}',
+                     xy=(x2_edge, r2), xytext=(x2_edge, r2 + offset),
+                     color=_C_EDGE_PT, fontsize=11, fontweight='bold',
+                     ha='center', va='bottom')
+        ax1.annotate(f'{width:.2f}{self.x_unit}',
+                     xy=(mid_x, mid_r), color=_C_EDGE_PT,
+                     fontsize=11, fontweight='bold', ha='center', va='bottom')
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2,
+                   loc='lower left', fontsize=9)
+
+        ax1.set_title(self._base_title(), fontsize=9)
+        plt.tight_layout()
+        pdir = self._get_plot_dir()
+        fname = os.path.join(pdir, 'edges.png')
+        plt.savefig(fname, dpi=150)
+        print(f"  Plot saved: {fname}")
+        plt.show()
 
     # ------------------------------------------------------------------
     # Phase rotation and SOT decomposition
@@ -593,7 +670,6 @@ class SambaSOTAnalysis:
     def _plot_evaluate(self, x, theta_pos, theta_neg, theta_DL, theta_Oe,
                        err_DL, err_Oe, reflec, do_plot, ylim, title):
         if do_plot == 'realimag':
-            # 2-panel: left = R+(+B), right = R-(-B)
             fig2, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5), sharey=True, dpi=150)
             x1_pos = self.avg_pos.get(self.x1_ch, np.zeros_like(x))
             y1_pos = self.avg_pos.get(self.y1_ch, np.zeros_like(x))
@@ -605,14 +681,14 @@ class SambaSOTAnalysis:
                 (axL, x, x1_pos, y1_pos, r_pos, r'$R^+$'),
                 (axR, x, x1_neg, y1_neg, r_neg, r'$R^-$'),
             ]:
-                ax_p.plot(xi, x1i * self.calibration, '-.o', color=_C_DL, label='Real (X1)')
-                ax_p.plot(xi, y1i * self.calibration, '-.o', color=_C_OE, label='Imag (Y1)')
-                ax_p.axhline(0, color='grey', linewidth=0.7, linestyle='--')
+                ax_p.plot(xi, x1i * self.calibration, '-o', color=_C_REAL, label='real')
+                ax_p.plot(xi, y1i * self.calibration, '-o', color=_C_IMAG, label='imag')
+                ax_p.axhline(0, color='k', linewidth=1.0)
                 ax_p.set_title(lbl)
                 ax_p.set_xlabel(f'$x$ [{self.x_unit}]')
                 ax_p.grid(True, alpha=0.3)
                 twin = ax_p.twinx()
-                twin.plot(xi, ri, color=_C_REFL, alpha=0.5, linewidth=1.2, label=r'$I_{FL}$')
+                twin.plot(xi, ri, color=_C_REFL, linewidth=1.2, label=r'$I_{FL}$')
                 twin.set_ylabel(r'$R$ [a.u.]', color=_C_REFL)
                 twin.tick_params(axis='y', colors=_C_REFL)
                 twin.legend(fontsize=8, loc=4)
@@ -626,20 +702,20 @@ class SambaSOTAnalysis:
             fig2.savefig(fname, dpi=150)
             print(f"  Plot saved: {fname}")
             plt.show()
-            return  # early return — no ax1 to further modify
+            return
 
         fig, ax1 = plt.subplots(figsize=(9, 5), dpi=150)
 
         if do_plot == 'sumdiff':
             ax1.errorbar(x, theta_DL, yerr=err_DL,
-                         color=_C_DL, fmt='.-', capsize=2, label=r'$\theta_{DL}$')
+                         color=_C_DIFF, fmt='v-', capsize=2, label='diff')
             ax1.errorbar(x, theta_Oe, yerr=err_Oe,
-                         color=_C_OE, fmt='.-', capsize=2, label=r'$\theta_{Oe}$')
+                         color=_C_SUM, fmt='v-', capsize=2, label='sum')
         elif do_plot == 'negpos':
-            ax1.plot(x, theta_pos, '.-', color=_C_DL, label=r'$\theta(+H)$')
-            ax1.plot(x, theta_neg, '.-', color=_C_OE, label=r'$\theta(-H)$')
+            ax1.plot(x, theta_pos, 'v--', color=_C_POS, label='pos')
+            ax1.plot(x, theta_neg, 'v--', color=_C_NEG, label='neg')
 
-        ax1.axhline(0, color='grey', linewidth=0.7, linestyle='--')
+        ax1.axhline(0, color='k', linewidth=1.0)
         ax1.set_xlabel(f'$x$ [{self.x_unit}]')
         ax1.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]')
         ax1.legend(loc='upper left', fontsize=9)
@@ -648,8 +724,7 @@ class SambaSOTAnalysis:
             ax1.set_ylim(ylim)
 
         ax2 = ax1.twinx()
-        ax2.plot(x, reflec, color=_C_REFL, alpha=0.55, linewidth=1.2,
-                 label='Reflection')
+        ax2.plot(x, reflec, color=_C_REFL, linewidth=1.2, label='Reflection')
         ax2.set_ylabel('Reflection [a.u.]', color=_C_REFL)
         ax2.tick_params(axis='y', colors=_C_REFL)
         ax2.legend(loc='upper right', fontsize=9)
@@ -806,64 +881,76 @@ class SambaSOTAnalysis:
 
         # Plot
         self._plot_fit(x_shifted, theta_DL, theta_Oe, err, reflec,
-                       xfit, popt_log, popt_const, use_mask,
-                       conconst, conDL, conDL_err, width, nice_plot)
+                       xfit, popt_log, perr_log, popt_const, perr_const,
+                       use_mask, conconst, conDL, conDL_err, width, nice_plot)
 
         return self
 
     def _plot_fit(self, x_shifted, theta_DL, theta_Oe, err, reflec,
-                  xfit, popt_log, popt_const, use_mask,
-                  conconst, conDL, conDL_err, width, nice_plot):
+                  xfit, popt_log, perr_log, popt_const, perr_const,
+                  use_mask, conconst, conDL, conDL_err, width, nice_plot):
 
         def log_fit(xv, A, A0):
             return A0 + A * np.log((width - xv) / xv)
 
         x_dense = np.linspace(xfit[0], xfit[-1], 300)
 
-        fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+        fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
 
+        # Data — DL (diff) and Oe (sum)
         ax.errorbar(x_shifted, theta_DL, yerr=err,
-                    fmt='.-', color=_C_DL, capsize=2, label=r'$\theta_{DL}$')
+                    fmt='v-', color=_C_NEG, capsize=2, label='DL')
         ax.errorbar(x_shifted, theta_Oe, yerr=err,
-                    fmt='.-', color=_C_OE, capsize=2, label=r'$\theta_{Oe}$')
+                    fmt='v-', color=_C_POS, capsize=2, label='Oe')
 
-        # DL fit line
-        dl_const_arr = np.full_like(xfit, popt_const[0])
-        ax.plot(xfit, dl_const_arr, color=_C_DL_FIT, linewidth=2.5,
-                label=f'DL fit = {popt_const[0]:.4g} µrad')
+        # DL constant fit line
+        A_const    = popt_const[0]
+        A_const_err = perr_const[0]
+        dl_label = f'fit const,  const={A_const:.4g}±{A_const_err:.4g}'
+        ax.plot(xfit, np.full_like(xfit, A_const), color=_C_DL_FIT,
+                linewidth=2.5, label=dl_label)
 
         # Oe log fit line
+        A_oe, A0_oe = popt_log
+        A_oe_err    = perr_log[0]
+        oe_label = (f'fit A0+ A*ln((w-x)/x),'
+                    f'A0={A0_oe:.3g}  A={A_oe:.3g}±{A_oe_err:.3g}')
         try:
-            ax.plot(x_dense, log_fit(x_dense, *popt_log), color=_C_OE_FIT, linewidth=2.5,
-                    label=f'Oe fit A={popt_log[0]:.4g}')
+            ax.plot(x_dense, log_fit(x_dense, *popt_log), color=_C_OE_FIT,
+                    linewidth=2.5, label=oe_label)
         except Exception:
             pass
 
-        # Mark unused points
-        x_unused = x_shifted[~use_mask & (x_shifted > 0) & (x_shifted < width)]
-        if len(x_unused):
-            ax.scatter(x_unused, np.full_like(x_unused, np.max(theta_DL) * 0.85),
-                       marker='x', color='grey', s=30, zorder=5, label='not used')
+        # Points NOT used for fit (inside device window but excluded)
+        not_used_mask = (~use_mask) & (x_shifted > 0) & (x_shifted < width)
+        if np.any(not_used_mask):
+            ax.scatter(x_shifted[not_used_mask], theta_DL[not_used_mask],
+                       color=_C_NOT_USED, s=30, zorder=5, label='Not used for fit')
 
-        label_conv = (f'conconst = {conconst:.4g} µrad/mT\n'
-                      f'$\\theta_{{DL}}$ = ({conDL:.4g} ± {conDL_err:.4g}) mT')
-        ax.plot([], [], ' ', label=label_conv)
+        # Conversion result as legend text entry
+        if not np.isnan(conDL):
+            conv_lbl = (f'The obtained conversion coefficient is {conconst:.4g} '
+                        f'{self.signal_unit}/mT\n'
+                        f'and the corresponding DL-field '
+                        f'({conDL:.4g}±{conDL_err:.4g})mT')
+        else:
+            conv_lbl = f'Conversion constant = {conconst:.4g} {self.signal_unit}/mT'
+        ax.plot([], [], ' ', label=conv_lbl)
 
         ax.axhline(0, color='grey', linewidth=0.7, linestyle='--')
         ax.set_xlabel(f'x [{self.x_unit}]')
         ax.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]')
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.18),
-                  ncol=3, fontsize=8, fancybox=True)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22),
+                  ncol=2, fontsize=8, fancybox=True)
         ax.grid(True, alpha=0.3)
 
         ax2 = ax.twinx()
-        ax2.plot(x_shifted, reflec, color=_C_REFL, alpha=0.5, linewidth=1.2,
-                 label='Reflection')
-        ax2.set_ylabel('Reflection [a.u.]', color=_C_REFL)
+        ax2.plot(x_shifted, reflec, color=_C_REFL, linewidth=1.2)
+        ax2.set_ylabel('R [a.u.]', color=_C_REFL)
         ax2.tick_params(axis='y', colors=_C_REFL)
 
         t = self._base_title()
-        ax.set_title(t, fontsize=8)
+        ax.set_title(t, fontsize=9)
 
         plt.tight_layout()
         pdir = self._get_plot_dir()
@@ -885,12 +972,12 @@ class SambaSOTAnalysis:
         fs = 20
 
         fig, ax = plt.subplots(figsize=(10, 7), dpi=150)
-        ax.errorbar(x_shifted, theta_DL, yerr=err, fmt='.-',
-                    color=_C_DL, capsize=2, label=r'$\theta_{DL}$')
+        ax.errorbar(x_shifted, theta_DL, yerr=err, fmt='v-',
+                    color=_C_NEG, capsize=2, label='DL')
         ax.plot(xfit, np.full_like(xfit, popt_const[0]), color=_C_DL_FIT,
                 linewidth=3, label='fit const.')
-        ax.errorbar(x_shifted, theta_Oe, yerr=err, fmt='.-',
-                    color=_C_OE, capsize=2, label=r'$\theta_{Oe}$')
+        ax.errorbar(x_shifted, theta_Oe, yerr=err, fmt='v-',
+                    color=_C_POS, capsize=2, label='Oe')
         try:
             ax.plot(x_dense, log_fit(x_dense, *popt_log), color=_C_OE_FIT,
                     linewidth=3, label=r'fit $A\ln\frac{w-x}{x}$')
