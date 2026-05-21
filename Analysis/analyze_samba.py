@@ -319,8 +319,20 @@ class SambaSOTAnalysis:
 
         print(f"  Positive-field group: {len(pos_scans)} scans")
         print(f"  Negative-field group: {len(neg_scans)} scans")
+        self.print_channels()
 
         self.get_avg_data()
+        return self
+
+    def print_channels(self) -> 'SambaSOTAnalysis':
+        """Print all data channels found in the first loaded scan."""
+        if not self.scans_all:
+            print("  No scans loaded yet.")
+            return self
+        first = self.scans_all[0]
+        keys = [k for k, v in first.items()
+                if isinstance(v, np.ndarray) and k != 'x']
+        print(f"  Available channels: {keys}")
         return self
 
     def get_avg_data(self) -> 'SambaSOTAnalysis':
