@@ -18,12 +18,12 @@ SCANLIST = os.path.join(NAS_DATA, 'ScanLists_Cryo',
     '20260521_Pt(5)Co(5)-wu89_12.5mA_8725Hz_scan-x_PMOKE_12p50mm_TestSamba_lam2_20260521_002301.txt')
 
 # Folder containing the .h5 files.
-# This test was taken before the new Data_Samba_Cryo structure, so they
-# are in a plain date subfolder.  Switch to the commented line for new data.
 DATA_BASE_DIR = os.path.join(NAS_DATA, 'Data_Samba_Cryo', '20260521')
 
-# ── Run full analysis ─────────────────────────────────────────────────────────
-res = SambaSOTAnalysis.import_analyze(
+# ── Run full analysis — trace and retrace separately ─────────────────────────
+# Trace and retrace are analysed independently because piezo hysteresis shifts
+# the real sample position between the two scan directions.
+res_trace, res_retrace = SambaSOTAnalysis.import_analyze_both(
     scanlist_path  = SCANLIST,
     x1_ch          = 'ZI_x1',     # 1st harmonic X  → Kerr rotation
     y1_ch          = 'ZI_y1',     # 1st harmonic Y  → ellipticity
@@ -32,5 +32,6 @@ res = SambaSOTAnalysis.import_analyze(
     current_mA     = 12.5,
     phase          = 0.0,
     calibration    = 1.0,         # set to µrad/µV once calibrated
+    signal_unit    = 'µV',        # y-axis label unit; change to 'µrad' with calibration
     data_base_dir  = DATA_BASE_DIR,
 )

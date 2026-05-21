@@ -56,6 +56,7 @@ class SambaSOTAnalysis:
         data_base_dir: str = None,
         x_scale: float = 1e-3,
         x_unit: str = 'µm',
+        signal_unit: str = 'µV',
     ):
         """
         Parameters
@@ -65,13 +66,15 @@ class SambaSOTAnalysis:
         reflec_ch    : reflection channel key
         x2_ch, y2_ch : optional 2nd-harmonic channels
         phase        : lock-in phase offset in degrees
-        calibration  : Kerr conversion (signal units → µrad)
+        calibration  : Kerr conversion (signal units → µrad); set signal_unit='µrad' too
         current_mA   : applied current in mA
         resistance_ratio : R_NM/M / R_M for current correction (Ic_eff = Ic * ratio)
         setup        : 'samba' or 'salsa'
-        direction    : 'trace', 'retrace', or None
+        direction    : 'trace', 'retrace', or None (all)
         ignore_lines : 1-based line indices to skip (applied before grouping)
         data_base_dir: alternate base directory for resolving scan paths
+        signal_unit  : unit label for Kerr-signal y-axes (default 'µV'; use 'µrad' when
+                       calibration converts to µrad)
         """
         self.scanlist_path = str(scanlist_path)
         self.x1_ch = x1_ch
@@ -89,6 +92,7 @@ class SambaSOTAnalysis:
         self.data_base_dir = data_base_dir
         self.x_scale = float(x_scale)    # multiply x_ref by this before plotting (nm→µm)
         self.x_unit  = str(x_unit)
+        self.signal_unit = str(signal_unit)
 
         # Outputs populated by load_data / evaluate_data
         self.entries_pos = []
@@ -186,6 +190,53 @@ class SambaSOTAnalysis:
 
         return res
 
+    @classmethod
+    def import_analyze_both(
+        cls,
+        scanlist_path: str,
+        x1_ch: str,
+        y1_ch: str,
+        reflec_ch: str,
+        see_channels: list = None,
+        ignore_lines: list = None,
+        fit_edge_offset: int = 5,
+        **kwargs,
+    ) -> tuple['SambaSOTAnalysis', 'SambaSOTAnalysis']:
+        """Run import_analyze separately for trace and retrace scans.
+
+        The scanlist is expected to contain both _trace and _retrace files
+        (as produced by the Cryo piezo scanner).  Trace and retrace are
+        analysed independently because piezo hysteresis shifts the real
+        sample position between the two directions.
+
+        Returns (res_trace, res_retrace).
+        """
+        print("=" * 60)
+        print("TRACE")
+        print("=" * 60)
+        res_trace = cls.import_analyze(
+            scanlist_path, x1_ch, y1_ch, reflec_ch,
+            see_channels=see_channels,
+            ignore_lines=ignore_lines,
+            fit_edge_offset=fit_edge_offset,
+            direction='trace',
+            **kwargs,
+        )
+
+        print("=" * 60)
+        print("RETRACE")
+        print("=" * 60)
+        res_retrace = cls.import_analyze(
+            scanlist_path, x1_ch, y1_ch, reflec_ch,
+            see_channels=see_channels,
+            ignore_lines=ignore_lines,
+            fit_edge_offset=fit_edge_offset,
+            direction='retrace',
+            **kwargs,
+        )
+
+        return res_trace, res_retrace
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -194,9 +245,14 @@ class SambaSOTAnalysis:
         if self._plot_dir is None:
             ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             base = os.path.dirname(os.path.abspath(self.scanlist_path))
-            self._plot_dir = os.path.join(base, ts)
+            suffix = f'_{self.direction}' if self.direction else ''
+            self._plot_dir = os.path.join(base, ts + suffix)
             os.makedirs(self._plot_dir, exist_ok=True)
         return self._plot_dir
+
+    def _base_title(self) -> str:
+        name = os.path.splitext(os.path.basename(self.scanlist_path))[0]
+        return f'{name}  [{self.direction}]' if self.direction else name
 
     def _load_samba_entry(self, entry: dict) -> dict | None:
         """Load one SAMBA entry; return scan dict or None on failure."""
@@ -374,7 +430,7 @@ class SambaSOTAnalysis:
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12),
                                        gridspec_kw={'height_ratios': [1, 3]})
-        fig.suptitle(f"{os.path.basename(self.scanlist_path)}\n{ch}", fontsize=10)
+        fig.suptitle(f"{self._base_title()}\n{ch}", fontsize=10)
 
         ax1.plot(means, '.-')
         ax1.set_xticks(range(len(means)))
@@ -387,7 +443,8 @@ class SambaSOTAnalysis:
             ax2.plot(xi, yi, 'x-', color=colors[i], label=str(i))
         ax2.axhline(0, color='r', linestyle='-')
         ax2.set_xlabel(f'x [{self.x_unit}]')
-        ax2.set_ylabel(f'{ch} [µV]')
+        ch_unit = self.scans_all[0]['units'].get(ch, '') if self.scans_all else ''
+        ax2.set_ylabel(f'{ch} [{ch_unit}]' if ch_unit else ch)
         ax2.grid(True)
         if len(profiles) <= 12:
             ax2.legend(fontsize=8)
@@ -548,8 +605,8 @@ class SambaSOTAnalysis:
                 (axL, x, x1_pos, y1_pos, r_pos, r'$R^+$'),
                 (axR, x, x1_neg, y1_neg, r_neg, r'$R^-$'),
             ]:
-                ax_p.plot(xi, x1i * self.calibration, '-.o', color='b', label='Real (X1)')
-                ax_p.plot(xi, y1i * self.calibration, '-.o', color='r', label='Imag (Y1)')
+                ax_p.plot(xi, x1i * self.calibration, '-.o', color=_C_DL, label='Real (X1)')
+                ax_p.plot(xi, y1i * self.calibration, '-.o', color=_C_OE, label='Imag (Y1)')
                 ax_p.axhline(0, color='grey', linewidth=0.7, linestyle='--')
                 ax_p.set_title(lbl)
                 ax_p.set_xlabel(f'$x$ [{self.x_unit}]')
@@ -559,9 +616,9 @@ class SambaSOTAnalysis:
                 twin.set_ylabel(r'$R$ [a.u.]', color=_C_REFL)
                 twin.tick_params(axis='y', colors=_C_REFL)
                 twin.legend(fontsize=8, loc=4)
-            axL.set_ylabel(r'$\theta_K$ [µrad]')
+            axL.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]')
             axL.legend(fontsize=9)
-            t2 = title or os.path.splitext(os.path.basename(self.scanlist_path))[0]
+            t2 = title or self._base_title()
             fig2.suptitle(t2, fontsize=9)
             plt.tight_layout()
             pdir = self._get_plot_dir()
@@ -584,7 +641,7 @@ class SambaSOTAnalysis:
 
         ax1.axhline(0, color='grey', linewidth=0.7, linestyle='--')
         ax1.set_xlabel(f'$x$ [{self.x_unit}]')
-        ax1.set_ylabel(r'$\theta_K$ [µrad]')
+        ax1.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]')
         ax1.legend(loc='upper left', fontsize=9)
         ax1.grid(True, alpha=0.3)
         if ylim:
@@ -597,7 +654,7 @@ class SambaSOTAnalysis:
         ax2.tick_params(axis='y', colors=_C_REFL)
         ax2.legend(loc='upper right', fontsize=9)
 
-        t = title or os.path.splitext(os.path.basename(self.scanlist_path))[0]
+        t = title or self._base_title()
         ax1.set_title(t, fontsize=9)
 
         plt.tight_layout()
@@ -794,7 +851,7 @@ class SambaSOTAnalysis:
 
         ax.axhline(0, color='grey', linewidth=0.7, linestyle='--')
         ax.set_xlabel(f'x [{self.x_unit}]')
-        ax.set_ylabel(r'$\theta_K$ [µrad]')
+        ax.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]')
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.18),
                   ncol=3, fontsize=8, fancybox=True)
         ax.grid(True, alpha=0.3)
@@ -805,7 +862,7 @@ class SambaSOTAnalysis:
         ax2.set_ylabel('Reflection [a.u.]', color=_C_REFL)
         ax2.tick_params(axis='y', colors=_C_REFL)
 
-        t = os.path.splitext(os.path.basename(self.scanlist_path))[0]
+        t = self._base_title()
         ax.set_title(t, fontsize=8)
 
         plt.tight_layout()
@@ -842,7 +899,7 @@ class SambaSOTAnalysis:
 
         ax.axhline(0, color='grey', linewidth=0.7, linestyle='--')
         ax.set_xlabel(f'x [{self.x_unit}]', fontsize=fs)
-        ax.set_ylabel(r'$\theta_K$ [µrad]', fontsize=fs)
+        ax.set_ylabel(rf'$\theta_K$ [{self.signal_unit}]', fontsize=fs)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22),
                   ncol=2, fontsize=fs - 4, fancybox=True)
         ax.tick_params(axis='both', labelsize=fs - 2)
