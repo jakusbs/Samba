@@ -11,7 +11,7 @@ from analyze_samba import SambaSOTAnalysis
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Root of the Scanning/Data folder on the NAS (adjust if your mount differs).
-NAS_DATA = r'\\d.ethz.ch\groups\matl\intermag\projects\MOKE_lab\Scanning\Data'
+NAS_DATA = r'Z:\projects\MOKE_lab\Scanning\Data'
 
 # Scanlist lives in ScanLists_Cryo on the NAS.
 SCANLIST = os.path.join(NAS_DATA, 'ScanLists_Cryo',
