@@ -68,6 +68,147 @@ def detect_directions(scanlist_path, data_base_dir=None):
     return found
 
 
+def first_h5_in_scanlist(scanlist_path, data_base_dir=None):
+    """Return the first resolvable HDF5 file referenced by a scanlist, or None."""
+    try:
+        with open(scanlist_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                localfile = line.split('\t')[0].strip()
+                if os.path.exists(localfile):
+                    return localfile
+                if data_base_dir:
+                    alt = os.path.join(data_base_dir, os.path.basename(localfile))
+                    if os.path.exists(alt):
+                        return alt
+    except Exception as e:
+        warnings.warn(f'first_h5_in_scanlist: {e}')
+    return None
+
+
+def read_h5_meta(h5_path):
+    """Return ``/metadata`` attrs as a plain dict, decoding bytes to str."""
+    out = {}
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'metadata' in f:
+                for k, v in f['metadata'].attrs.items():
+                    if isinstance(v, bytes):
+                        v = v.decode('utf-8', errors='replace')
+                    elif hasattr(v, 'item'):
+                        try: v = v.item()
+                        except Exception: pass
+                    out[k] = v
+    except Exception as e:
+        warnings.warn(f'read_h5_meta: {e}')
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Sample-folder + calibration file (compatible with the old Jakub_methods
+# convention: 4-line text file — 6 calibration sweep values, R1, R2, theta)
+# ---------------------------------------------------------------------------
+
+DEFAULT_ANALYSIS_BASE = r'Z:\projects\MOKE_lab\Scanning\Analysis_Scripts'
+
+_CALIB_X_TICKS = np.linspace(0, 25, 6)   # micrometer-screw ticks for sweep
+
+# Characters that aren't safe in folder names on Windows/NAS shares
+_BAD_DIRNAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_dirname(name):
+    """Sanitize a string for use as a folder name (keeps parentheses)."""
+    return _BAD_DIRNAME_CHARS.sub('_', str(name)).strip().rstrip('. ')
+
+
+def _moke_calibrate(um_ticks, m_volts):
+    """Fit MOKE-calibration sweep → slope (mV/deg). HWP doubles the angle."""
+    x = np.array(um_ticks, dtype=float) / (100.0 / 4.0) * 2.0   # ticks → deg
+    y = np.array(m_volts,  dtype=float)
+    slope, _ = np.polyfit(x, y, 1)
+    return slope
+
+
+def get_sample_folder(sample_name, base=DEFAULT_ANALYSIS_BASE):
+    """Return ``<base>/<sample_name>/``, creating it on demand."""
+    folder = os.path.join(base, str(sample_name))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def read_calibration(folder, filename='calibration.txt'):
+    """Read ``calibration.txt`` from ``folder``.
+
+    File format (one value/line, all required):
+        line 1 : 6 space-separated mV readings at ticks 0,5,10,15,20,25
+        line 2 : R1   (resistance NM/M)
+        line 3 : R2   (resistance reference M without NM)
+        line 4 : theta (1st harmonic phase offset, deg)
+
+    Returns ``(sln, R1, R2, theta)`` where ``sln`` is in µrad/mV.
+    If the file doesn't exist, a template is written and ``(1.0, 1.0, 1.0, 0.0)``
+    is returned with a warning.
+    """
+    path = os.path.join(folder, filename)
+    if not os.path.exists(path):
+        template = (
+            '# 6 calibration mV readings at micrometer ticks 0 5 10 15 20 25\n'
+            '0 1 2 3 4 5\n'
+            '# R1 (NM/M)\n1.0\n'
+            '# R2 (M only)\n1.0\n'
+            '# theta (1st-harmonic phase offset, deg)\n0.0\n'
+        )
+        try:
+            with open(path, 'w') as f:
+                f.write(template)
+            warnings.warn(f'read_calibration: template written to {path} — '
+                          f'edit it with real values and re-run.')
+        except Exception as e:
+            warnings.warn(f'read_calibration: could not write template: {e}')
+        return 1.0, 1.0, 1.0, 0.0
+
+    # Strip comment lines, keep first 4 data lines
+    rows = []
+    with open(path, 'r') as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith('#'):
+                continue
+            rows.append(s)
+    if len(rows) < 4:
+        warnings.warn(f'read_calibration: {path} has {len(rows)} data lines '
+                      f'(need 4) — using defaults.')
+        return 1.0, 1.0, 1.0, 0.0
+
+    try:
+        calib_mV = np.fromstring(rows[0], dtype=float, sep=' ')
+        R1       = float(rows[1])
+        R2       = float(rows[2])
+        theta    = float(rows[3])
+    except Exception as e:
+        warnings.warn(f'read_calibration: parse error in {path}: {e}')
+        return 1.0, 1.0, 1.0, 0.0
+
+    if calib_mV.size != 6:
+        warnings.warn(f'read_calibration: line 1 of {path} has '
+                      f'{calib_mV.size} values (expected 6).')
+
+    slope = _moke_calibrate(_CALIB_X_TICKS[:calib_mV.size], calib_mV)  # mV/deg
+    if slope == 0 or not np.isfinite(slope):
+        warnings.warn(f'read_calibration: zero/NaN slope — using sln=1.0')
+        sln = 1.0
+    else:
+        sln = (1.0 / slope) * np.pi / 180.0 * 1e6                       # µrad/mV
+    print(f'  Calibration  : {path}')
+    print(f'    slope      = {slope:.4g} mV/deg  →  sln = {sln:.4g} µrad/mV')
+    print(f'    R1, R2     = {R1:.4g}, {R2:.4g}')
+    print(f'    theta (1ω) = {theta:.4g} deg')
+    return sln, R1, R2, theta
+
+
 # ---------------------------------------------------------------------------
 # HDF5 I/O
 # ---------------------------------------------------------------------------
@@ -522,12 +663,15 @@ class analyze_cryo:
         )
     """
 
-    def __init__(self, scanlist_path, current_mA=None, calibration=1.0,
-                 sln=None, theta=0.0, theta2=0.0, R=(1.0, 1.0),
+    def __init__(self, scanlist_path, current_mA=None, calibration=None,
+                 sln=None, theta=None, theta2=0.0, R=None,
                  direction=None, data_base_dir=None,
                  x_ch='actuator_x', li_type='zi',
                  reflec_key='FL', x_unit='µm', signal_unit='V',
-                 save_dir=None, save_subdir=True):
+                 sample_name=None,
+                 analysis_base_dir=DEFAULT_ANALYSIS_BASE,
+                 save_dir=None, save_subdir=True,
+                 use_calibration_file=True):
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
         self.data_base_dir = data_base_dir
@@ -536,42 +680,100 @@ class analyze_cryo:
         self.signal_unit   = signal_unit
         self._reflec_key   = reflec_key
 
-        # ── current: explicit > scanlist filename > default 10 mA ─────────
+        name  = os.path.splitext(os.path.basename(scanlist_path))[0]
+        parts = name.split('_')
+
+        # ── sample-id : metadata > explicit > filename token ──────────────
+        first_h5 = first_h5_in_scanlist(scanlist_path, data_base_dir)
+        h5_meta  = read_h5_meta(first_h5) if first_h5 else {}
+        if sample_name is None:
+            sample_name = (h5_meta.get('sample_id', '').strip()
+                           or (parts[1] if len(parts) > 1 else name))
+        sample_name = _safe_dirname(sample_name)
+
+        # ── current : explicit > HDF5 metadata > filename > default ───────
+        if current_mA is None:
+            v = h5_meta.get('hw_keithley_amplitude_mA')
+            if v not in (None, '', 0):
+                try:
+                    current_mA = float(v)
+                    print(f'  Current from HDF5 metadata: {current_mA} mA')
+                except Exception:
+                    current_mA = None
         if current_mA is None:
             current_mA = parse_current_from_name(scanlist_path)
             if current_mA is not None:
                 print(f'  Current auto-detected from filename: {current_mA} mA')
-            else:
-                warnings.warn('current_mA not given and could not be parsed '
-                              'from filename — defaulting to 10.0 mA')
-                current_mA = 10.0
+        if current_mA is None:
+            warnings.warn('current_mA not given and not found in metadata or '
+                          'filename — defaulting to 10.0 mA')
+            current_mA = 10.0
 
-        # ── calibration: ``calibration`` is canonical; ``sln`` kept as alias
-        cal = float(sln if sln is not None else calibration)
+        # ── sample folder + calibration.txt ───────────────────────────────
+        sample_folder = get_sample_folder(sample_name, base=analysis_base_dir)
+        self.sample_name   = sample_name
+        self.sample_folder = sample_folder
+        print(f'  Sample folder: {sample_folder}')
+
+        cal_sln = None
+        cal_R   = None
+        cal_th  = None
+        if use_calibration_file:
+            try:
+                cal_sln, cal_R1, cal_R2, cal_th = read_calibration(sample_folder)
+                cal_R = (cal_R1, cal_R2)
+            except Exception as e:
+                warnings.warn(f'read_calibration: {e}')
+
+        # Resolve sln / R / theta : explicit args > calibration.txt > defaults
+        if sln is not None:
+            sln_val = float(sln)
+        elif calibration is not None:
+            sln_val = float(calibration)
+        elif cal_sln is not None:
+            sln_val = float(cal_sln)
+        else:
+            sln_val = 1.0
+
+        if R is not None:
+            R_val = list(R)
+        elif cal_R is not None:
+            R_val = list(cal_R)
+        else:
+            R_val = [1.0, 1.0]
+
+        if theta is not None:
+            theta_val = float(theta)
+        elif cal_th is not None:
+            theta_val = float(cal_th)
+        else:
+            theta_val = 0.0
 
         # ── calc_info ─────────────────────────────────────────────────────
         class CalcInfo:
             pass
         ci          = CalcInfo()
         ci.current  = float(current_mA)
-        ci.sln      = cal              # multiplies raw signal → Kerr angle
-        ci.calibration = cal
-        ci.theta    = float(theta)
+        ci.sln      = sln_val
+        ci.calibration = sln_val
+        ci.theta    = theta_val
         ci.theta2   = float(theta2)
-        ci.R        = list(R)
+        ci.R        = R_val
         ci.LI_type  = li_type
-
-        name   = os.path.splitext(os.path.basename(scanlist_path))[0]
-        parts  = name.split('_')
-        ci.system   = parts[1] if len(parts) > 1 else name
+        ci.system   = sample_name
+        ci.sample_id = sample_name
         ci.LightPol = 'PMOKE'
         for p in parts:
             if any(x in p.lower() for x in ('moke', 'pol')):
                 ci.LightPol = p
+        # Prefer the HDF5 metadata incidence when present
+        if h5_meta.get('incidence'):
+            ci.LightPol = str(h5_meta['incidence'])
         ci.logfilenameShort = os.path.basename(scanlist_path)
         ci.specific         = name[-20:] if len(name) > 20 else name
         self.calc_name  = [ci.logfilenameShort]
         self.calc_info  = ci
+        self.h5_meta    = h5_meta
 
         # ── state ─────────────────────────────────────────────────────────
         self.data          = None
@@ -583,19 +785,19 @@ class analyze_cryo:
         self.fit_DL_error_mT   = None
 
         # ── output directory ──────────────────────────────────────────────
-        # Resolution order:
-        #   save_dir + save_subdir=True  → save_dir/<ts>_<direction>/   (default)
-        #   save_dir + save_subdir=False → save_dir/                     (write directly)
-        #   no save_dir                   → <scanlist_dir>/<ts>_<direction>/
+        # Default: <analysis_base_dir>/<sample>/<ts>_<scanlist-stem>[_<direction>]/
+        # save_dir overrides the parent; save_subdir=False writes directly to it.
         ts     = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         suffix = f'_{direction}' if direction else ''
+        subdir = f'{ts}_{name}{suffix}'
         if save_dir is None:
-            base = os.path.dirname(os.path.abspath(scanlist_path))
-            self.path3 = os.path.join(base, ts + suffix)
-        elif save_subdir:
-            self.path3 = os.path.join(os.path.abspath(save_dir), ts + suffix)
+            parent = sample_folder
         else:
-            self.path3 = os.path.abspath(save_dir)
+            parent = os.path.abspath(save_dir)
+        if save_subdir:
+            self.path3 = os.path.join(parent, subdir)
+        else:
+            self.path3 = parent
         os.makedirs(self.path3, exist_ok=True)
         print(f'  Saving plots to: {self.path3}')
 
