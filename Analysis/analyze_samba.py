@@ -13,13 +13,15 @@ Channel mapping (auto):
 
 import os
 import re
+import csv
+import json
 import datetime
 import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from scipy.optimize import curve_fit, minimize
+from scipy.optimize import curve_fit, minimize_scalar
 from scipy import interpolate, signal
 import h5py
 
@@ -66,6 +68,133 @@ def detect_directions(scanlist_path, data_base_dir=None):
     except Exception as e:
         warnings.warn(f'detect_directions: {e}')
     return found
+
+
+def search_print_measurements(search_string, file_path, do_print=True):
+    """List files in *file_path* whose name contains *search_string*.
+
+    Returns the list of matching basenames (sorted by mtime, newest last).
+    If *do_print* is True, prints them numbered so the user can pick.
+    """
+    try:
+        entries = [n for n in os.listdir(file_path) if search_string in n]
+    except OSError as e:
+        warnings.warn(f'search_print_measurements: cannot list {file_path}: {e}')
+        return []
+
+    try:
+        entries.sort(key=lambda n: os.path.getmtime(os.path.join(file_path, n)))
+    except OSError:
+        entries.sort()
+
+    if do_print:
+        for i, n in enumerate(entries):
+            print(f'  [{i:3d}] {n}')
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Impurity detection (ported from analysis_field.find_impurities_peaks /
+# Jakub_methods.iterate_find_impurity).  Used to flag points inside the
+# device that look like reflection artefacts so they can be excluded from
+# the SOT fit.
+# ---------------------------------------------------------------------------
+
+def find_impurities_peaks(theta_DL, peakheight=1.0, do_plot=False, ax=None):
+    """Mask points that look like impurity spikes in the DL signal.
+
+    Smoothing-spline + peak detection on the derivative locates pairs of
+    consecutive min/max derivatives — these bracket a localised feature
+    (impurity).  Returns a boolean mask of indices inside any such bracket.
+    """
+    try:
+        from scipy.interpolate import make_smoothing_spline
+    except ImportError:
+        warnings.warn('find_impurities_peaks: scipy>=1.10 needed; returning '
+                      'empty mask.')
+        return np.zeros(len(theta_DL), dtype=bool)
+
+    y    = np.asarray(theta_DL, dtype=float)
+    x    = np.arange(len(y))
+    mask = np.zeros(len(y), dtype=bool)
+    if len(y) < 6:
+        return mask
+
+    try:
+        spl = make_smoothing_spline(x, y, lam=1.0)
+    except Exception as e:
+        warnings.warn(f'find_impurities_peaks: spline failed: {e}')
+        return mask
+
+    dspl   = np.gradient(spl(x))
+    height = peakheight * 0.02 * 5 * float(np.max(np.abs(dspl)) or 1.0)
+    peaks, _ = signal.find_peaks(np.abs(dspl), height=height)
+    if len(peaks) < 2:
+        return mask
+
+    # Pair each minimum with each maximum derivative; smallest separation wins
+    mins = peaks[dspl[peaks] < 0]
+    maxs = peaks[dspl[peaks] >= 0]
+    if len(mins) == 0 or len(maxs) == 0:
+        return mask
+    if len(mins) == 1 and len(maxs) == 1:
+        # Single min/max → these are the device edges, not impurities.
+        return mask
+
+    combos = [(mn, mx, abs(mx - mn)) for mn in mins for mx in maxs]
+    combos.sort(key=lambda c: c[2])
+    for mn, mx, _d in combos[:min(len(mins), len(maxs))]:
+        lo, hi = sorted((int(mn), int(mx)))
+        mask[max(0, lo - 2):min(len(y), hi + 3)] = True
+
+    if do_plot:
+        a = ax if ax is not None else plt.gca()
+        keep = ~mask
+        a.plot(x, y, color='lightgray', label='DL (raw)')
+        a.scatter(x[keep], y[keep], color='C2', s=14, label='used for fit')
+        a.scatter(x[mask], y[mask], color='C3', s=14, label='flagged impurity')
+        a.plot(x, dspl, color='C1', alpha=0.5, label='spline d/dx')
+        a.legend(fontsize=9)
+    return mask
+
+
+def iterate_find_impurity(theta_DL, calc_info=None, do_plot=False, ax=None):
+    """Return a boolean *use_mask* of points to keep for the DL fit.
+
+    Wraps :func:`find_impurities_peaks` and combines it with the device-edge
+    mask derived from the DL gradient (the two strongest derivatives are
+    assumed to mark the left/right device edges).
+    """
+    y    = np.abs(np.asarray(theta_DL, dtype=float))
+    idx  = np.arange(len(y))
+    dy   = np.gradient(y)
+    if len(dy) < 4:
+        return np.ones(len(y), dtype=bool)
+
+    Redge = int(np.argmin(dy[1:-2]) + 1)
+    Ledge = int(np.argmax(dy[1:-2]) + 1)
+    if Redge < Ledge:
+        Ledge, Redge = Redge, Ledge
+
+    mask     = find_impurities_peaks(y, peakheight=1.0, do_plot=False)
+    device   = (idx > Ledge) & (idx < Redge)
+    use_mask = device & ~mask
+    print(f'  iterate_find_impurity: edges=[{Ledge},{Redge}], '
+          f'{int(mask.sum())} impurity pt(s), {int(use_mask.sum())} kept')
+
+    if do_plot:
+        a = ax if ax is not None else plt.gca()
+        title = ''
+        if calc_info is not None:
+            title = f'{getattr(calc_info, "system", "")} ' \
+                    f'{getattr(calc_info, "current", "")}mA ' \
+                    f'{getattr(calc_info, "LightPol", "")}'
+        a.set_title(title)
+        a.plot(y, color='gray', label='|DL|')
+        a.scatter(idx[mask], y[mask], color='C3', label='flagged')
+        a.scatter(idx[use_mask], y[use_mask], color='C2', label='used')
+        a.legend()
+    return use_mask
 
 
 def first_h5_in_scanlist(scanlist_path, data_base_dir=None):
@@ -122,6 +251,28 @@ _BAD_DIRNAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 def _safe_dirname(name):
     """Sanitize a string for use as a folder name (keeps parentheses)."""
     return _BAD_DIRNAME_CHARS.sub('_', str(name)).strip().rstrip('. ')
+
+
+def _json_safe(v):
+    """Convert numpy / bytes / non-finite scalars to JSON-serialisable forms."""
+    if isinstance(v, bytes):
+        return v.decode('utf-8', errors='replace')
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        f = float(v)
+        return f if np.isfinite(f) else None
+    if isinstance(v, (np.bool_,)):
+        return bool(v)
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _json_safe(x) for k, x in v.items()}
+    return v
 
 
 def _moke_calibrate(um_ticks, m_volts):
@@ -213,39 +364,56 @@ def read_calibration(folder, filename='calibration.txt'):
 # HDF5 I/O
 # ---------------------------------------------------------------------------
 
-def data_load(filename, data_channel):
+def data_load(filename, data_channel, despike=False, return_unit=False):
     """Load one channel from a SAMBA HDF5 file.
 
     Supports three formats:
     - Cryo / new SAMBA : /data/<channel>
     - Green/IR SAMBA   : /measurement/<channel>  (no scan_X groups)
     - Old scan-server  : /scan_X/measurement/<channel>
+
+    Parameters
+    ----------
+    despike : bool
+        If True, NaN-replace single-point spikes (|grad| >10x mean, opposite
+        signs on either side).  Default False — only warns when spikes look
+        present, leaving the raw data untouched so downstream interpolation
+        doesn't bridge over them.
+    return_unit : bool
+        If True, return ``(data, unit_str)`` instead of just data.
     """
+    unit = ''
     with h5py.File(filename, 'r') as f:
 
         # ── Cryo format ─────────────────────────────────────────────────
         if 'data' in f and isinstance(f['data'], h5py.Group):
-            if data_channel in f['data']:
-                data = np.array(f['data'][data_channel], dtype=float)
+            grp = f['data']
+            if data_channel in grp:
+                ds   = grp[data_channel]
+                data = np.array(ds, dtype=float)
+                unit = str(ds.attrs.get('unit', '')) if hasattr(ds, 'attrs') else ''
             else:
                 warnings.warn(f'data_load: "{data_channel}" not found in {filename}')
-                return np.zeros(1)
+                return (np.zeros(1), '') if return_unit else np.zeros(1)
 
         # ── Green/IR new SAMBA format ────────────────────────────────────
         elif ('measurement' in f
               and isinstance(f['measurement'], h5py.Group)
               and not any(k.startswith('scan_') for k in f.keys())):
-            if data_channel in f['measurement']:
-                data = np.array(f['measurement'][data_channel], dtype=float)
+            grp = f['measurement']
+            if data_channel in grp:
+                ds   = grp[data_channel]
+                data = np.array(ds, dtype=float)
+                unit = str(ds.attrs.get('unit', '')) if hasattr(ds, 'attrs') else ''
             else:
                 warnings.warn(f'data_load: "{data_channel}" not found in {filename}')
-                return np.zeros(1)
+                return (np.zeros(1), '') if return_unit else np.zeros(1)
 
         # ── Old scan_X format ────────────────────────────────────────────
         else:
             scans = list(f.keys())
             if not scans:
-                return np.zeros(1)
+                return (np.zeros(1), '') if return_unit else np.zeros(1)
             first = True
             for s in scans:
                 key = s + '/measurement/' + data_channel
@@ -257,22 +425,31 @@ def data_load(filename, data_channel):
                     data += arr
             if first:
                 warnings.warn(f'data_load: "{data_channel}" not found in {filename}')
-                return np.zeros(1)
+                return (np.zeros(1), '') if return_unit else np.zeros(1)
             data /= len(scans)
 
     if data.ndim == 2 and data.shape[0] == 1:
         data = data.reshape(-1)
 
-    # Spike removal (1-D only)
+    # Spike detection — count first
     if data.ndim == 1 and len(data) > 3:
         g = np.gradient(data)
         lim = np.mean(np.abs(g))
-        for i in range(1, len(data) - 1):
-            if (np.abs(g[i - 1]) >= 10 * lim
-                    and np.abs(g[i + 1]) >= 10 * lim
-                    and np.sign(g[i - 1]) == -np.sign(g[i + 1])):
-                data[i] = np.nan
-    return data
+        if lim > 0:
+            mid = np.arange(1, len(data) - 1)
+            spikes = ((np.abs(g[mid - 1]) >= 10 * lim) &
+                      (np.abs(g[mid + 1]) >= 10 * lim) &
+                      (np.sign(g[mid - 1]) == -np.sign(g[mid + 1])))
+            n_spikes = int(spikes.sum())
+            if n_spikes:
+                warnings.warn(f'data_load: {n_spikes} likely spike(s) in '
+                              f'"{data_channel}" of {os.path.basename(filename)}'
+                              + (' — NaN-replaced (despike=True)' if despike
+                                 else ' — kept as-is (despike=False)'))
+                if despike:
+                    data[mid[spikes]] = np.nan
+
+    return (data, unit) if return_unit else data
 
 
 def get_channels(scanlist_or_h5, logfilepath='', data_base_dir=''):
@@ -385,21 +562,36 @@ def find_edges_width(position, reflex):
     return [x1, x2], round(x2 - x1, 2)
 
 
-def find_phase(x, x1_data, y1_data, edges, ch, do_plot=False):
-    """Find lock-in phase offset that minimises imaginary component inside device."""
+def find_phase(x, x1_data, y1_data, edges, ch, do_plot=False, ax=None):
+    """Find lock-in phase offset that minimises the imaginary component.
+
+    Uses bounded scalar minimisation on ``theta ∈ [-90°, 90°]`` so the
+    optimiser can't wander into an equivalent 180°-flipped solution.
+    Phases beyond that range only flip the sign of the real component,
+    which we don't care about here.
+
+    If ``do_plot`` is True, plots the residual imaginary component on
+    ``ax`` (or the current axes) so the user can verify it sits near zero.
+    """
     mask = (x >= edges[0]) & (x <= edges[1])
+    if mask.sum() < 2:
+        warnings.warn(f'find_phase({ch}): too few points in edge window')
+        return 0.0
 
-    def min_imag(theta, x, x1, y1, mask):
-        theta_rad = theta * np.pi / 180.0
-        return np.std((-x1 * np.sin(theta_rad) + y1 * np.cos(theta_rad))[mask])
+    def min_imag(theta_deg):
+        t = theta_deg * np.pi / 180.0
+        return np.std((-x1_data * np.sin(t) + y1_data * np.cos(t))[mask])
 
-    result = minimize(min_imag, 0, args=(x, x1_data, y1_data, mask),
-                      method='Nelder-Mead')
-    theta = float(result.x[0])
+    res = minimize_scalar(min_imag, bounds=(-90.0, 90.0), method='bounded',
+                          options={'xatol': 1e-3})
+    theta = float(res.x)
+
     if do_plot:
-        theta_rad = theta * np.pi / 180.0
-        imag = -x1_data * np.sin(theta_rad) + y1_data * np.cos(theta_rad)
-        plt.scatter(x[mask], imag[mask], label=f'min imag: {ch}')
+        a = ax if ax is not None else plt.gca()
+        t = theta * np.pi / 180.0
+        imag = -x1_data * np.sin(t) + y1_data * np.cos(t)
+        a.scatter(x[mask], imag[mask],
+                  label=f'imag after θ={theta:.2f}° ({ch})')
     return theta
 
 
@@ -442,20 +634,29 @@ def _resolve_path(localfile, data_base_dir=None):
     return None
 
 
+_EXPECTED_X_UNITS = {'µm', 'um', 'micrometer', 'micrometre', 'micrometers',
+                     'micrometres'}
+
+
 def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                            direction=None, ignorLines=(),
-                           data_base_dir=None, median=False):
+                           data_base_dir=None, median=False,
+                           expected_x_unit='µm'):
     """Load one data channel from all scans in a SAMBA Cryo scanlist.
 
     Groups scans by  effective sign = relay_sign × sign(field_T).
 
-    Returns ``[x, diff, sum, std, res_pos, res_neg, n_pos]`` — the same
-    7-element format as ``data_calculation_SOT`` / ``data_calculation_new``.
+    Returns ``[x, diff, sum, err, res_pos, res_neg, n_pos]`` — the same
+    7-element format as ``data_calculation_SOT`` / ``data_calculation_new``,
+    where ``err`` is the standard error of the mean of the half-difference
+    ``(res_pos - res_neg) / 2`` (i.e. uses SEM not std, properly weighted
+    by the per-group sample counts).
     """
     first_scan = first_pos = first_neg = True
     var_pos = var_neg = x = None
     n_pos = n_neg = 0
     line_counter = 0
+    x_unit_checked = False
 
     with open(scanlist_path, 'r') as f:
         for line in f:
@@ -493,19 +694,31 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
 
             if first_scan:
                 first_scan = False
-                x = data_load(filepath, ch_x)
+                x, x_unit = data_load(filepath, ch_x, return_unit=True)
                 if x is None or len(x) < 2:
                     x = None
                     first_scan = True
                     continue
+                # Sanity-check x-axis unit (warn once per call)
+                if (not x_unit_checked) and x_unit and expected_x_unit:
+                    if x_unit.strip().lower() not in _EXPECTED_X_UNITS:
+                        warnings.warn(
+                            f'data_calculation_cryo: x-axis unit '
+                            f'"{x_unit}" ≠ expected "{expected_x_unit}" '
+                            f'(in {bname}). Distances and fit width may '
+                            f'be wrong.')
+                    x_unit_checked = True
 
             var = data_load(filepath, ch_var)
             if len(var) != len(x):
                 var = np.interp(np.linspace(0, 1, len(x)),
                                 np.linspace(0, 1, len(var)), var)
 
+            # Bridge NaNs (e.g. flagged spikes) only for averaging — the
+            # raw arrays are unchanged on disk.
             nans, z = nan_helper(var)
-            if np.any(nans):
+            if np.any(nans) and (~nans).sum() >= 2:
+                var = var.copy()
                 var[nans] = np.interp(z(nans), z(~nans), var[~nans])
 
             if pol >= 0:
@@ -524,7 +737,8 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                 n_neg += 1
 
     if x is None or var_pos is None or var_neg is None:
-        warnings.warn(f'data_calculation_cryo: no valid data for "{ch_var}"')
+        warnings.warn(f'data_calculation_cryo: no valid data for "{ch_var}" '
+                      f'(n_pos={n_pos}, n_neg={n_neg})')
         return [np.zeros(1)] * 7
 
     if var_pos.ndim == 1:
@@ -536,12 +750,19 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
     res_pos = fn(var_pos, axis=0)
     res_neg = fn(var_neg, axis=0)
 
-    diff     = (res_pos - res_neg) / 2.0
+    diff      = (res_pos - res_neg) / 2.0
     summation = (res_pos + res_neg) / 2.0
-    std      = np.sqrt(np.std(var_pos, axis=0)**2 +
-                       np.std(var_neg, axis=0)**2) / 2.0
 
-    return [x, diff, summation, std, res_pos, res_neg, n_pos]
+    # Standard error of the mean per group (ddof=1, capped to avoid div by 0).
+    sem_pos = (np.std(var_pos, axis=0, ddof=1) / np.sqrt(max(n_pos, 1))
+               if n_pos > 1 else np.zeros_like(res_pos))
+    sem_neg = (np.std(var_neg, axis=0, ddof=1) / np.sqrt(max(n_neg, 1))
+               if n_neg > 1 else np.zeros_like(res_neg))
+    # Error of (pos − neg) / 2 by quadrature; same expression also valid for
+    # (pos + neg) / 2 since pos and neg are independent groups.
+    err = 0.5 * np.sqrt(sem_pos ** 2 + sem_neg ** 2)
+
+    return [x, diff, summation, err, res_pos, res_neg, n_pos]
 
 
 def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
@@ -916,35 +1137,66 @@ class analyze_cryo:
 
     # ── phase auto-detection ──────────────────────────────────────────────
 
-    def get_theta(self, LI_str=None, do_plot=False):
-        """Auto-detect lock-in phase by minimising imaginary component."""
+    def get_theta(self, LI_str=None, do_plot=True):
+        """Auto-detect lock-in phase by minimising the imaginary component.
+
+        Saves a diagnostic plot ``phase_search.png`` showing the residual
+        imaginary component for both polarities (and for the 2nd harmonic
+        when available) — should sit near zero across the device window.
+        """
         if self.edges is None:
             self.get_edges()
         D  = self.data
         li = LI_str or self.calc_info.LI_type
         print(f'  Using LIA: {li}')
 
-        t_pos = find_phase(D['x'], D[li+'x1'][4], D[li+'y1'][4],
-                           self.edges, 'pos', do_plot=do_plot)
-        t_neg = find_phase(D['x'], D[li+'x1'][5], D[li+'y1'][5],
-                           self.edges, 'neg', do_plot=do_plot)
-        theta = float(np.mean([t_pos, t_neg]))
-        print(f'  theta = {theta:.2f}°  (from {t_pos:.2f}° & {t_neg:.2f}°)')
+        has_2nd = (li + 'x2' in D) and (li + 'y2' in D)
+        n_axes  = 2 if has_2nd else 1
         if do_plot:
-            plt.grid(); plt.legend(); plt.show()
+            fig, axes = plt.subplots(1, n_axes, figsize=(6 * n_axes, 4),
+                                     squeeze=False)
+            axes = axes[0]
+        else:
+            axes = [None] * n_axes
+
+        t_pos = find_phase(D['x'], D[li+'x1'][4], D[li+'y1'][4],
+                           self.edges, 'pos', do_plot=do_plot, ax=axes[0])
+        t_neg = find_phase(D['x'], D[li+'x1'][5], D[li+'y1'][5],
+                           self.edges, 'neg', do_plot=do_plot, ax=axes[0])
+        theta = float(np.mean([t_pos, t_neg]))
+        print(f'  theta  (1ω) = {theta:.2f}°  (from pos={t_pos:.2f}°, '
+              f'neg={t_neg:.2f}°)')
         self.calc_info.theta = theta
+        if do_plot:
+            axes[0].axhline(0, color='k', lw=0.5)
+            axes[0].set_title(rf'1ω : $\theta$={theta:.2f}°')
+            axes[0].set_xlabel(f'x [{self.x_unit}]')
+            axes[0].set_ylabel('residual imag (a.u.)')
+            axes[0].grid(True); axes[0].legend(fontsize=9)
 
-        if li + 'x2' in D and li + 'y2' in D:
+        if has_2nd:
             t2_pos = find_phase(D['x'], D[li+'x2'][4], D[li+'y2'][4],
-                                self.edges, 'pos', do_plot=do_plot)
+                                self.edges, 'pos', do_plot=do_plot,
+                                ax=axes[1])
             t2_neg = find_phase(D['x'], D[li+'x2'][5], D[li+'y2'][5],
-                                self.edges, 'neg', do_plot=do_plot)
+                                self.edges, 'neg', do_plot=do_plot,
+                                ax=axes[1])
             theta2 = float(np.mean([t2_pos, t2_neg]))
-            print(f'  theta2 = {theta2:.2f}°  (from {t2_pos:.2f}° & {t2_neg:.2f}°)')
-            if do_plot:
-                plt.grid(); plt.legend(); plt.show()
+            print(f'  theta₂ (2ω) = {theta2:.2f}°  (from pos={t2_pos:.2f}°, '
+                  f'neg={t2_neg:.2f}°)')
             self.calc_info.theta2 = theta2
+            if do_plot:
+                axes[1].axhline(0, color='k', lw=0.5)
+                axes[1].set_title(rf'2ω : $\theta_2$={theta2:.2f}°')
+                axes[1].set_xlabel(f'x [{self.x_unit}]')
+                axes[1].grid(True); axes[1].legend(fontsize=9)
 
+        if do_plot:
+            plt.tight_layout()
+            fname = os.path.join(self.path3, 'phase_search.png')
+            plt.savefig(fname, dpi=150)
+            print(f'  Plot saved: {fname}')
+            plt.show()
         return self
 
     # ── evaluate_data ─────────────────────────────────────────────────────
@@ -953,7 +1205,16 @@ class analyze_cryo:
                       do_plot='sumdiff', fs=16, reflection=None):
         """Compute Kerr angles and produce standard SOT plots.
 
-        *do_plot*: ``'sumdiff'`` | ``'negpos'`` | ``'realimag'``
+        ``do_plot`` modes:
+          * ``'sumdiff'``        — 1ω sum/diff with error bars (default)
+          * ``'sumdiff2nd'``     — same for 2ω
+          * ``'comp_1st_2nd'``   — 1ω and 2ω side-by-side
+          * ``'negpos'``         — separate +/− field traces (1ω)
+          * ``'realimag'``       — X/Y (real/imag) at + and − field, 1ω
+          * ``'realimag2nd'``    — same for 2ω
+          * ``'thermoreflectance'`` — −θ²_Oe / R    (2nd harmonic thermoreflectance)
+          * ``'findphase'``      — residual imaginary component after rotating
+                                    by θ — should sit near zero across the device
         """
         if reflection is None:
             reflection = self._reflec_key
@@ -973,22 +1234,42 @@ class analyze_cryo:
         D   = self.data
         fac = 1000 if 'sr' in li else 1
 
+        # 1ω
         theta_Oe  = (D[li+'x1'][2] * np.cos(t1) + D[li+'y1'][2] * np.sin(t1)) * sln
         theta_DL  = (D[li+'x1'][1] * np.cos(t1) + D[li+'y1'][1] * np.sin(t1)) * sln
         error_bar = (np.sqrt((D[li+'x1'][3] * np.cos(t1))**2 +
-                             (D[li+'y1'][3]  * np.sin(t1))**2) * np.abs(sln))
-
+                             (D[li+'y1'][3] * np.sin(t1))**2) * np.abs(sln))
         pos       = D['x']
         theta_neg = (D[li+'x1'][5] * np.cos(t1) + D[li+'y1'][5] * np.sin(t1)) * sln
         theta_pos = (D[li+'x1'][4] * np.cos(t1) + D[li+'y1'][4] * np.sin(t1)) * sln
 
+        # 2ω — only if the channels are present
+        has_2nd = (li + 'x2' in D) and (li + 'y2' in D)
+        theta2_Oe = theta2_DL = error_bar2 = None
+        if has_2nd:
+            theta2_Oe = (D[li+'x2'][2] * np.cos(t2) + D[li+'y2'][2] * np.sin(t2)) * sln
+            theta2_DL = (D[li+'x2'][1] * np.cos(t2) + D[li+'y2'][1] * np.sin(t2)) * sln
+            error_bar2 = (np.sqrt((D[li+'x2'][3] * np.cos(t2))**2 +
+                                  (D[li+'y2'][3] * np.sin(t2))**2) * np.abs(sln))
+        elif do_plot in ('sumdiff2nd', 'realimag2nd', 'comp_1st_2nd',
+                         'thermoreflectance'):
+            warnings.warn(f'evaluate_data: 2nd-harmonic plot "{do_plot}" '
+                          f'requested but {li}x2/{li}y2 not in data — '
+                          f'falling back to "sumdiff".')
+            do_plot = 'sumdiff'
+
+        # ── figure layout per mode ─────────────────────────────────────────
         if do_plot in ('realimag', 'realimag2nd'):
+            fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
             plot_2axs = True
+        elif do_plot == 'comp_1st_2nd':
+            fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(12, 4))
+            plot_2axs = True
+        elif plot_2axs:
+            fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(8, 8))
         else:
-            if plot_2axs:
-                fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(8, 8))
-            else:
-                fig, ax1 = plt.subplots(figsize=(6, 4))
+            fig, ax1 = plt.subplots(figsize=(6, 4))
+            ax3 = None
 
         # ── select plot type ───────────────────────────────────────────────
         if do_plot == 'negpos':
@@ -1008,16 +1289,67 @@ class analyze_cryo:
             ax1.errorbar(pos, theta_DL * fac, yerr=error_bar, color='green')
             ax1.set_ylabel(r'$\theta_{K}^{1\omega}$ [nrad]', fontsize=fs)
 
+        elif do_plot == 'sumdiff2nd':
+            ax1.plot(pos, theta2_Oe * fac, '-.v', color='black', label='sum')
+            ax1.errorbar(pos, theta2_Oe * fac, yerr=error_bar2, color='black')
+            ax1.plot(pos, theta2_DL * fac, '-.v', color='green', label='diff')
+            ax1.errorbar(pos, theta2_DL * fac, yerr=error_bar2, color='green')
+            ax1.set_ylabel(r'$\theta_{K}^{2\omega}$ [nrad]', fontsize=fs)
+
+        elif do_plot == 'comp_1st_2nd':
+            ax1.plot(pos, theta_Oe * fac, '-.v', color='black', label='sum')
+            ax1.errorbar(pos, theta_Oe * fac, yerr=error_bar, color='black')
+            ax1.plot(pos, theta_DL * fac, '-.v', color='green', label='diff')
+            ax1.errorbar(pos, theta_DL * fac, yerr=error_bar, color='green')
+            ax1.set_ylabel(r'$\theta_{K}^{1\omega}$ [nrad]', fontsize=fs)
+            ax3.plot(pos, theta2_Oe * fac, '-.v', color='black', label='sum')
+            ax3.errorbar(pos, theta2_Oe * fac, yerr=error_bar2, color='black')
+            ax3.plot(pos, theta2_DL * fac, '-.v', color='green', label='diff')
+            ax3.errorbar(pos, theta2_DL * fac, yerr=error_bar2, color='green')
+            ax3.set_ylabel(r'$\theta_{K}^{2\omega}$ [nrad]', fontsize=fs)
+
+        elif do_plot == 'thermoreflectance':
+            therm = -theta2_Oe / np.where(D[reflection][2] == 0,
+                                           np.nan, D[reflection][2])
+            ax1.errorbar(pos, therm, yerr=np.abs(error_bar2 / D[reflection][2]),
+                         marker='v', color='r')
+            ax1.set_ylabel(r'$-\theta^{2\omega}_{K}\;/\;R$', fontsize=fs)
+
         elif do_plot == 'realimag':
-            fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
             ax3.plot(pos, D[li+'x1'][5] * sln, '-.v', color='b')
             ax3.plot(pos, D[li+'y1'][5] * sln, '-.v', color='r')
             ax1.plot(pos, D[li+'x1'][4] * sln, '-.o', color='b', label='real')
             ax1.plot(pos, D[li+'y1'][4] * sln, '-.o', color='r', label='imag')
-            ax1.set_title('R$^+$')
-            ax3.set_title('R$^-$')
+            ax1.set_title('R$^+$'); ax3.set_title('R$^-$')
             ax1.set_ylabel(r'$\theta_{K}^{1\omega}$ [nrad]', fontsize=fs)
-            ax1.set_xlabel(r'$x$ $[\mu m]$')
+
+        elif do_plot == 'realimag2nd':
+            ax3.plot(pos, D[li+'x2'][5] * sln, '-.v', color='b')
+            ax3.plot(pos, D[li+'y2'][5] * sln, '-.v', color='r')
+            ax1.plot(pos, D[li+'x2'][4] * sln, '-.o', color='b', label='real')
+            ax1.plot(pos, D[li+'y2'][4] * sln, '-.o', color='r', label='imag')
+            ax1.set_title('R$^+$'); ax3.set_title('R$^-$')
+            ax1.set_ylabel(r'$\theta_{K}^{2\omega}$ [nrad]', fontsize=fs)
+
+        elif do_plot == 'findphase':
+            # Residual imaginary component after rotating by θ (1ω).  Should
+            # be near zero across the device if the phase is correct.
+            imag_pos = (-D[li+'x1'][4] * np.sin(t1)
+                        + D[li+'y1'][4] * np.cos(t1))
+            imag_neg = (-D[li+'x1'][5] * np.sin(t1)
+                        + D[li+'y1'][5] * np.cos(t1))
+            ax1.plot(pos, imag_pos, '-.v', color='cyan',
+                     label='imag pos (→ 0)')
+            ax1.plot(pos, imag_neg, '-.v', color='k',
+                     label='imag neg (→ 0)')
+            ax1.set_ylabel(r'residual imag, $\theta=$' f'{theta:.2f}°',
+                           fontsize=fs)
+
+        else:
+            warnings.warn(f'evaluate_data: unknown do_plot="{do_plot}"; '
+                          f'using sumdiff')
+            ax1.plot(pos, theta_Oe * fac, '-.v', color='black', label='sum')
+            ax1.plot(pos, theta_DL * fac, '-.v', color='green', label='diff')
 
         # ── common axes decoration ─────────────────────────────────────────
         ax1.legend(fontsize=fs, loc=1)
@@ -1026,27 +1358,24 @@ class analyze_cryo:
         ax2 = ax1.twinx()
         ax2.plot(D['x'], D[reflection][2], color='firebrick', label=r'I$_{FL}$')
 
-        if plot_2axs and do_plot not in ('realimag', 'realimag2nd'):
+        if plot_2axs and ax3 is not None:
             ax3.grid(True)
             ax4 = ax3.twinx()
-            ax4.plot(D['x'], D[reflection][2], color='firebrick', label=r'I$_{FL}$')
-            if 'real' not in do_plot:
-                ax3.legend(fontsize=fs, loc=1)
-            else:
-                ax1.set_xlabel(r'$x$ $[\mu m]$', fontsize=fs)
-                ax1.tick_params(axis='both', which='major', labelsize=fs - 2)
+            ax4.plot(D['x'], D[reflection][2], color='firebrick',
+                     label=r'I$_{FL}$')
             ax3.axhline(y=0, color='k')
-            ax3.set_xlabel(r'$x$ $[\mu m]$', fontsize=fs)
-            ax4.legend(fontsize=fs, loc=4)
+            ax3.set_xlabel(f'x [{self.x_unit}]', fontsize=fs)
             ax3.tick_params(axis='both', which='major', labelsize=fs - 2)
-        else:
-            ax1.set_xlabel(r'$x$ $[\mu m]$', fontsize=fs)
-            ax1.tick_params(axis='both', which='major', labelsize=fs - 2)
+            if do_plot not in ('realimag', 'realimag2nd'):
+                ax3.legend(fontsize=fs, loc=1)
+            ax4.legend(fontsize=fs, loc=4)
 
+        ax1.set_xlabel(f'x [{self.x_unit}]', fontsize=fs)
+        ax1.tick_params(axis='both', which='major', labelsize=fs - 2)
         ax2.legend(fontsize=fs, loc=4)
         plt.tight_layout()
         fname = os.path.join(self.path3, plotname + '.png')
-        plt.savefig(fname, pad_inches=0.1)
+        plt.savefig(fname, pad_inches=0.1, dpi=150)
         print(f'  Plot saved: {fname}')
         plt.show()
 
@@ -1060,6 +1389,10 @@ class analyze_cryo:
             'neg':      theta_neg[idx],
             'errorbar': error_bar[idx],
         }
+        if has_2nd:
+            self.analyzed_data['sum_2w']  = theta2_Oe[idx]
+            self.analyzed_data['diff_2w'] = theta2_DL[idx]
+            self.analyzed_data['err_2w']  = error_bar2[idx]
         return self
 
     # ── eval_width_and_fit ────────────────────────────────────────────────
@@ -1234,10 +1567,93 @@ class analyze_cryo:
         self.analyzed_data['diff']     = theta_DL
         self.analyzed_data['errorbar'] = error_bar
 
+        # ── Persist results: CSV of analyzed data + JSON of fit summary ───
+        self._save_analyzed_csv(position, reflex, theta_Oe, theta_DL,
+                                error_bar, plotname)
+        self._save_results_json(
+            width=width, x1_raw=float(x1), x2_raw=float(x2),
+            n_fit_points=int(mask.sum()),
+            DL_const=float(pConst[0]), DL_const_err=float(errConst[0]),
+            Oe_A=float(pLog[0]), Oe_A_err=float(errLog[0]),
+            Oe_A0=float(pLog[1]), conconst_nrad_per_mT=float(conconst),
+            DL_field_mT=float(conDL), DL_field_err_mT=float(conDL_error),
+            current_mA=float(self.calc_info.current),
+            current_coefficient2=float(current_coefficient2),
+            R=list(self.calc_info.R), sln=float(self.calc_info.sln),
+            theta_deg=float(self.calc_info.theta),
+            theta2_deg=float(self.calc_info.theta2),
+            use_Oe_as_edges=bool(use_Oe_as_edges),
+            fit_edge_offset=int(fit_edge_offset),
+        )
+
         if nice_plot:
             self._nice_plot(position, theta_Oe, theta_DL, error_bar,
                             reflex, pos_fit, pLog, pConst, width, plotname)
         return self
+
+    # ── Persistence helpers ───────────────────────────────────────────────
+
+    def _save_analyzed_csv(self, position, reflex, theta_Oe, theta_DL,
+                            error_bar, plotname):
+        """Write analyzed columns to CSV (semicolon-separated, like the old
+        ``analyzed_to_csv`` in Jakub_methods.py).  Adds 2ω columns when
+        ``analyzed_data`` has them.  No pandas/xlsx dependency."""
+        ad   = self.analyzed_data
+        have2 = ('sum_2w' in ad and 'diff_2w' in ad and 'err_2w' in ad
+                 and ad['sum_2w'].shape == position.shape)
+        header = [f'x [{self.x_unit}]', 'R [a.u.]',
+                  'theta_Oe [nrad]', 'error [nrad]',
+                  'theta_DL [nrad]', 'error [nrad]']
+        if have2:
+            header += ['theta_Oe_2w [nrad]', 'error_2w [nrad]',
+                       'theta_DL_2w [nrad]', 'error_2w [nrad]']
+        fname = os.path.join(self.path3, f'analyzed_{plotname}.csv')
+        try:
+            with open(fname, 'w', newline='') as f:
+                w = csv.writer(f, delimiter=';')
+                w.writerow(header)
+                for i in range(len(position)):
+                    row = [f'{position[i]:.6g}', f'{reflex[i]:.6g}',
+                           f'{theta_Oe[i]:.6g}', f'{error_bar[i]:.6g}',
+                           f'{theta_DL[i]:.6g}', f'{error_bar[i]:.6g}']
+                    if have2:
+                        row += [f'{ad["sum_2w"][i]:.6g}',
+                                f'{ad["err_2w"][i]:.6g}',
+                                f'{ad["diff_2w"][i]:.6g}',
+                                f'{ad["err_2w"][i]:.6g}']
+                    w.writerow(row)
+            print(f'  CSV  saved: {fname}')
+        except Exception as e:
+            warnings.warn(f'_save_analyzed_csv: {e}')
+
+    def _save_results_json(self, **fields):
+        """Dump all fit results + analysis parameters to results.json so the
+        run is reproducible from the saved folder alone."""
+        out = {
+            'timestamp':          datetime.datetime.now().isoformat(),
+            'scanlist':           self.scanlist_path,
+            'direction':          self.direction,
+            'sample':             self.sample_name,
+            'sample_folder':      self.sample_folder,
+            'data_base_dir':      self.data_base_dir,
+            'LightPol':           self.calc_info.LightPol,
+            'LI_type':            self.calc_info.LI_type,
+            'edges_raw':          (list(self.edges) if self.edges else None),
+            'dev_center':         self.dev_center,
+            'width':              self.width,
+            'fit_DL_mT':          self.fit_DL_mT,
+            'fit_DL_error_mT':    self.fit_DL_error_mT,
+            'h5_metadata':        {k: _json_safe(v)
+                                    for k, v in self.h5_meta.items()},
+        }
+        out.update({k: _json_safe(v) for k, v in fields.items()})
+        fname = os.path.join(self.path3, 'results.json')
+        try:
+            with open(fname, 'w') as f:
+                json.dump(out, f, indent=2, default=_json_safe)
+            print(f'  JSON saved: {fname}')
+        except Exception as e:
+            warnings.warn(f'_save_results_json: {e}')
 
     def _nice_plot(self, position, theta_Oe, theta_DL, error_bar, reflex,
                    pos_fit, pLog, pConst, width, plotname):
