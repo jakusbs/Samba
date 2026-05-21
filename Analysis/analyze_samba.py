@@ -343,16 +343,18 @@ class SambaSOTAnalysis:
         if not all_scans:
             return self
 
-        # Build common x reference from first available scan
+        # Build common x reference from first available scan (raw hardware units)
         first = all_scans[0]
-        self.x_ref = np.array(first['x'], dtype=float)
-        # Sort x ref
-        order = np.argsort(self.x_ref)
-        self.x_ref = self.x_ref[order]
-        self.x_ref = self.x_ref * self.x_scale
+        x_ref_raw = np.array(first['x'], dtype=float)
+        order = np.argsort(x_ref_raw)
+        x_ref_raw = x_ref_raw[order]
 
-        self.avg_pos = average_scans(self.scans_pos, channels, self.x_ref)
-        self.avg_neg = average_scans(self.scans_neg, channels, self.x_ref)
+        # Interpolate in raw units so scan['x'] and x_ref share the same scale
+        self.avg_pos = average_scans(self.scans_pos, channels, x_ref_raw)
+        self.avg_neg = average_scans(self.scans_neg, channels, x_ref_raw)
+
+        # Scale x_ref for display only, after averaging is done
+        self.x_ref = x_ref_raw * self.x_scale
         return self
 
     def see_intensity(self, ch: str) -> 'SambaSOTAnalysis':
