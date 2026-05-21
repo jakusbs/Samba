@@ -12,6 +12,7 @@ Channel mapping (auto):
 """
 
 import os
+import re
 import datetime
 import warnings
 
@@ -21,6 +22,50 @@ import matplotlib as mpl
 from scipy.optimize import curve_fit, minimize
 from scipy import interpolate, signal
 import h5py
+
+
+# ---------------------------------------------------------------------------
+# Filename / scanlist parsing helpers
+# ---------------------------------------------------------------------------
+
+_CURRENT_RE = re.compile(r'(\d+(?:[.p]\d+)?)\s*mA', re.IGNORECASE)
+
+
+def parse_current_from_name(name):
+    """Extract current (mA) from a scanlist or HDF5 filename.
+
+    Looks for the SAMBA convention ``..._<num>mA_...`` (e.g. ``12.5mA``,
+    ``12p5mA``). Returns ``None`` if no match.
+    """
+    m = _CURRENT_RE.search(os.path.basename(name))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace('p', '.'))
+    except ValueError:
+        return None
+
+
+def detect_directions(scanlist_path, data_base_dir=None):
+    """Return the set of scan directions present in a scanlist.
+
+    Returns a subset of ``{'trace', 'retrace'}``. Empty set means the
+    scanlist has no trace/retrace markers (e.g. legacy Green/IR data) —
+    callers should run a single-direction analysis with ``direction=None``.
+    """
+    found = set()
+    try:
+        with open(scanlist_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                bname = os.path.basename(line.split('\t')[0].strip()).lower()
+                if '_trace'   in bname: found.add('trace')
+                if '_retrace' in bname: found.add('retrace')
+    except Exception as e:
+        warnings.warn(f'detect_directions: {e}')
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -477,11 +522,12 @@ class analyze_cryo:
         )
     """
 
-    def __init__(self, scanlist_path, current_mA=10.0, sln=1.0,
-                 theta=0.0, theta2=0.0, R=(1.0, 1.0),
+    def __init__(self, scanlist_path, current_mA=None, calibration=1.0,
+                 sln=None, theta=0.0, theta2=0.0, R=(1.0, 1.0),
                  direction=None, data_base_dir=None,
                  x_ch='actuator_x', li_type='zi',
-                 reflec_key='FL', x_unit='µm', signal_unit='V'):
+                 reflec_key='FL', x_unit='µm', signal_unit='V',
+                 save_dir=None, save_subdir=True):
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
         self.data_base_dir = data_base_dir
@@ -490,12 +536,26 @@ class analyze_cryo:
         self.signal_unit   = signal_unit
         self._reflec_key   = reflec_key
 
+        # ── current: explicit > scanlist filename > default 10 mA ─────────
+        if current_mA is None:
+            current_mA = parse_current_from_name(scanlist_path)
+            if current_mA is not None:
+                print(f'  Current auto-detected from filename: {current_mA} mA')
+            else:
+                warnings.warn('current_mA not given and could not be parsed '
+                              'from filename — defaulting to 10.0 mA')
+                current_mA = 10.0
+
+        # ── calibration: ``calibration`` is canonical; ``sln`` kept as alias
+        cal = float(sln if sln is not None else calibration)
+
         # ── calc_info ─────────────────────────────────────────────────────
         class CalcInfo:
             pass
         ci          = CalcInfo()
         ci.current  = float(current_mA)
-        ci.sln      = float(sln)
+        ci.sln      = cal              # multiplies raw signal → Kerr angle
+        ci.calibration = cal
         ci.theta    = float(theta)
         ci.theta2   = float(theta2)
         ci.R        = list(R)
@@ -523,11 +583,21 @@ class analyze_cryo:
         self.fit_DL_error_mT   = None
 
         # ── output directory ──────────────────────────────────────────────
+        # Resolution order:
+        #   save_dir + save_subdir=True  → save_dir/<ts>_<direction>/   (default)
+        #   save_dir + save_subdir=False → save_dir/                     (write directly)
+        #   no save_dir                   → <scanlist_dir>/<ts>_<direction>/
         ts     = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         suffix = f'_{direction}' if direction else ''
-        base   = os.path.dirname(os.path.abspath(scanlist_path))
-        self.path3 = os.path.join(base, ts + suffix)
+        if save_dir is None:
+            base = os.path.dirname(os.path.abspath(scanlist_path))
+            self.path3 = os.path.join(base, ts + suffix)
+        elif save_subdir:
+            self.path3 = os.path.join(os.path.abspath(save_dir), ts + suffix)
+        else:
+            self.path3 = os.path.abspath(save_dir)
         os.makedirs(self.path3, exist_ok=True)
+        print(f'  Saving plots to: {self.path3}')
 
     # ── data loading ──────────────────────────────────────────────────────
 
@@ -1029,20 +1099,36 @@ class analyze_cryo:
     @staticmethod
     def import_analyze_both(scanlist_path, see_channels=('DC', 'ZI_x1'),
                              ignorLines=(), fit_edge_offset=5, **kwargs):
-        """Run the full pipeline for *trace* and *retrace* independently.
+        """Run the full pipeline for each direction available in the scanlist.
 
-        Returns ``(res_trace, res_retrace)``.
+        Returns ``(res_trace, res_retrace)``.  Either element is ``None``
+        when that direction isn't in the scanlist.  For Green/IR scanlists
+        with no trace/retrace markers, runs once with ``direction=None``
+        and returns ``(res, None)``.
         """
-        print('=' * 60 + '\n  TRACE\n' + '=' * 60)
-        res_trace = analyze_cryo.import_analyze_SOT(
-            scanlist_path, see_channels=see_channels, direction='trace',
-            ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+        data_base_dir = kwargs.get('data_base_dir')
+        dirs = detect_directions(scanlist_path, data_base_dir=data_base_dir)
+        print(f'  Directions detected in scanlist: '
+              f'{sorted(dirs) if dirs else "none (legacy single-direction)"}')
 
-        print('=' * 60 + '\n  RETRACE\n' + '=' * 60)
-        res_retrace = analyze_cryo.import_analyze_SOT(
-            scanlist_path, see_channels=see_channels, direction='retrace',
-            ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+        if not dirs:
+            print('=' * 60 + '\n  SINGLE DIRECTION\n' + '=' * 60)
+            res = analyze_cryo.import_analyze_SOT(
+                scanlist_path, see_channels=see_channels, direction=None,
+                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+            return res, None
 
+        res_trace = res_retrace = None
+        if 'trace' in dirs:
+            print('=' * 60 + '\n  TRACE\n' + '=' * 60)
+            res_trace = analyze_cryo.import_analyze_SOT(
+                scanlist_path, see_channels=see_channels, direction='trace',
+                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+        if 'retrace' in dirs:
+            print('=' * 60 + '\n  RETRACE\n' + '=' * 60)
+            res_retrace = analyze_cryo.import_analyze_SOT(
+                scanlist_path, see_channels=see_channels, direction='retrace',
+                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
         return res_trace, res_retrace
 
 
