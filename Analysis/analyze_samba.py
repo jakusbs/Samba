@@ -54,6 +54,8 @@ class SambaSOTAnalysis:
         direction: str = None,
         ignore_lines: list = None,
         data_base_dir: str = None,
+        x_scale: float = 1e-3,
+        x_unit: str = 'µm',
     ):
         """
         Parameters
@@ -85,6 +87,8 @@ class SambaSOTAnalysis:
         self.direction = direction
         self.ignore_lines = set(ignore_lines) if ignore_lines else set()
         self.data_base_dir = data_base_dir
+        self.x_scale = float(x_scale)    # multiply x_ref by this before plotting (nm→µm)
+        self.x_unit  = str(x_unit)
 
         # Outputs populated by load_data / evaluate_data
         self.entries_pos = []
@@ -102,6 +106,8 @@ class SambaSOTAnalysis:
         self.theta_DL_err = None
         self.theta_Oe_err = None
         self.reflec_avg = None
+        self.scans_all = []
+        self.entries_all = []
 
         # Fit results
         self.fit_DL_mT = None
@@ -129,6 +135,56 @@ class SambaSOTAnalysis:
         """Construct from a Salsa scanlist."""
         return cls(scanlist_path, x1_ch, y1_ch, reflec_ch,
                    setup='salsa', **kwargs)
+
+    @classmethod
+    def import_analyze(
+        cls,
+        scanlist_path: str,
+        x1_ch: str,
+        y1_ch: str,
+        reflec_ch: str,
+        see_channels: list = None,
+        ignore_lines: list = None,
+        fit_edge_offset: int = 5,
+        **kwargs,
+    ) -> 'SambaSOTAnalysis':
+        """Load data and run the full analysis pipeline.
+
+        Equivalent to analyze_SHE_OHE.import_analyze_SOT:
+          1. load_data()
+          2. see_intensity() for each channel in see_channels
+          3. evaluate_data('sumdiff')
+          4. evaluate_data('negpos')
+          5. evaluate_data('realimag')
+          6. eval_width_and_fit()
+
+        Parameters
+        ----------
+        scanlist_path : path to scanlist .txt file
+        x1_ch, y1_ch : lock-in 1st-harmonic X and Y channel names
+        reflec_ch     : reflection/intensity channel name (None to skip edge fit)
+        see_channels  : list of channel names for see_intensity plots (default: [x1_ch])
+        ignore_lines  : 0-based line indices to skip
+        fit_edge_offset : points to exclude at each device edge during fitting
+        **kwargs      : passed to constructor (phase, calibration, current_mA,
+                        direction, data_base_dir, x_scale, x_unit, ...)
+        """
+        res = cls(scanlist_path, x1_ch, y1_ch, reflec_ch,
+                  ignore_lines=ignore_lines, **kwargs)
+        res.load_data()
+
+        for ch in (see_channels or [x1_ch]):
+            res.see_intensity(ch)
+
+        res.evaluate_data(do_plot='sumdiff')
+        res.evaluate_data(do_plot='negpos')
+        res.evaluate_data(do_plot='realimag')
+
+        if reflec_ch:
+            res.get_edges()
+            res.eval_width_and_fit(co=fit_edge_offset)
+
+        return res
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -244,6 +300,10 @@ class SambaSOTAnalysis:
         # Group by effective field sign
         loaded_entries = [e for e, _ in scans]
         loaded_scans   = [s for _, s in scans]
+
+        self.scans_all  = loaded_scans
+        self.entries_all = loaded_entries
+
         pos_scans, neg_scans = group_by_sign(loaded_entries, loaded_scans)
 
         # Also keep matching entries
@@ -277,9 +337,53 @@ class SambaSOTAnalysis:
         # Sort x ref
         order = np.argsort(self.x_ref)
         self.x_ref = self.x_ref[order]
+        self.x_ref = self.x_ref * self.x_scale
 
         self.avg_pos = average_scans(self.scans_pos, channels, self.x_ref)
         self.avg_neg = average_scans(self.scans_neg, channels, self.x_ref)
+        return self
+
+    def see_intensity(self, ch: str) -> 'SambaSOTAnalysis':
+        """Plot per-scan mean intensity and all profiles (copper colormap)."""
+        scans = self.scans_all
+        if not scans:
+            warnings.warn("see_intensity: no scans loaded")
+            return self
+
+        profiles  = [s[ch] for s in scans if ch in s]
+        positions = [s['x'] * self.x_scale for s in scans if ch in s]
+        means     = [float(np.mean(p)) for p in profiles]
+
+        if not profiles:
+            warnings.warn(f"see_intensity: channel '{ch}' not found in any scan")
+            return self
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12),
+                                       gridspec_kw={'height_ratios': [1, 3]})
+        fig.suptitle(f"{os.path.basename(self.scanlist_path)}\n{ch}", fontsize=10)
+
+        ax1.plot(means, '.-')
+        ax1.set_xticks(range(len(means)))
+        ax1.set_xlabel('scan number')
+        ax1.set_ylabel('mean [µV]')
+        ax1.grid(True)
+
+        colors = plt.cm.copper(np.linspace(0, 1, len(profiles)))
+        for i, (xi, yi) in enumerate(zip(positions, profiles)):
+            ax2.plot(xi, yi, 'x-', color=colors[i], label=str(i))
+        ax2.axhline(0, color='r', linestyle='-')
+        ax2.set_xlabel(f'x [{self.x_unit}]')
+        ax2.set_ylabel(f'{ch} [µV]')
+        ax2.grid(True)
+        if len(profiles) <= 12:
+            ax2.legend(fontsize=8)
+
+        plt.tight_layout()
+        pdir = self._get_plot_dir()
+        fname = os.path.join(pdir, f'intensity_{ch.replace(" ", "_")}.png')
+        plt.savefig(fname, dpi=150)
+        print(f"  Plot saved: {fname}")
+        plt.show()
         return self
 
     # ------------------------------------------------------------------
@@ -417,6 +521,42 @@ class SambaSOTAnalysis:
 
     def _plot_evaluate(self, x, theta_pos, theta_neg, theta_DL, theta_Oe,
                        err_DL, err_Oe, reflec, do_plot, ylim, title):
+        if do_plot == 'realimag':
+            # 2-panel: left = R+(+B), right = R-(-B)
+            fig2, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5), sharey=True, dpi=150)
+            x1_pos = self.avg_pos.get(self.x1_ch, np.zeros_like(x))
+            y1_pos = self.avg_pos.get(self.y1_ch, np.zeros_like(x))
+            x1_neg = self.avg_neg.get(self.x1_ch, np.zeros_like(x))
+            y1_neg = self.avg_neg.get(self.y1_ch, np.zeros_like(x))
+            r_pos  = self.avg_pos.get(self.reflec_ch, np.zeros_like(x))
+            r_neg  = self.avg_neg.get(self.reflec_ch, np.zeros_like(x))
+            for ax_p, xi, x1i, y1i, ri, lbl in [
+                (axL, x, x1_pos, y1_pos, r_pos, r'$R^+$'),
+                (axR, x, x1_neg, y1_neg, r_neg, r'$R^-$'),
+            ]:
+                ax_p.plot(xi, x1i * self.calibration, '-.o', color='b', label='Real (X1)')
+                ax_p.plot(xi, y1i * self.calibration, '-.o', color='r', label='Imag (Y1)')
+                ax_p.axhline(0, color='grey', linewidth=0.7, linestyle='--')
+                ax_p.set_title(lbl)
+                ax_p.set_xlabel(f'$x$ [{self.x_unit}]')
+                ax_p.grid(True, alpha=0.3)
+                twin = ax_p.twinx()
+                twin.plot(xi, ri, color=_C_REFL, alpha=0.5, linewidth=1.2, label=r'$I_{FL}$')
+                twin.set_ylabel(r'$R$ [a.u.]', color=_C_REFL)
+                twin.tick_params(axis='y', colors=_C_REFL)
+                twin.legend(fontsize=8, loc=4)
+            axL.set_ylabel(r'$\theta_K$ [µrad]')
+            axL.legend(fontsize=9)
+            t2 = title or os.path.splitext(os.path.basename(self.scanlist_path))[0]
+            fig2.suptitle(t2, fontsize=9)
+            plt.tight_layout()
+            pdir = self._get_plot_dir()
+            fname = os.path.join(pdir, 'evaluate_realimag.png')
+            fig2.savefig(fname, dpi=150)
+            print(f"  Plot saved: {fname}")
+            plt.show()
+            return  # early return — no ax1 to further modify
+
         fig, ax1 = plt.subplots(figsize=(9, 5), dpi=150)
 
         if do_plot == 'sumdiff':
@@ -427,22 +567,9 @@ class SambaSOTAnalysis:
         elif do_plot == 'negpos':
             ax1.plot(x, theta_pos, '.-', color=_C_DL, label=r'$\theta(+H)$')
             ax1.plot(x, theta_neg, '.-', color=_C_OE, label=r'$\theta(-H)$')
-        elif do_plot == 'realimag':
-            x1_pos = self.avg_pos.get(self.x1_ch, np.zeros_like(x))
-            y1_pos = self.avg_pos.get(self.y1_ch, np.zeros_like(x))
-            x1_neg = self.avg_neg.get(self.x1_ch, np.zeros_like(x))
-            y1_neg = self.avg_neg.get(self.y1_ch, np.zeros_like(x))
-            ax1.plot(x, x1_pos * self.calibration, '.-', color=_C_DL,
-                     label='Real (+H)')
-            ax1.plot(x, x1_neg * self.calibration, '.-', color=_C_OE,
-                     label='Real (-H)')
-            ax1.plot(x, y1_pos * self.calibration, '.--', color=_C_DL,
-                     label='Imag (+H)', alpha=0.6)
-            ax1.plot(x, y1_neg * self.calibration, '.--', color=_C_OE,
-                     label='Imag (-H)', alpha=0.6)
 
         ax1.axhline(0, color='grey', linewidth=0.7, linestyle='--')
-        ax1.set_xlabel(r'$x$ [µm]')
+        ax1.set_xlabel(f'$x$ [{self.x_unit}]')
         ax1.set_ylabel(r'$\theta_K$ [µrad]')
         ax1.legend(loc='upper left', fontsize=9)
         ax1.grid(True, alpha=0.3)
@@ -652,7 +779,7 @@ class SambaSOTAnalysis:
         ax.plot([], [], ' ', label=label_conv)
 
         ax.axhline(0, color='grey', linewidth=0.7, linestyle='--')
-        ax.set_xlabel('x [µm]')
+        ax.set_xlabel(f'x [{self.x_unit}]')
         ax.set_ylabel(r'$\theta_K$ [µrad]')
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.18),
                   ncol=3, fontsize=8, fancybox=True)
@@ -700,7 +827,7 @@ class SambaSOTAnalysis:
             pass
 
         ax.axhline(0, color='grey', linewidth=0.7, linestyle='--')
-        ax.set_xlabel('x [µm]', fontsize=fs)
+        ax.set_xlabel(f'x [{self.x_unit}]', fontsize=fs)
         ax.set_ylabel(r'$\theta_K$ [µrad]', fontsize=fs)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22),
                   ncol=2, fontsize=fs - 4, fancybox=True)
