@@ -25,10 +25,10 @@ DATA_BASE_DIR = os.path.join(NAS_DATA, 'Data_Samba_Cryo', '20260521')
 # ── Run full analysis ─────────────────────────────────────────────────────────
 res = SambaSOTAnalysis.import_analyze(
     scanlist_path  = SCANLIST,
-    x1_ch          = 'ZI2 x1',    # 1st harmonic X  → Kerr rotation
-    y1_ch          = 'ZI2 y1',    # 1st harmonic Y  → ellipticity
-    reflec_ch      = 'avgIn1',    # DC intensity for edge detection (None to skip)
-    see_channels   = ['ZI2 x1', 'ZI2 y1'],
+    x1_ch          = 'ZI_x1',     # 1st harmonic X  → Kerr rotation
+    y1_ch          = 'ZI_y1',     # 1st harmonic Y  → ellipticity
+    reflec_ch      = 'DC',        # DC intensity for edge detection (None to skip)
+    see_channels   = ['ZI_x1', 'ZI_y1'],
     current_mA     = 12.5,
     phase          = 0.0,
     calibration    = 1.0,         # set to µrad/µV once calibrated
