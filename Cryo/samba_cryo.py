@@ -68,6 +68,8 @@ except Exception:
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
 
+from server_sync import sync_setup
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hardware snapshot helper
@@ -1406,6 +1408,11 @@ class CryoMainWindow(QMainWindow):
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
         self._update_estimate()
+        _setup = self._active_setup()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return
@@ -1474,6 +1481,11 @@ class CryoMainWindow(QMainWindow):
         except Exception:
             log.debug("Failed to refresh data browser after scanlist", exc_info=True)
         QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        _setup = self._active_setup()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_scanlist_relay_changed(self, state):
         for hw in (self.traj_panel.hw, self.sl_panel.hw):
