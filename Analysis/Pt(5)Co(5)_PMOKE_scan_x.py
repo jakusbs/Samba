@@ -7,7 +7,7 @@ _this_dir = os.path.dirname(os.path.abspath(__file__))
 if _this_dir not in sys.path:
     sys.path.insert(0, _this_dir)
 
-from analyze_samba import SambaSOTAnalysis
+from analyze_samba import analyze_cryo
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Root of the Scanning/Data folder on the NAS (adjust if your mount differs).
@@ -23,15 +23,9 @@ DATA_BASE_DIR = os.path.join(NAS_DATA, 'Data_Samba_Cryo', '20260521')
 # ── Run full analysis — trace and retrace separately ─────────────────────────
 # Trace and retrace are analysed independently because piezo hysteresis shifts
 # the real sample position between the two scan directions.
-res_trace, res_retrace = SambaSOTAnalysis.import_analyze_both(
-    scanlist_path  = SCANLIST,
-    x1_ch          = 'ZI_x1',     # 1st harmonic X  → Kerr rotation
-    y1_ch          = 'ZI_y1',     # 1st harmonic Y  → ellipticity
-    reflec_ch      = 'DC',        # DC intensity for edge detection (None to skip)
-    see_channels   = ['ZI_x1', 'ZI_y1'],
+res_trace, res_retrace = analyze_cryo.import_analyze_both(
+    SCANLIST,
+    see_channels   = ('DC', 'ZI_x1', 'ZI_y1'),
     current_mA     = 12.5,
-    phase          = 0.0,
-    calibration    = 1.0,         # set to µrad/µV once calibrated
-    signal_unit    = 'µV',        # y-axis label unit; change to 'µrad' with calibration
     data_base_dir  = DATA_BASE_DIR,
 )
