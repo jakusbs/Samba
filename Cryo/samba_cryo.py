@@ -1369,7 +1369,7 @@ class CryoMainWindow(QMainWindow):
         # Append to lab notebook for this completed scan direction
         if self._last_fn and self._current_scan_cfg and not getattr(self, '_calib_timescan', False):
             setup = self._active_setup()
-            nb = _nb_path(setup.get("save_dir", "~/moke_data"), "Cryo")
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"), "Cryo")
             entry = dict(self._current_scan_cfg)
             entry["_scan_start_time"] = self._scan_start_time
             entry["_hdf5_path"] = os.path.abspath(self._last_fn)

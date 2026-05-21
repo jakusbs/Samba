@@ -1249,7 +1249,7 @@ class MainWindow(QMainWindow):
         if self._last_fn:
             # Lab notebook
             setup = self._active_setup()
-            nb = _nb_path(setup.get("save_dir", "~/moke_data"),
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"),
                           self._active_setup_name)
             if self._current_scan_cfg:
                 entry = dict(self._current_scan_cfg)
