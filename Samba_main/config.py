@@ -340,6 +340,11 @@ def load_setup(name: str) -> dict:
         try:
             with open(path) as f:
                 d = json.load(f)
+            # Migrate: old generic ~/moke_data → per-setup data directory
+            if d.get("save_dir") == "~/moke_data":
+                d["save_dir"] = SETUP_HW_DEFAULTS[name]["save_dir"]
+                log.info("Migrated save_dir → %s", d["save_dir"])
+            d.setdefault("notebook_dir", "~/moke_data")
             for k, v in SETUP_HW_DEFAULTS[name].items():
                 if k in HW_WARN_KEYS:
                     saved = d.get(k)

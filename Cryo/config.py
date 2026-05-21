@@ -395,6 +395,11 @@ def load_setup(name: str) -> dict:
         try:
             with open(path) as f:
                 d = json.load(f)
+            # Migrate: old generic ~/moke_data → per-setup data directory
+            if d.get("save_dir") == "~/moke_data":
+                d["save_dir"] = SETUP_HW_DEFAULTS[name]["save_dir"]
+                print(f"Migrated save_dir → {d['save_dir']}")
+            d.setdefault("notebook_dir", "~/moke_data")
             if name == "Cryo":
                 _anc_default = copy.deepcopy(
                     SETUP_HW_DEFAULTS["Cryo"]["stage_faraday"]["anc300"])
