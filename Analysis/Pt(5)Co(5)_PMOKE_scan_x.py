@@ -20,8 +20,7 @@ SCANLIST = os.path.join(NAS_DATA, 'ScanLists_Cryo',
 # Folder containing the .h5 files.
 # This test was taken before the new Data_Samba_Cryo structure, so they
 # are in a plain date subfolder.  Switch to the commented line for new data.
-DATA_BASE_DIR = os.path.join(NAS_DATA, '20260521')
-# DATA_BASE_DIR = os.path.join(NAS_DATA, 'Data_Samba_Cryo', '20260521')
+DATA_BASE_DIR = os.path.join(NAS_DATA, 'Data_Samba_Cryo', '20260521')
 
 # ── Run full analysis ─────────────────────────────────────────────────────────
 res = SambaSOTAnalysis.import_analyze(
