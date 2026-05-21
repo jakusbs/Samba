@@ -1444,7 +1444,8 @@ class CryoMainWindow(QMainWindow):
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
-                                         sl["relay_flip"], sl["field_flip"])
+                                         sl["relay_flip"], sl["field_flip"],
+                                         setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.list_progress.connect(

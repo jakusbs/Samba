@@ -154,7 +154,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "zi_settling_attr":    "settlingtime",
         "z_attr":              "position0",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
-        "save_dir":            "~/moke_data",
+        "save_dir":            "~/moke_data/Data_Samba_Green",
     },
     "IR": {
         "magnet_device":       "hpp-N42/beckhoff/magnet",
@@ -168,7 +168,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "zi_settling_attr":    "settlingtime",
         "z_attr":              "z",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
-        "save_dir":            "~/moke_data",
+        "save_dir":            "~/moke_data/Data_Samba_IR",
     },
     "Cryo": {
         "magnet_device":       "",
@@ -248,7 +248,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "attodry_cmd_mag_ctrl":        "toggleMagneticFieldControl",
         "attodry_cmd_temp_ctrl":       "toggleFulltemperatureControl",
         "attodry_cmd_persist":         "togglePersistentMode",
-        "save_dir":            "~/moke_data",
+        "save_dir":            "~/moke_data/Data_Samba_Cryo",
     },
 }
 
