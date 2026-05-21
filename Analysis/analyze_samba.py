@@ -372,8 +372,10 @@ def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
             …
         }
     """
-    res_ch, meta = get_channels(scanlist_path)
+    res_ch, meta = get_channels(scanlist_path, data_base_dir=data_base_dir)
     if not res_ch:
+        warnings.warn('linescan_calc_cryo: get_channels returned no channels; '
+                      'check data_base_dir')
         return {}
 
     my_dict   = {}
