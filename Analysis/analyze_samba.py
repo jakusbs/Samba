@@ -720,13 +720,48 @@ def _map_channel_name(ch_name):
 # Per-channel data loading: scan file → pos/neg average
 # ---------------------------------------------------------------------------
 
+def _infer_data_base_dir(scanlist_path):
+    """Derive the data root from the scanlist location.
+
+    Assumes the scanlist lives in a folder whose name matches
+    ``ScanLists[_]<setup>`` (e.g. ``ScanLists_Cryo``).  The data root is
+    the sibling folder ``Data_Samba_<setup>`` (e.g. ``Data_Samba_Cryo``).
+
+    Returns the inferred path if the directory exists, otherwise None.
+    """
+    scanlist_dir    = os.path.dirname(os.path.abspath(scanlist_path))
+    parent          = os.path.dirname(scanlist_dir)
+    folder_name     = os.path.basename(scanlist_dir)
+    data_folder     = re.sub(r'(?i)scanlists_?', 'Data_Samba_', folder_name, count=1)
+    candidate       = os.path.join(parent, data_folder)
+    if os.path.isdir(candidate):
+        return candidate
+    return None
+
+
 def _resolve_path(localfile, data_base_dir=None):
+    """Find the actual location of a scan file.
+
+    Search order:
+    1. Literal path (already accessible).
+    2. ``data_base_dir / basename``  — flat layout (date already in base).
+    3. ``data_base_dir / <date> / basename``  — date sub-folder extracted
+       from the original path, handles multi-day scans with a single root.
+    """
     if os.path.exists(localfile):
         return localfile
     if data_base_dir:
-        alt = os.path.join(data_base_dir, os.path.basename(localfile))
+        basename = os.path.basename(localfile)
+        # flat lookup
+        alt = os.path.join(data_base_dir, basename)
         if os.path.exists(alt):
             return alt
+        # date-subfolder lookup: extract YYYYMMDD from original path
+        date_dir = os.path.basename(os.path.dirname(localfile))
+        if re.match(r'^\d{8}$', date_dir):
+            alt2 = os.path.join(data_base_dir, date_dir, basename)
+            if os.path.exists(alt2):
+                return alt2
     return None
 
 
@@ -991,6 +1026,12 @@ class analyze_cryo:
                  use_calibration_file=True):
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
+        # ── auto-infer data_base_dir from scanlist location ───────────────
+        if data_base_dir is None:
+            inferred = _infer_data_base_dir(scanlist_path)
+            if inferred:
+                print(f'  Data base dir auto-inferred: {inferred}')
+                data_base_dir = inferred
         self.data_base_dir = data_base_dir
         self.x_unit        = x_unit
         self.signal_unit   = signal_unit
