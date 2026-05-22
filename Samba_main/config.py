@@ -51,7 +51,9 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_unit":                "nm",
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
-        "save_dir":              "~/moke_data",
+        "save_dir":              "~/moke_data/Data_Samba_Green",
+        "notebook_dir":          "~/moke_data",
+        "server_sync_dir":       "/mnt/nas/projects/MOKE_lab/Scanning/Data",
         "act1_device":           "smaract2/control/IR-controller",
         "act1_attr":             "x",
         "act1_label":            "X",
@@ -85,7 +87,9 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_unit":                "nm",
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
-        "save_dir":              "~/moke_data",
+        "save_dir":              "~/moke_data/Data_Samba_IR",
+        "notebook_dir":          "~/moke_data",
+        "server_sync_dir":       "/mnt/nas/projects/MOKE_lab/Scanning/Data",
         "act1_device":           "smaract2/control/IR-controller",
         "act1_attr":             "x",
         "act1_label":            "X",
@@ -119,7 +123,9 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_unit":                "nm",
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
-        "save_dir":              "~/moke_data",
+        "save_dir":              "~/moke_data/Data_Samba_Cryo",
+        "notebook_dir":          "~/moke_data",
+        "server_sync_dir":       "/mnt/nas/projects/MOKE_lab/Scanning/Data",
         "act1_device":           "smaract2/control/IR-controller",
         "act1_attr":             "x",
         "act1_label":            "X",
@@ -337,6 +343,13 @@ def load_setup(name: str) -> dict:
         try:
             with open(path) as f:
                 d = json.load(f)
+            # Migrate: old paths → current per-setup data directory under moke_data
+            _old_paths = {"~/moke_data", f"~/Data_Samba_{name}"}
+            if d.get("save_dir") in _old_paths:
+                d["save_dir"] = SETUP_HW_DEFAULTS[name]["save_dir"]
+                log.info("Migrated save_dir → %s", d["save_dir"])
+            d.setdefault("notebook_dir", "~/moke_data")
+            d.setdefault("server_sync_dir", SETUP_HW_DEFAULTS[name]["server_sync_dir"])
             for k, v in SETUP_HW_DEFAULTS[name].items():
                 if k in HW_WARN_KEYS:
                     saved = d.get(k)

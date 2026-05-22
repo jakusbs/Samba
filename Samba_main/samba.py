@@ -54,6 +54,8 @@ except Exception as _e:
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
 
+from server_sync import sync_setup
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hardware snapshot helper
@@ -1249,7 +1251,7 @@ class MainWindow(QMainWindow):
         if self._last_fn:
             # Lab notebook
             setup = self._active_setup()
-            nb = _nb_path(setup.get("save_dir", "~/moke_data"),
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"),
                           self._active_setup_name)
             if self._current_scan_cfg:
                 entry = dict(self._current_scan_cfg)
@@ -1264,6 +1266,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
         self._update_estimate()
+        _setup = self._active_setup()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return
@@ -1295,7 +1302,8 @@ class MainWindow(QMainWindow):
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
-                                         sl["relay_flip"], sl["field_flip"])
+                                         sl["relay_flip"], sl["field_flip"],
+                                         setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(lambda c, t: self.pbar.setValue(c))
         self._sl_worker.list_progress.connect(
@@ -1319,6 +1327,11 @@ class MainWindow(QMainWindow):
         except Exception:
             log.debug("Data browser refresh failed after scanlist", exc_info=True)
         QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        _setup = self._active_setup()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_scanlist_relay_changed(self, state: int):
         """Update relay label in both HW panels when the scanlist worker flips the relay."""
