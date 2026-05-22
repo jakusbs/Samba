@@ -1116,3 +1116,159 @@ Python's tuple-unpack protocol falls back to `__getitem__`, so pytango's DeviceP
 - Detects `$SUDO_USER` → uses real user's home for desktop/icon/config paths; `chown` fixes ownership
 
 **Usage:** `bash install.sh Tango` or `sudo bash install.sh Tango`
+
+---
+
+## 21. Analysis Module — `Analysis/analyze_samba.py` (May 2026)
+
+Post-acquisition pipeline for SAMBA HDF5 data. Replaces the legacy
+`Jakub_methods.py` / Tobi reference scripts with one module that handles
+Cryo, Green, and IR scanlists from the same entry point.
+
+### Entry points
+
+```python
+from analyze_samba import analyze_cryo
+
+# Trace + retrace (returns (res, None) for legacy single-direction data)
+res_trace, res_retrace = analyze_cryo.import_analyze_both(SCANLIST)
+
+# Single direction with explicit overrides
+res = analyze_cryo.import_analyze_SOT(
+    SCANLIST,
+    see_channels = ('DC', 'ZI_x1'),   # None = auto-detect
+    current_mA   = 12.5,              # None = HDF5 metadata → filename → 10 mA
+    ignorLines   = (3,),              # 1-based, drop these scanlist rows
+    fit_edge_offset = 8,
+)
+```
+
+The class is also exported as `SambaSOTAnalysis` for backwards compatibility
+with older measurement scripts.
+
+### Auto-detection (no config needed)
+
+| What | How |
+|------|-----|
+| `data_base_dir` | Inferred from scanlist location: `ScanLists_<X>` → `Data_Samba_<X>` (sibling folder). Multi-day scans handled by also trying `data_base_dir/<YYYYMMDD>/basename`. |
+| `x_ch` | First available of `actuator_x` → `x_actual` → `x_setpoint` |
+| Lock-in channels | Regex matches `ZI_x1`, `ZI2_x1`, and bare `x1` — all map to `zix1` |
+| Intensity channel | First available of `DC` → `FL` → `Mon` |
+| Sample name | HDF5 `/metadata/sample_id` → explicit arg → filename token |
+| Current | HDF5 `hw_keithley_amplitude_mA` → filename regex `(\d+(?:[.p]\d+)?)\s*mA` → 10 mA |
+| Direction | Filename markers `_trace` / `_retrace`; empty set = legacy single run |
+
+### Output layout
+
+```
+<analysis_base>/<sample_name>/
+  calibration.txt
+  <YYYYMMDD_HHMMSS>_<scanlist-stem>[_<direction>]/
+    intensity_<ch>.png
+    phase_search.png
+    sumdiff_<ch>.png  …  realimag_<ch>.png  …  negpos_<ch>.png
+    fit_<ch>.png
+    analyzed_data.csv
+    results.json
+```
+
+Default `analysis_base` is `Z:\projects\MOKE_lab\Scanning\Analysis_Scripts`.
+A timestamped subfolder per scan keeps re-runs separated. Override with
+`save_dir=` (parent) or `save_subdir=False` (write directly into `save_dir`).
+
+### Calibration file
+
+`calibration.txt` lives in the sample folder; 4 data lines:
+
+```
+0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV at µm ticks 0,5,10,15,20,25
+1.0                              # R1 (NM/M)
+1.0                              # R2 (M only, reference)
+0.0                              # theta — 1st-harmonic phase offset (deg)
+```
+
+When the file is missing, `read_calibration()` prompts interactively for each
+value and writes the file so subsequent runs skip the prompt. The slope from
+the 6 mV calibration points is converted to `sln = (1/slope) × π/180 × 1e6`
+(µrad/mV). Pass `use_calibration_file=False` to disable the prompt entirely
+and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
+
+### Per-channel data layout
+
+`linescan_calc_cryo()` returns a dict keyed by mapped channel name:
+
+```python
+{
+    'x'   : np.array,                   # position in µm
+    'zix1': [x, diff, sum, err, pos, neg, n_pos],
+    'ziy1': [...],
+    'FL'  : [...],                      # intensity/reflection
+    ...
+}
+```
+
+The 7-element list is the standard format: half-difference `(pos−neg)/2`,
+half-sum `(pos+neg)/2`, SEM-weighted error (quadrature of per-group SEMs),
+mean of positive- and negative-polarity scans, and N for the positive group.
+Polarity is `relay_sign × sign(field_T)` from columns 2–3 of the scanlist.
+
+### Phase optimisation
+
+`find_phase()` uses `scipy.optimize.minimize_scalar` with bounds `[-90°, 90°]`
+to avoid the 180° degeneracy that an unbounded optimiser hits. Run per
+polarity and averaged. Saved as `phase_search.png` when `do_plot=True`.
+
+### Pipeline (`evaluate_data` modes)
+
+- `sumdiff` / `sumdiff2nd` — half-sum vs. half-difference plot
+- `negpos` — separate pos/neg traces
+- `realimag` / `realimag2nd` — real and imaginary projections after phase
+- `comp_1st_2nd` — 1st vs. 2nd harmonic comparison
+- `thermoreflectance` — `(pos − neg) / mean(intensity)`
+- `findphase` — diagnostic only
+
+`eval_width_and_fit()` runs an `erf`-edge fit, computes device width, writes
+`analyzed_data.csv` (semicolon-separated, includes 2ω columns when present)
+and `results.json` (all metadata + fit parameters, numpy/bytes/Inf coerced
+to JSON-safe).
+
+### Key helper functions
+
+| Function | Purpose |
+|----------|---------|
+| `_infer_data_base_dir(scanlist)` | `ScanLists_<X>` → `Data_Samba_<X>` sibling |
+| `_resolve_path(path, base)` | literal → `base/file` → `base/<date>/file` |
+| `_detect_channels(h5_path)` | returns `{x_ch, intensity, lockin, all}` |
+| `_map_channel_name(name)` | normalises `ZI*`/bare `x1` → `zix1`, `DC`/`Mon` → `FL` |
+| `first_h5_in_scanlist(sl, base)` | first resolvable H5 file (for metadata peek) |
+| `read_h5_meta(h5_path)` | `/metadata` group attrs as plain dict |
+| `read_calibration(folder)` | parses or interactively creates `calibration.txt` |
+| `parse_current_from_name(s)` | regex `(\d+(?:[.p]\d+)?)\s*mA` |
+| `detect_directions(sl)` | returns `{'trace','retrace'}` ∩ filename markers |
+| `find_impurities_peaks(...)` | spline + peak detection, returns a mask |
+| `data_load(filename, ch)` | handles Cryo, Green/IR new-SAMBA, and old `scan_*` formats |
+
+### Constants
+
+```python
+DEFAULT_ANALYSIS_BASE     = r'Z:\projects\MOKE_lab\Scanning\Analysis_Scripts'
+_X_CH_CANDIDATES          = ('actuator_x', 'x_actual', 'x_setpoint')
+_INTENSITY_CH_CANDIDATES  = ('DC', 'FL', 'Mon')
+_LI_CH_RE                 = r'^(?:ZI\d*_*)?([xy][1-4])$'  # case-insensitive
+_SKIP_CH                  = {'actuator_x_setpoint', 'x_setpoint',
+                             'time', 'Field', 'Temperature'}
+_EXPECTED_X_UNITS         = {'µm', 'um', 'micrometer', ...}
+```
+
+### Known gotchas
+
+- `data_load` warns once per missing channel/file but returns `np.zeros(1)`
+  so the loop continues; check `Data keys loaded: [...]` for the actual set
+- `_detect_channels` only inspects the *first* HDF5; if files in the same
+  scanlist have different channel sets, only the first one's structure is
+  used for x-axis detection
+- The HDF5 x-axis unit is sanity-checked against `µm` and warns once if
+  different — wrong units will silently produce wrong fit widths
+- `data_calculation_cryo` skips files whose basename doesn't contain
+  `_trace`/`_retrace` when `direction` is set; legacy scans must use
+  `direction=None`
