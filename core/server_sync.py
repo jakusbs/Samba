@@ -1,15 +1,17 @@
 """
-server_sync.py — Non-blocking post-scan rsync to NAS.
+server_sync.py — Non-blocking post-scan file sync to NAS.
 
 Syncs three things for the active setup:
-  ~/Data_Samba_<Setup>/      → <server_sync_dir>/Data_Samba_<Setup>/
-  ~/ScanLists_<Setup>/       → <server_sync_dir>/ScanLists_<Setup>/
-  ~/moke_data/lab_notebook_<Setup>.csv  → <server_sync_dir>/
+  <local save_dir>/                     → <server_sync_dir>/Data_Samba_<Setup>/
+  <parent of save_dir>/ScanLists_<Setup>/ → <server_sync_dir>/ScanLists_<Setup>/
+  <notebook_dir>/lab_notebook_<Setup>.csv → <server_sync_dir>/
 
-All rsync calls run in a daemon thread so the UI is never blocked.
-If the NAS is not mounted the calls fail silently (logged at WARNING level).
+All copies run in a daemon thread so the UI is never blocked.
+If the server path is not reachable the calls fail silently (logged at WARNING).
 
-Usage in app code:
+Uses shutil.copy2 + pathlib — no rsync dependency, works with GVFS mounts.
+
+Usage:
     from server_sync import sync_setup
     sync_setup(setup_name, setup_dict, done_cb=lambda ok: ...)
 """
@@ -17,72 +19,71 @@ Usage in app code:
 import logging
 import os
 import shutil
-import subprocess
 import threading
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
-def _rsync(src: str, dst: str) -> bool:
-    """rsync -av --mkpath src dst.  Returns True on success."""
-    if not shutil.which("rsync"):
-        log.warning("server_sync: rsync not found — install rsync to enable sync")
-        return False
-    src = src.rstrip(os.sep)
-    if not os.path.exists(src):
+def _sync_dir(src: str, dst: str) -> bool:
+    """Recursively copy new/changed files from src into dst.
+
+    A file is considered changed when its size differs from the destination.
+    Skips files that are already identical to avoid unnecessary NAS writes.
+    Returns True on success (including when src doesn't exist yet).
+    """
+    src_p = Path(src)
+    if not src_p.exists():
         log.debug("server_sync: source missing, skipping: %s", src)
-        return True  # nothing to sync yet, not an error
+        return True
+    dst_p = Path(dst)
     try:
-        r = subprocess.run(
-            ["rsync", "-av", "--mkpath", src + os.sep, dst],
-            capture_output=True, text=True, timeout=180,
-        )
-        if r.returncode == 0:
-            log.info("server_sync OK: %s → %s", src, dst)
-            return True
-        log.warning("server_sync failed (code %d): %s", r.returncode,
-                    (r.stderr or r.stdout)[:300])
-        return False
-    except subprocess.TimeoutExpired:
-        log.warning("server_sync timed out: %s → %s", src, dst)
-        return False
+        dst_p.mkdir(parents=True, exist_ok=True)
+        copied = skipped = 0
+        for f in sorted(src_p.rglob("*")):
+            if not f.is_file():
+                continue
+            rel      = f.relative_to(src_p)
+            dst_file = dst_p / rel
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            if not dst_file.exists() or dst_file.stat().st_size != f.stat().st_size:
+                shutil.copy2(f, dst_file)
+                copied += 1
+            else:
+                skipped += 1
+        log.info("server_sync OK: %s → %s  (%d copied, %d skipped)",
+                 src, dst, copied, skipped)
+        return True
     except Exception as exc:
-        log.warning("server_sync error: %s", exc)
+        log.warning("server_sync error %s → %s: %s", src, dst, exc)
         return False
 
 
-def _rsync_file(src: str, dst_dir: str) -> bool:
-    """Sync a single file to a directory on the server."""
-    if not shutil.which("rsync"):
-        return False
-    src = os.path.expanduser(src)
-    if not os.path.isfile(src):
-        log.debug("server_sync: notebook missing, skipping: %s", src)
+def _sync_file(src: str, dst_dir: str) -> bool:
+    """Copy a single file to dst_dir if it is missing or has a different size."""
+    src_p = Path(src)
+    if not src_p.is_file():
+        log.debug("server_sync: file missing, skipping: %s", src)
         return True
     try:
-        r = subprocess.run(
-            ["rsync", "-av", "--mkpath", src, dst_dir],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode == 0:
-            log.info("server_sync notebook OK: %s → %s", src, dst_dir)
-            return True
-        log.warning("server_sync notebook failed (code %d): %s",
-                    r.returncode, (r.stderr or r.stdout)[:200])
-        return False
+        dst_p = Path(dst_dir)
+        dst_p.mkdir(parents=True, exist_ok=True)
+        dst_file = dst_p / src_p.name
+        if not dst_file.exists() or dst_file.stat().st_size != src_p.stat().st_size:
+            shutil.copy2(src_p, dst_file)
+            log.info("server_sync file OK: %s → %s", src, dst_dir)
+        return True
     except Exception as exc:
-        log.warning("server_sync notebook error: %s", exc)
+        log.warning("server_sync file error %s → %s: %s", src, dst_dir, exc)
         return False
 
 
-def sync_setup(setup_name: str, setup: dict,
-               done_cb=None) -> None:
+def sync_setup(setup_name: str, setup: dict, done_cb=None) -> None:
     """Start a background sync for *setup_name*.
 
-    Syncs data dir, ScanLists dir, and lab notebook CSV.
+    Syncs data dir, ScanLists dir, and lab notebook CSV to server_sync_dir.
     done_cb(ok: bool) is called from the background thread when finished;
-    wrap it with QTimer.singleShot(0, ...) on the Qt side if you need to
-    update the GUI from it.
+    use QTimer.singleShot(0, ...) on the Qt side to marshal back to the GUI.
 
     Does nothing if server_sync_dir is empty or not set.
     """
@@ -95,16 +96,16 @@ def sync_setup(setup_name: str, setup: dict,
     parent       = os.path.dirname(save_dir.rstrip(os.sep))
     sl_dir       = os.path.join(parent, f"ScanLists_{setup_name}")
 
-    data_dst     = f"{server_root}/Data_Samba_{setup_name}/"
-    sl_dst       = f"{server_root}/ScanLists_{setup_name}/"
-    nb_src       = os.path.join(notebook_dir, f"lab_notebook_{setup_name}.csv")
-    nb_dst       = f"{server_root}/"
+    data_dst = f"{server_root}/Data_Samba_{setup_name}"
+    sl_dst   = f"{server_root}/ScanLists_{setup_name}"
+    nb_src   = os.path.join(notebook_dir, f"lab_notebook_{setup_name}.csv")
 
     def _run():
-        log.info("server_sync: starting sync for %s", setup_name)
-        ok  = _rsync(save_dir, data_dst)
-        ok &= _rsync(sl_dir,   sl_dst)
-        ok &= _rsync_file(nb_src, nb_dst)
+        log.info("server_sync: starting sync for %s  root=%s", setup_name, server_root)
+        ok  = _sync_dir(save_dir, data_dst)
+        ok &= _sync_dir(sl_dir,   sl_dst)
+        ok &= _sync_file(nb_src,  server_root)
+        log.info("server_sync: finished for %s  ok=%s", setup_name, ok)
         if done_cb:
             done_cb(ok)
 
