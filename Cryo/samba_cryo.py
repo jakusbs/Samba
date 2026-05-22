@@ -1001,7 +1001,7 @@ class CryoMainWindow(QMainWindow):
             self._start_scan()
 
     def _unified_abort(self):
-        if self._sl_worker:
+        if self._sl_worker and self._sl_worker.isRunning():
             self._abort_scanlist()
         else:
             self._abort_scan()
