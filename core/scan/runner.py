@@ -392,6 +392,12 @@ class ScanRunner:
         else:
             lg("── No triggered devices — using timed integration (sleep) ──")
 
+        # Consecutive trigger failure counters — persist across points so that
+        # a device is permanently removed only after AUTO_PAUSE_THRESHOLD
+        # failures in a row.  Transient errors (device restart) recover after
+        # the device comes back online; the proxy is refreshed on first failure.
+        self._trigger_consec_fails: Dict[str, int] = {dp: 0 for dp in trigger_devs}
+
         # States that mean "still integrating"
         _RUNNING = {tango.DevState.RUNNING} if TANGO_AVAILABLE else set()
         _RUNNING.add("RUNNING")   # SimProxy returns a string
@@ -614,36 +620,78 @@ class ScanRunner:
                     if trigger_devs:
                         # Try async dispatch (all Start commands in ~100 µs)
                         use_async = True
-                        for dev_path, tcmd in trigger_devs.items():
+                        for dev_path, tcmd in list(trigger_devs.items()):
                             try:
                                 devp[dev_path].command_inout_asynch(tcmd)
+                                self._trigger_consec_fails[dev_path] = 0
                             except AttributeError:
                                 # Device proxy doesn't support async — fall back
                                 use_async = False
                                 break
                             except Exception as e:
-                                lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
-                                trigger_failed.append(dev_path)
+                                fails = self._trigger_consec_fails.get(dev_path, 0) + 1
+                                self._trigger_consec_fails[dev_path] = fails
+                                lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
+                                   f"{type(e).__name__}")
+                                # Refresh the proxy — recovers when a device restarts
+                                _new_fp, _fp_err = fresh_proxy(dev_path)
+                                if not _fp_err:
+                                    devp[dev_path] = _new_fp
+                                    if hasattr(_new_fp, 'set_timeout_millis'):
+                                        try: _new_fp.set_timeout_millis(_zi_timeout_ms)
+                                        except Exception: pass
+                                    try:
+                                        devp[dev_path].command_inout_asynch(tcmd)
+                                        self._trigger_consec_fails[dev_path] = 0
+                                        lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
+                                    except Exception as e2:
+                                        lg(f"  ✗ {dev_path}: still failing after refresh: "
+                                           f"{type(e2).__name__}")
+                                        if fails >= AUTO_PAUSE_THRESHOLD:
+                                            trigger_failed.append(dev_path)
+                                elif fails >= AUTO_PAUSE_THRESHOLD:
+                                    trigger_failed.append(dev_path)
                         t_trigger = time.time() - t0
 
                         if not use_async:
                             # Fallback: synchronous tight loop
-                            for dev_path, tcmd in trigger_devs.items():
+                            for dev_path, tcmd in list(trigger_devs.items()):
                                 if dev_path in trigger_failed:
                                     continue
                                 try:
                                     devp[dev_path].command_inout(tcmd)
+                                    self._trigger_consec_fails[dev_path] = 0
                                 except Exception as e:
-                                    lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
-                                    trigger_failed.append(dev_path)
+                                    fails = self._trigger_consec_fails.get(dev_path, 0) + 1
+                                    self._trigger_consec_fails[dev_path] = fails
+                                    lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
+                                       f"{type(e).__name__}")
+                                    _new_fp, _fp_err = fresh_proxy(dev_path)
+                                    if not _fp_err:
+                                        devp[dev_path] = _new_fp
+                                        if hasattr(_new_fp, 'set_timeout_millis'):
+                                            try: _new_fp.set_timeout_millis(_zi_timeout_ms)
+                                            except Exception: pass
+                                        try:
+                                            devp[dev_path].command_inout(tcmd)
+                                            self._trigger_consec_fails[dev_path] = 0
+                                            lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
+                                        except Exception as e2:
+                                            lg(f"  ✗ {dev_path}: still failing after refresh: "
+                                               f"{type(e2).__name__}")
+                                            if fails >= AUTO_PAUSE_THRESHOLD:
+                                                trigger_failed.append(dev_path)
+                                    elif fails >= AUTO_PAUSE_THRESHOLD:
+                                        trigger_failed.append(dev_path)
                             t_trigger = time.time() - t0
                         # No command_inout_reply() — we poll state() below instead
                     else:
                         t_trigger = time.time() - t0
 
-                    # Only remove devices whose DISPATCH failed
+                    # Permanently remove only after repeated consecutive failures
                     for dp in trigger_failed:
-                        lg(f"  → Removing {dp} from triggered devices")
+                        lg(f"  → Permanently removing {dp} from triggered devices "
+                           f"after {AUTO_PAUSE_THRESHOLD} consecutive failures")
                         trigger_devs.pop(dp, None)
 
                     # ── 2. Wait for ALL triggered devices to finish integration ──
@@ -1177,33 +1225,75 @@ class ScanRunner:
         are permanently removed so they don't block future points.
         Returns (vals_dict, t_elapsed_s).
         """
+        _zi_timeout_ms = max(15_000, int((int_time + 7.5) * 1000))
         trigger_failed = []
         if trigger_devs:
             use_async = True
-            for dev_path, tcmd in trigger_devs.items():
+            for dev_path, tcmd in list(trigger_devs.items()):
                 try:
                     devp[dev_path].command_inout_asynch(tcmd)
+                    self._trigger_consec_fails[dev_path] = 0
                 except AttributeError:
                     use_async = False; break
                 except Exception as e:
-                    lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
-                    trigger_failed.append(dev_path)
+                    fails = self._trigger_consec_fails.get(dev_path, 0) + 1
+                    self._trigger_consec_fails[dev_path] = fails
+                    lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
+                       f"{type(e).__name__}")
+                    _new_fp, _fp_err = fresh_proxy(dev_path)
+                    if not _fp_err:
+                        devp[dev_path] = _new_fp
+                        if hasattr(_new_fp, 'set_timeout_millis'):
+                            try: _new_fp.set_timeout_millis(_zi_timeout_ms)
+                            except Exception: pass
+                        try:
+                            devp[dev_path].command_inout_asynch(tcmd)
+                            self._trigger_consec_fails[dev_path] = 0
+                            lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
+                        except Exception as e2:
+                            lg(f"  ✗ {dev_path}: still failing after refresh: "
+                               f"{type(e2).__name__}")
+                            if fails >= AUTO_PAUSE_THRESHOLD:
+                                trigger_failed.append(dev_path)
+                    elif fails >= AUTO_PAUSE_THRESHOLD:
+                        trigger_failed.append(dev_path)
             t_trigger = time.time() - t0
 
             if not use_async:
-                for dev_path, tcmd in trigger_devs.items():
+                for dev_path, tcmd in list(trigger_devs.items()):
                     if dev_path in trigger_failed: continue
                     try:
                         devp[dev_path].command_inout(tcmd)
+                        self._trigger_consec_fails[dev_path] = 0
                     except Exception as e:
-                        lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
-                        trigger_failed.append(dev_path)
+                        fails = self._trigger_consec_fails.get(dev_path, 0) + 1
+                        self._trigger_consec_fails[dev_path] = fails
+                        lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
+                           f"{type(e).__name__}")
+                        _new_fp, _fp_err = fresh_proxy(dev_path)
+                        if not _fp_err:
+                            devp[dev_path] = _new_fp
+                            if hasattr(_new_fp, 'set_timeout_millis'):
+                                try: _new_fp.set_timeout_millis(_zi_timeout_ms)
+                                except Exception: pass
+                            try:
+                                devp[dev_path].command_inout(tcmd)
+                                self._trigger_consec_fails[dev_path] = 0
+                                lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
+                            except Exception as e2:
+                                lg(f"  ✗ {dev_path}: still failing after refresh: "
+                                   f"{type(e2).__name__}")
+                                if fails >= AUTO_PAUSE_THRESHOLD:
+                                    trigger_failed.append(dev_path)
+                        elif fails >= AUTO_PAUSE_THRESHOLD:
+                            trigger_failed.append(dev_path)
                 t_trigger = time.time() - t0
         else:
             t_trigger = time.time() - t0
 
         for dp in trigger_failed:
-            lg(f"  → Removing {dp} from triggered devices")
+            lg(f"  → Permanently removing {dp} from triggered devices "
+               f"after {AUTO_PAUSE_THRESHOLD} consecutive failures")
             trigger_devs.pop(dp, None)
 
         if trigger_devs:
