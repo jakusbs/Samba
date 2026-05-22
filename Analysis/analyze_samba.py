@@ -644,20 +644,71 @@ def find_phase(x, x1_data, y1_data, edges, ch, do_plot=False, ax=None):
 # Channel name mapping
 # ---------------------------------------------------------------------------
 
-_SKIP_CH = {'actuator_x_setpoint', 'time', 'Field', 'Temperature'}
+_SKIP_CH = {'actuator_x_setpoint', 'x_setpoint', 'time', 'Field', 'Temperature'}
+
+# Priority-ordered candidates for auto-detecting the X-axis and intensity channels
+_X_CH_CANDIDATES         = ('actuator_x', 'x_actual', 'x_setpoint')
+_INTENSITY_CH_CANDIDATES = ('DC', 'FL', 'Mon')
+
+# Regex that matches any lock-in channel name (with or without ZI/ZI2 prefix)
+_LI_CH_RE = re.compile(r'^(?:ZI\d*_*)?([xy][1-4])$', re.IGNORECASE)
+
+
+def _detect_channels(h5_path):
+    """Inspect a SAMBA HDF5 file and return detected channel roles.
+
+    Returns::
+
+        {
+            'all'      : [list of dataset names in the file],
+            'x_ch'     : best x-axis channel name (or None),
+            'intensity': best DC/FL intensity channel name (or None),
+            'lockin'   : [lock-in channel names in file order],
+        }
+    """
+    out = {'all': [], 'x_ch': None, 'intensity': None, 'lockin': []}
+    if not h5_path or not os.path.exists(h5_path):
+        return out
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            grp = None
+            if 'data' in f and isinstance(f['data'], h5py.Group):
+                grp = f['data']
+            elif 'measurement' in f and isinstance(f['measurement'], h5py.Group):
+                grp = f['measurement']
+            if grp is None:
+                return out
+            names = [n for n in grp if isinstance(grp[n], h5py.Dataset)]
+    except Exception:
+        return out
+
+    out['all'] = names
+    for c in _X_CH_CANDIDATES:
+        if c in names:
+            out['x_ch'] = c
+            break
+    for c in _INTENSITY_CH_CANDIDATES:
+        if c in names:
+            out['intensity'] = c
+            break
+    out['lockin'] = [n for n in names if _LI_CH_RE.match(n)]
+    return out
 
 
 def _map_channel_name(ch_name):
-    """Map a SAMBA Cryo channel name to an analysis-dict key.
+    """Map a SAMBA channel name to an analysis-dict key.
 
-    ``ZI_x1`` → ``zix1``,  ``ZI__y2`` → ``ziy2``  (handles double-underscore)
-    ``DC`` / ``Mon`` → ``FL``
+    Handles three lock-in naming conventions:
+      - ``ZI_x1`` / ``ZI__y2``   (Cryo, double-underscore)  → ``zix1`` / ``ziy2``
+      - ``ZI2_x1``                (Green/IR with device prefix) → ``zix1``
+      - bare ``x1`` / ``y2``     (Green/IR new SAMBA, no prefix) → ``zix1`` / ``ziy2``
+    Also: ``DC`` / ``Mon`` / ``FL`` → ``FL``
     """
-    if ch_name.upper().startswith('ZI'):
-        suffix = ch_name[2:].lstrip('_')   # strip all leading underscores
-        return 'zi' + suffix.lower()        # 'zix1', 'ziy1', 'zix2', 'ziy2', …
+    m = _LI_CH_RE.match(ch_name.strip())
+    if m:
+        return 'zi' + m.group(1).lower()   # always zix1, ziy1, zix2, ziy2
 
-    lower = ch_name.lower()
+    lower = ch_name.strip().lower()
     if lower in ('dc', 'fl', 'mon'):
         return 'FL'
     if lower in ('field', 'temperature', 'time'):
@@ -832,7 +883,7 @@ def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
 
     my_dict   = {}
     x_loaded  = False
-    skip      = _SKIP_CH | {x_ch, 'actuator_x_setpoint'}
+    skip      = _SKIP_CH | set(_X_CH_CANDIDATES) | {x_ch}
 
     for ch_name in res_ch:
         if ch_name in skip or 'actuator' in ch_name.lower():
@@ -919,7 +970,7 @@ class analyze_cryo:
         res = analyze_cryo.import_analyze_SOT(
             'path/to/scanlist.txt',
             current_mA=12.5,
-            see_channels=('DC', 'ZI_x1'),
+            see_channels=None,   # auto-detect from HDF5
         )
 
         # Trace + retrace separately (piezo hysteresis)
@@ -941,7 +992,6 @@ class analyze_cryo:
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
         self.data_base_dir = data_base_dir
-        self.x_ch          = x_ch
         self.x_unit        = x_unit
         self.signal_unit   = signal_unit
         self._reflec_key   = reflec_key
@@ -949,8 +999,19 @@ class analyze_cryo:
         name  = os.path.splitext(os.path.basename(scanlist_path))[0]
         parts = name.split('_')
 
+        # ── auto-detect channel names from first HDF5 in scanlist ────────
+        first_h5           = first_h5_in_scanlist(scanlist_path, data_base_dir)
+        detected           = _detect_channels(first_h5) if first_h5 else \
+                             {'all': [], 'x_ch': None, 'intensity': None, 'lockin': []}
+        self._detected     = detected
+
+        if x_ch == 'actuator_x' and detected['x_ch'] and detected['x_ch'] != 'actuator_x':
+            print(f'  X-axis channel: auto-detected "{detected["x_ch"]}" '
+                  f'(default "actuator_x" not present)')
+            x_ch = detected['x_ch']
+        self.x_ch = x_ch
+
         # ── sample-id : metadata > explicit > filename token ──────────────
-        first_h5 = first_h5_in_scanlist(scanlist_path, data_base_dir)
         h5_meta  = read_h5_meta(first_h5) if first_h5 else {}
         if sample_name is None:
             sample_name = (h5_meta.get('sample_id', '').strip()
@@ -1736,14 +1797,30 @@ class analyze_cryo:
     # ── pipeline entry points ─────────────────────────────────────────────
 
     @staticmethod
-    def import_analyze_SOT(scanlist_path, see_channels=('DC', 'ZI_x1'),
+    def _resolve_see_channels(see_channels, detected):
+        """Return the effective see_channels list, auto-detecting when None."""
+        if see_channels is not None:
+            return see_channels
+        candidates = []
+        if detected.get('intensity'):
+            candidates.append(detected['intensity'])
+        if detected.get('lockin'):
+            x1s = [c for c in detected['lockin'] if c.lower().endswith('x1')]
+            candidates.append(x1s[0] if x1s else detected['lockin'][0])
+        print(f'  see_channels auto-detected: {tuple(candidates)}')
+        return tuple(candidates)
+
+    @staticmethod
+    def import_analyze_SOT(scanlist_path, see_channels=None,
                             direction=None, ignorLines=(), fit_edge_offset=5,
                             force_theta_0=False, **kwargs):
         """Full SOT analysis pipeline for a single scan direction.
 
         Equivalent to ``analyze_SHE_OHE.import_analyze_SOT`` from Jakub_methods.py.
+        Pass ``see_channels=None`` (default) to auto-detect from the HDF5 file.
         """
         res = analyze_cryo(scanlist_path, direction=direction, **kwargs)
+        see_channels = analyze_cryo._resolve_see_channels(see_channels, res._detected)
         res.import_data(ignorLines=ignorLines)
 
         for ch in see_channels:
@@ -1760,7 +1837,7 @@ class analyze_cryo:
         return res
 
     @staticmethod
-    def import_analyze_both(scanlist_path, see_channels=('DC', 'ZI_x1'),
+    def import_analyze_both(scanlist_path, see_channels=None,
                              ignorLines=(), fit_edge_offset=5, **kwargs):
         """Run the full pipeline for each direction available in the scanlist.
 
@@ -1768,6 +1845,9 @@ class analyze_cryo:
         when that direction isn't in the scanlist.  For Green/IR scanlists
         with no trace/retrace markers, runs once with ``direction=None``
         and returns ``(res, None)``.
+
+        Pass ``see_channels=None`` (default) to auto-detect intensity/lock-in
+        channels from the HDF5 file.
         """
         data_base_dir = kwargs.get('data_base_dir')
         dirs = detect_directions(scanlist_path, data_base_dir=data_base_dir)
