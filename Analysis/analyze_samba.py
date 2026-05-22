@@ -206,12 +206,9 @@ def first_h5_in_scanlist(scanlist_path, data_base_dir=None):
                 if not line or line.startswith('#'):
                     continue
                 localfile = line.split('\t')[0].strip()
-                if os.path.exists(localfile):
-                    return localfile
-                if data_base_dir:
-                    alt = os.path.join(data_base_dir, os.path.basename(localfile))
-                    if os.path.exists(alt):
-                        return alt
+                resolved = _resolve_path(localfile, data_base_dir)
+                if resolved:
+                    return resolved
     except Exception as e:
         warnings.warn(f'first_h5_in_scanlist: {e}')
     return None
@@ -516,12 +513,7 @@ def get_channels(scanlist_or_h5, logfilepath='', data_base_dir=''):
                 if line.startswith('#') or not line.strip():
                     continue
                 localfile = line.split('\t')[0].strip()
-                if os.path.exists(localfile):
-                    filename = localfile
-                elif data_base_dir:
-                    alt = os.path.join(data_base_dir, os.path.basename(localfile))
-                    if os.path.exists(alt):
-                        filename = alt
+                filename = _resolve_path(localfile, data_base_dir or None)
                 if filename:
                     break
         if not filename:
