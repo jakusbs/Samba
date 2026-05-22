@@ -1272,3 +1272,80 @@ _EXPECTED_X_UNITS         = {'µm', 'um', 'micrometer', ...}
 - `data_calculation_cryo` skips files whose basename doesn't contain
   `_trace`/`_retrace` when `direction` is set; legacy scans must use
   `direction=None`
+
+---
+
+## 22. NAS Server Sync (May 2026)
+
+### Overview
+
+Both Samba_main and Cryo auto-upload data to the ETH NAS after every scan
+and support a manual "↑ Sync" button. The NAS is accessed via the GVFS SMB
+mount that GNOME Files creates automatically when the user browses to the share.
+
+**File:** `core/server_sync.py` (shared by both apps via `Samba_main/server_sync.py` re-export)
+
+### UI
+
+A slim **"Server:" bar** sits directly below the action bar in both apps:
+
+```
+Server: [/run/user/1001/gvfs/smb-share:server=nas22.ethz.ch,...]  […]  [↑ Sync]
+```
+
+- The path field is editable; the `…` button opens a file dialog starting at
+  `/run/user/<uid>/gvfs/` (the GVFS mount root)
+- `↑ Sync` triggers an immediate manual sync in a background thread
+- Auto-sync fires automatically after every scan (single scan and scanlist)
+- Status label shows `Server sync complete` / `Server sync partial (see log)`
+
+### Config key
+
+`server_sync_dir` — stored per-setup in `~/.config/moke_scan/<Setup>.json`.
+Set it once; it persists across restarts. Default is `""` (disabled).
+
+### What gets synced
+
+For setup name `Cryo` with `server_sync_dir = /run/user/1001/gvfs/smb-share:.../Data`:
+
+| Local | Server |
+|-------|--------|
+| `~/moke_data/Data_Samba_Cryo/` | `<server>/Data_Samba_Cryo/` |
+| `~/moke_data/ScanLists_Cryo/` | `<server>/ScanLists_Cryo/` |
+| `~/moke_data/lab_notebook_Cryo.csv` | `<server>/lab_notebook_Cryo.csv` |
+
+Lab notebooks are always overwritten with the local version (local is the
+source of truth). Since notebooks only grow, the size check always detects
+the change and uploads the updated file.
+
+### Implementation notes
+
+**`sync_setup(setup_name, setup, done_cb=None)`** — public entry point.
+Reads `server_sync_dir`, `save_dir`, and `notebook_dir` from the setup dict,
+derives the ScanLists path from the parent of `save_dir`, then starts a
+daemon thread.
+
+**Subprocess isolation** — all file I/O runs inside a child process
+(`subprocess.run([sys.executable, '-c', ...], timeout=60)`). This is
+necessary because GVFS/FUSE SMB mounts can block a thread indefinitely
+inside a kernel syscall (e.g. `utime`) when the SMB connection times out.
+Running in a subprocess allows `subprocess.run` to kill the child with
+SIGKILL if it stalls, so `done_cb` is always called within 60 seconds.
+
+**`shutil.copyfile`** (not `copy2`) is used because SMB mounts reject the
+`utime` call that `copy2` makes after copying. `copyfile` transfers only
+the raw bytes, which is sufficient for a backup.
+
+**Skip condition** — a file is skipped if it already exists on the server
+with the same byte count. This avoids re-uploading identical HDF5 files on
+every sync.
+
+### First-time setup on lab machine
+
+1. Open Files (Nautilus) → connect to `smb://nas22.ethz.ch/matl_ips_intermag_s1`
+   and navigate to `projects/MOKE_lab/Scanning/Data/` — this creates the
+   GVFS mount under `/run/user/<uid>/gvfs/`
+2. In Samba, click `…` next to the Server field and navigate to that path
+3. The full path looks like:
+   `/run/user/1001/gvfs/smb-share:server=nas22.ethz.ch,share=matl_ips_intermag_s1/projects/MOKE_lab/Scanning/Data`
+4. Set once per setup; the value is saved to the setup JSON automatically

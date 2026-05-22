@@ -156,7 +156,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data/Data_Samba_Green",
         "notebook_dir":        "~/moke_data",
-        "server_sync_dir":     "/mnt/nas/projects/MOKE_lab/Scanning/Data",
+        "server_sync_dir":     "",
     },
     "IR": {
         "magnet_device":       "hpp-N42/beckhoff/magnet",
@@ -172,7 +172,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
         "save_dir":            "~/moke_data/Data_Samba_IR",
         "notebook_dir":        "~/moke_data",
-        "server_sync_dir":     "/mnt/nas/projects/MOKE_lab/Scanning/Data",
+        "server_sync_dir":     "",
     },
     "Cryo": {
         "magnet_device":       "",
@@ -254,7 +254,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "attodry_cmd_persist":         "togglePersistentMode",
         "save_dir":            "~/moke_data/Data_Samba_Cryo",
         "notebook_dir":        "~/moke_data",
-        "server_sync_dir":     "/mnt/nas/projects/MOKE_lab/Scanning/Data",
+        "server_sync_dir":     "",
     },
 }
 
