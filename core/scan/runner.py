@@ -48,6 +48,15 @@ except ImportError:
 from config import MAX_RETRIES, RETRY_DELAY, X_TIME
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, demagnetize_magnet
 
+# h5py on Python 3.13 raises TypeError when writing plain Python strings as
+# variable-length UTF-8 attrs.  Use explicit string_dtype throughout.
+import h5py as _h5py
+_H5STR = _h5py.string_dtype()
+
+def _wsa(target, key, val):
+    """Write a string HDF5 attribute, compatible with all h5py/Python versions."""
+    target.attrs.create(key, data=str(val), dtype=_H5STR)
+
 
 def _make_filename(cfg: dict) -> str:
     """Return HDF5 filename: HHMMSS_SCANTYPE_SampleID_ConfigName.h5
@@ -87,11 +96,13 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
     for k in _HW_KEYS:
         v = cfg.get(k)
         if v is not None:
-            try:
-                meta.attrs[k] = v
-            except Exception:
-                meta.attrs[k] = str(v)
-    # Temperature sweep keys (Cryo) — stored with clean names (no leading _)
+            if isinstance(v, str):
+                _wsa(meta, k, v)
+            else:
+                try:
+                    meta.attrs[k] = v
+                except Exception:
+                    _wsa(meta, k, str(v))
     _TEMP_KEYS = {
         "_is_temp_sweep":      "is_temp_sweep",
         "_temp_sweep_start_K": "temp_sweep_start_K",
@@ -101,10 +112,13 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
     for src, dst in _TEMP_KEYS.items():
         v = cfg.get(src)
         if v is not None and v != "":
-            try:
-                meta.attrs[dst] = v
-            except Exception:
-                meta.attrs[dst] = str(v)
+            if isinstance(v, str):
+                _wsa(meta, dst, v)
+            else:
+                try:
+                    meta.attrs[dst] = v
+                except Exception:
+                    _wsa(meta, dst, str(v))
 
 
 # How often to flush to disk for 1D scans (every N points)
@@ -403,7 +417,145 @@ class ScanRunner:
                 lg(f"── RTV40 sync: base={rtv40_base_ns:.3f} ns  "
                    f"ref={rtv40_ref_s * 1e9:.3f} ns ──")
 
+        pt_retrace = cbs.get('point_retrace', lambda *a: None)
+        self._retrace_filename = None   # set below if interleaved mode runs
+
         try:
+          if cfg.get("_interleaved_2d") and hdf_scan == "SPATIAL_XY":
+            # ── Interleaved 2D: per-row (or per-column) trace + retrace ─────
+            interleave_axis = cfg.get("_interleave_axis", "x")
+            retrace_cfg      = copy.deepcopy(cfg)
+            retrace_cfg["name"] = cfg.get("_retrace_name",
+                                          cfg["name"] + "_retrace")
+            retrace_filename = os.path.join(day_dir, _make_filename(retrace_cfg))
+            hfile2 = self._open_hdf5(retrace_filename, x_plan, y_plan, active,
+                                     x_lbl, x_unit, hdf_scan, retrace_cfg)
+            if hfile2 is None:
+                err2 = getattr(self, '_hdf5_error', 'unknown')
+                st(f"⚠ Could not create retrace file: {err2}")
+                hfile2 = None
+            else:
+                self._retrace_filename = retrace_filename
+
+            count_r   = 0
+            total_all = total * 2   # trace + retrace combined progress
+            move_t    = cfg["move_timeout"]
+            settle    = cfg["settle_time"]
+
+            try:
+              if interleave_axis == "x":
+                # Outer loop = Y (slow axis), inner = X+ (trace) then X- (retrace)
+                retrace_x = x_plan[::-1]
+                for iy, y_pos in enumerate(y_plan):
+                    if self._abort: break
+                    st(f"Moving {cfg['act2_label']} → {y_pos:.4g}")
+                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+
+                    # ── Trace sweep (x+) ─────────────────────────────────────
+                    for ix, x_pos in enumerate(x_plan):
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
+                        for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
+                        self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count += 1
+                        pt(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[trace {count}/{total}]  x={x_read:.4g}{x_unit}")
+
+                    # ── Retrace sweep (x-) ───────────────────────────────────
+                    for j, x_pos in enumerate(retrace_x):
+                        ix = n_x - 1 - j   # spatial index same as trace
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        if hfile2 is not None:
+                            self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count_r += 1
+                        pt_retrace(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[retrace {count_r}/{total}]  x={x_read:.4g}{x_unit}")
+
+                    try: hfile.flush()
+                    except Exception: pass
+                    if hfile2 is not None:
+                        try: hfile2.flush()
+                        except Exception: pass
+
+              else:
+                # interleave_axis == "y"
+                # Outer loop = X (slow axis), inner = Y+ (trace) then Y- (retrace)
+                retrace_y = y_plan[::-1]
+                for ix, x_pos in enumerate(x_plan):
+                    if self._abort: break
+                    x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                    if settle > 0: time.sleep(settle)
+                    st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
+
+                    # ── Trace sweep (y+) ─────────────────────────────────────
+                    for iy, y_pos in enumerate(y_plan):
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
+                        for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
+                        self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count += 1
+                        pt(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[trace {count}/{total}]  y={y_pos:.4g}")
+
+                    # ── Retrace sweep (y-) ───────────────────────────────────
+                    for j, y_pos in enumerate(retrace_y):
+                        iy = n_y - 1 - j   # spatial index same as trace
+                        if self._abort: break
+                        while self._paused:
+                            time.sleep(0.05)
+                            if self._abort: break
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        if settle > 0: time.sleep(settle)
+                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
+                        vals, t_elapsed = self._trigger_poll_read(
+                            devp, dev_sensors, trigger_devs, int_time,
+                            t0, _RUNNING, move_t, lg)
+                        if hfile2 is not None:
+                            self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
+                        count_r += 1
+                        pt_retrace(ix, iy, x_read, vals); pg(count + count_r, total_all)
+                        st(f"[retrace {count_r}/{total}]  y={y_pos:.4g}")
+
+                    try: hfile.flush()
+                    except Exception: pass
+                    if hfile2 is not None:
+                        try: hfile2.flush()
+                        except Exception: pass
+
+            finally:
+                if hfile2 is not None:
+                    self._finalize_hdf5(hfile2, count_r, total,
+                                        x_actual, t_actual, data, x_plan, y_plan,
+                                        active, x_lbl, x_unit, hdf_scan, retrace_cfg)
+
+          else:
             for iy, y_pos in enumerate(y_plan):
                 if self._abort: break
                 if hdf_scan == "SPATIAL_XY":
@@ -821,24 +973,24 @@ class ScanRunner:
             hfile = h5py.File(filename, "w")
 
             # Root: minimal status + type
-            hfile.attrs["scan_status"] = "running"
-            hfile.attrs["scan_type"]   = "DC_HYST"
-            hfile.attrs["timestamp"]   = datetime.now().isoformat()
+            _wsa(hfile, "scan_status", "running")
+            _wsa(hfile, "scan_type",   "DC_HYST")
+            _wsa(hfile, "timestamp",   datetime.now().isoformat())
 
             # /metadata/
             meta = hfile.create_group("metadata")
-            meta.attrs["scan_name"]        = cfg.get("name", "dc_hyst")
-            meta.attrs["hyst_device"]      = hyst_dev
+            _wsa(meta, "scan_name",   cfg.get("name", "dc_hyst"))
+            _wsa(meta, "hyst_device", hyst_dev)
             meta.attrs["MagneticField_V"]  = field_V
             meta.attrs["NumberOfPoints"]   = npts
             meta.attrs["Cycles"]           = cycles
             meta.attrs["IntegrationTime"]  = int_t
             meta.attrs["n_loop"]           = n_loop
-            meta.attrs["operator"]         = cfg.get("operator", "")
-            meta.attrs["sample_id"]        = cfg.get("sample_id", "")
-            meta.attrs["notes"]            = cfg.get("notes", "")
-            meta.attrs["incidence"]        = cfg.get("incidence", "")
-            meta.attrs["polarization"]     = cfg.get("polarization", "")
+            _wsa(meta, "operator",    cfg.get("operator", ""))
+            _wsa(meta, "sample_id",   cfg.get("sample_id", ""))
+            _wsa(meta, "notes",       cfg.get("notes", ""))
+            _wsa(meta, "incidence",   cfg.get("incidence", ""))
+            _wsa(meta, "polarization",cfg.get("polarization", ""))
             meta.attrs["lam2"]             = bool(cfg.get("lam2",  False))
             meta.attrs["lam4"]             = bool(cfg.get("lam4",  False))
             meta.attrs["noDC"]             = bool(cfg.get("noDC",  False))
@@ -855,16 +1007,16 @@ class ScanRunner:
             # /data/
             data_grp = hfile.create_group("data")
             d = data_grp.create_dataset("actuator_field", data=np.full(n_loop, np.nan))
-            d.attrs["label"] = "Field"; d.attrs["unit"] = "mT"; d.attrs["role"] = "x"
+            _wsa(d, "label", "Field"); _wsa(d, "unit", "mT"); _wsa(d, "role", "x")
 
             for c in active_ch:
                 key = self._hdf5_key(c["label"])
                 ds  = data_grp.create_dataset(key, data=np.full(n_loop, np.nan))
-                ds.attrs["label"]           = c["label"]
-                ds.attrs["unit"]            = c.get("unit", "V")
-                ds.attrs["tango_attribute"] = c["attr"]
-                ds.attrs["y_axis"]          = c.get("y_axis", "Y1")
-                ds.attrs["role"]            = "sensor"
+                _wsa(ds, "label",           c["label"])
+                _wsa(ds, "unit",            c.get("unit", "V"))
+                _wsa(ds, "tango_attribute", c["attr"])
+                _wsa(ds, "y_axis",          c.get("y_axis", "Y1"))
+                _wsa(ds, "role",            "sensor")
 
             hfile.flush()
         except Exception as e:
@@ -936,8 +1088,8 @@ class ScanRunner:
                 except Exception as e:
                     lg(f"⚠ Abort command failed: {e}")
                 st("DC Hyst aborted.")
-                hfile.attrs["scan_status"] = "aborted"
-                hfile.attrs["timestamp_end"] = datetime.now().isoformat()
+                _wsa(hfile, "scan_status",   "aborted")
+                _wsa(hfile, "timestamp_end", datetime.now().isoformat())
                 # result_fn stays None; finally block closes the file
 
             else:
@@ -984,8 +1136,8 @@ class ScanRunner:
                 # Scalar results → metadata attrs
                 for s, v in scalars.items():
                     hfile["metadata"].attrs[s] = v
-                hfile.attrs["scan_status"]      = "completed"
-                hfile.attrs["timestamp_end"]    = datetime.now().isoformat()
+                _wsa(hfile, "scan_status",   "completed")
+                _wsa(hfile, "timestamp_end", datetime.now().isoformat())
                 hfile.attrs["duration_seconds"] = elapsed
                 hfile["metadata"].attrs["duration_seconds"] = elapsed
                 hfile["metadata"].attrs["points_acquired"]  = n_actual
@@ -1005,7 +1157,7 @@ class ScanRunner:
         except Exception:
             lg(f"⚠ DC Hyst exception:\n{traceback.format_exc()}")
             try:
-                hfile.attrs["scan_status"] = "error"
+                _wsa(hfile, "scan_status", "error")
             except Exception:
                 pass
         finally:
@@ -1015,6 +1167,122 @@ class ScanRunner:
             except Exception as fe:
                 lg(f"⚠ HDF5 close failed: {fe}")
         return result_fn
+
+    # ── Shared trigger → poll → read sequence ────────────────────────────────
+    def _trigger_poll_read(self, devp, dev_sensors, trigger_devs,
+                           int_time, t0, _RUNNING, move_timeout, lg):
+        """Fire async triggers, wait for completion (Phase A + B), read sensors.
+
+        trigger_devs is modified in-place: devices whose trigger command fails
+        are permanently removed so they don't block future points.
+        Returns (vals_dict, t_elapsed_s).
+        """
+        trigger_failed = []
+        if trigger_devs:
+            use_async = True
+            for dev_path, tcmd in trigger_devs.items():
+                try:
+                    devp[dev_path].command_inout_asynch(tcmd)
+                except AttributeError:
+                    use_async = False; break
+                except Exception as e:
+                    lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
+                    trigger_failed.append(dev_path)
+            t_trigger = time.time() - t0
+
+            if not use_async:
+                for dev_path, tcmd in trigger_devs.items():
+                    if dev_path in trigger_failed: continue
+                    try:
+                        devp[dev_path].command_inout(tcmd)
+                    except Exception as e:
+                        lg(f"⚠ Trigger {dev_path}.{tcmd}: {e}")
+                        trigger_failed.append(dev_path)
+                t_trigger = time.time() - t0
+        else:
+            t_trigger = time.time() - t0
+
+        for dp in trigger_failed:
+            lg(f"  → Removing {dp} from triggered devices")
+            trigger_devs.pop(dp, None)
+
+        if trigger_devs:
+            triggered = set(trigger_devs.keys()) - set(trigger_failed)
+
+            # Phase A — wait for entry into RUNNING
+            not_yet_running = set(triggered)
+            t_start = time.time()
+            while not_yet_running and (time.time() - t_start
+                                       < TRIGGER_START_GUARD_MS / 1000.0):
+                if self._abort: break
+                confirmed = set()
+                for dp in not_yet_running:
+                    try:
+                        if devp[dp].state() in _RUNNING: confirmed.add(dp)
+                    except Exception: confirmed.add(dp)
+                not_yet_running -= confirmed
+                if not_yet_running: time.sleep(0.002)
+
+            # Phase B — wait for exit from RUNNING
+            remaining = set(triggered)
+            t_wait = time.time()
+            _fails = {dp: 0 for dp in remaining}
+            while remaining and (time.time() - t_wait < move_timeout):
+                if self._abort: break
+                done = set()
+                for dp in remaining:
+                    try:
+                        ds = devp[dp].state()
+                        _fails[dp] = 0
+                        if ds not in _RUNNING: done.add(dp)
+                    except Exception as e:
+                        _fails[dp] += 1
+                        if _fails[dp] >= 5:
+                            lg(f"⚠ State poll failed {_fails[dp]}× for {dp}: "
+                               f"{type(e).__name__} — giving up")
+                            done.add(dp)
+                        else:
+                            time.sleep(0.05)
+                remaining -= done
+                if remaining: time.sleep(0.01)
+            if remaining:
+                lg(f"⚠ Timeout waiting for: " + ", ".join(remaining))
+        else:
+            time.sleep(int_time)
+
+        time.sleep(READOUT_GUARD_MS / 1000.0)
+
+        # Batch read per device
+        vals: Dict[str, float] = {}
+        for dev_path, sensors_on_dev in dev_sensors.items():
+            unique_attrs = list(dict.fromkeys(s["attribute"] for s in sensors_on_dev))
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    if len(unique_attrs) == 1:
+                        av  = devp[dev_path].read_attribute(unique_attrs[0])
+                        raw = av.value
+                        attr_to_val = {unique_attrs[0]:
+                            float(raw[0]) if hasattr(raw, "__len__") else float(raw)}
+                    else:
+                        attr_vals = devp[dev_path].read_attributes(unique_attrs)
+                        attr_to_val = {}
+                        for av, attr in zip(attr_vals, unique_attrs):
+                            raw = av.value
+                            attr_to_val[attr] = (
+                                float(raw[0]) if hasattr(raw, "__len__") else float(raw))
+                    for s in sensors_on_dev:
+                        vals[s["label"]] = attr_to_val[s["attribute"]]
+                    break
+                except Exception as e:
+                    if attempt == MAX_RETRIES:
+                        lg(f"⚠ Read {dev_path} {unique_attrs}: {e}")
+                        for s in sensors_on_dev: vals[s["label"]] = np.nan
+                    else:
+                        time.sleep(RETRY_DELAY)
+
+        t_elapsed = t_trigger + int_time / 2.0
+        vals[X_TIME] = t_elapsed
+        return vals, t_elapsed
 
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,
@@ -1098,13 +1366,13 @@ class ScanRunner:
             f = h5py.File(fn, "w")
 
             # ── Root: minimal status / timing attrs ───────────────────────────
-            f.attrs["scan_status"] = "running"
-            f.attrs["scan_type"]   = hdf_scan
-            f.attrs["timestamp"]   = datetime.now().isoformat()
+            _wsa(f, "scan_status", "running")
+            _wsa(f, "scan_type",   hdf_scan)
+            _wsa(f, "timestamp",   datetime.now().isoformat())
 
             # ── /metadata/ ────────────────────────────────────────────────────
             meta = f.create_group("metadata")
-            meta.attrs["scan_name"]        = cfg["name"]
+            _wsa(meta, "scan_name",   cfg["name"])
             meta.attrs["n_x"]              = n_x
             meta.attrs["n_y"]              = n_y
             meta.attrs["points_planned"]   = n_x * n_y
@@ -1112,11 +1380,11 @@ class ScanRunner:
             meta.attrs["integration_time"] = cfg["integration_time"]
             meta.attrs["settle_time"]      = cfg["settle_time"]
             meta.attrs["move_timeout"]     = float(cfg.get("move_timeout", 15.0))
-            meta.attrs["operator"]         = cfg.get("operator", "")
-            meta.attrs["sample_id"]        = cfg.get("sample_id", "")
-            meta.attrs["notes"]            = cfg.get("notes", "")
-            meta.attrs["incidence"]        = cfg.get("incidence", "")
-            meta.attrs["polarization"]     = cfg.get("polarization", "")
+            _wsa(meta, "operator",    cfg.get("operator", ""))
+            _wsa(meta, "sample_id",   cfg.get("sample_id", ""))
+            _wsa(meta, "notes",       cfg.get("notes", ""))
+            _wsa(meta, "incidence",   cfg.get("incidence", ""))
+            _wsa(meta, "polarization",cfg.get("polarization", ""))
             meta.attrs["lam2"]             = bool(cfg.get("lam2",  False))
             meta.attrs["lam4"]             = bool(cfg.get("lam4",  False))
             meta.attrs["noDC"]             = bool(cfg.get("noDC",  False))
@@ -1126,26 +1394,22 @@ class ScanRunner:
                 segs = cfg.get("field_segments",
                                [[cfg.get("field_start_A",-1.0),
                                  cfg.get("field_stop_A",  1.0), n_x]])
-                meta.attrs["field_segments_json"] = _json.dumps(segs)
-                meta.attrs["field_device"]        = cfg.get("field_device", "")
-                meta.attrs["field_current_attr"]  = cfg.get("field_current_attr", "")
+                _wsa(meta, "field_segments_json", _json.dumps(segs))
+                _wsa(meta, "field_device",       cfg.get("field_device", ""))
+                _wsa(meta, "field_current_attr", cfg.get("field_current_attr", ""))
             elif not is_time:
                 if hdf_scan == "SPATIAL_Y":
-                    # Y-only scan: the moving axis is act2; store under act2_* keys
-                    # so downstream analysis always finds the right device/attr/label.
                     for k in ("device", "attr", "label", "unit"):
-                        meta.attrs[f"act2_{k}"] = cfg.get(f"act2_{k}", "")
-                    meta.attrs["axis_moving"] = "act2"
+                        _wsa(meta, f"act2_{k}", cfg.get(f"act2_{k}", ""))
+                    _wsa(meta, "axis_moving", "act2")
                 else:
-                    # SPATIAL_X or SPATIAL_XY
                     for pfx in (["act1"] + (["act2"] if is_2d else [])):
                         for k in ("device", "attr", "label", "unit"):
-                            meta.attrs[f"{pfx}_{k}"] = cfg.get(f"{pfx}_{k}", "")
-                    meta.attrs["axis_moving"] = "act1" if not is_2d else "both"
-            # Full sensor config for offline reconstruction
-            meta.attrs["sensors_json"] = _json.dumps(
+                            _wsa(meta, f"{pfx}_{k}", cfg.get(f"{pfx}_{k}", ""))
+                    _wsa(meta, "axis_moving", "act1" if not is_2d else "both")
+            _wsa(meta, "sensors_json", _json.dumps(
                 [{k: v for k, v in s.items() if k != "plot_visible"}
-                 for s in sensors])
+                 for s in sensors]))
 
             # ── Step sizes ────────────────────────────────────────────────────
             if not is_field and not is_time:
@@ -1156,7 +1420,7 @@ class ScanRunner:
                         stop  = cfg.get(f"{pfx}_stop")
                         if start is not None and stop is not None:
                             meta.attrs[f"{pfx}_step"] = (stop - start) / (npts - 1)
-                            meta.attrs[f"{pfx}_step_unit"] = cfg.get(f"{pfx}_unit", "")
+                            _wsa(meta, f"{pfx}_step_unit", cfg.get(f"{pfx}_unit", ""))
             if is_field:
                 segs = cfg.get("field_segments", [])
                 total_pts = sum(max(1, int(s[2])) for s in segs) if segs else n_x
@@ -1181,11 +1445,11 @@ class ScanRunner:
 
             def _ds(name, arr, label, unit, role, **kw):
                 d = data.create_dataset(name, data=arr)
-                d.attrs["label"] = label
-                d.attrs["unit"]  = unit
-                d.attrs["role"]  = role
+                _wsa(d, "label", label)
+                _wsa(d, "unit",  unit)
+                _wsa(d, "role",  role)
                 for k, v in kw.items():
-                    d.attrs[k] = v
+                    _wsa(d, k, v) if isinstance(v, str) else d.attrs.__setitem__(k, v)
                 return d
 
             if is_time:
@@ -1226,8 +1490,7 @@ class ScanRunner:
                     y_axis          = s.get("y_axis", "Y1"),
                     plot_axis       = s.get("plot_axis", s.get("y_axis", "Y1")))
 
-            # Private write-time helpers (underscore prefix = internal)
-            f.attrs["_x_key"]   = ax_key
+            _wsa(f, "_x_key", ax_key)
             f.attrs["_is_2d"]   = is_2d
             f.attrs["_is_time"] = is_time
             f.attrs["_n_x"]     = n_x
@@ -1281,14 +1544,14 @@ class ScanRunner:
         """Write final status/timing and close the file."""
         try:
             if count == 0:
-                f.attrs["scan_status"] = "empty"
+                _wsa(f, "scan_status", "empty")
             elif self._abort:
-                f.attrs["scan_status"] = "aborted"
+                _wsa(f, "scan_status", "aborted")
             else:
-                f.attrs["scan_status"] = "completed"
+                _wsa(f, "scan_status", "completed")
 
             duration = float(t_actual.max()) if count > 0 else 0.0
-            f.attrs["timestamp_end"]    = datetime.now().isoformat()
+            _wsa(f, "timestamp_end",    datetime.now().isoformat())
             f.attrs["duration_seconds"] = duration
 
             f["metadata"].attrs["points_acquired"]  = count

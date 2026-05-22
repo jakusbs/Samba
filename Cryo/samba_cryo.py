@@ -305,7 +305,9 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker:         Optional[ScanlistWorker] = None
         self._scan_running:      bool                     = False
         self._scan_data:         Dict[str, np.ndarray]    = {}
+        self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
+        self._last_fn_retrace:   Optional[str]            = None
         self._active_setup_name: str                      = CRYO_SETUP
         self._active_cfg_idx:    int                      = 0
         self._current_scan_cfg:  dict                     = {}
@@ -313,6 +315,7 @@ class CryoMainWindow(QMainWindow):
         self._scan_start_time:   float                    = 0.0
         self._scan_total_pts:    int                      = 0
         self._dir_queue:         list                     = []   # pending direction cfgs
+        self._interleaved_2d:    bool                     = False
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
@@ -575,13 +578,24 @@ class CryoMainWindow(QMainWindow):
         cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(4)
 
         self.live_tabs = QTabWidget()
-        for title, widget_attr, widget_cls in [
-                ("2D Map", "map2d",  Live2DWidget),
-                ("1D Plot","plot1d", Live1DWidget),
-        ]:
-            tab = QWidget(); lay = QVBoxLayout(tab); lay.setContentsMargins(2, 4, 2, 0)
-            w   = widget_cls(); setattr(self, widget_attr, w); lay.addWidget(w)
-            self.live_tabs.addTab(tab, title)
+
+        # 2D Map tab: horizontal splitter so trace and retrace maps sit side-by-side.
+        # map2d_retrace is hidden unless an interleaved scan is running.
+        map_tab = QWidget(); map_lay = QVBoxLayout(map_tab)
+        map_lay.setContentsMargins(2, 4, 2, 0); map_lay.setSpacing(0)
+        self._map_split = QSplitter(Qt.Orientation.Horizontal)
+        self.map2d         = Live2DWidget()
+        self.map2d_retrace = Live2DWidget()
+        self.map2d_retrace.hide()
+        self._map_split.addWidget(self.map2d)
+        self._map_split.addWidget(self.map2d_retrace)
+        map_lay.addWidget(self._map_split)
+        self.live_tabs.addTab(map_tab, "2D Map")
+
+        plot_tab = QWidget(); plot_lay = QVBoxLayout(plot_tab)
+        plot_lay.setContentsMargins(2, 4, 2, 0); plot_lay.setSpacing(0)
+        self.plot1d = Live1DWidget(); plot_lay.addWidget(self.plot1d)
+        self.live_tabs.addTab(plot_tab, "1D Plot")
 
         self.calib_panel = CryoCalibrationPanel(self._active_setup,
                                                   config_getter=self._build_full_config)
@@ -1054,7 +1068,7 @@ class CryoMainWindow(QMainWindow):
             self._start_scan()
 
     def _unified_abort(self):
-        if self._sl_worker:
+        if self._sl_worker and self._sl_worker.isRunning():
             self._abort_scanlist()
         else:
             self._abort_scan()
@@ -1119,16 +1133,31 @@ class CryoMainWindow(QMainWindow):
         _, n_x, n_y = self._scan_dims(cfg)
         self._scan_data = {s["label"]: np.full((n_y, n_x), np.nan) for s in active}
         self._scan_data[X_TIME] = np.full((n_y, n_x), np.nan)
+        if cfg.get("_interleaved_2d"):
+            self._scan_data_retrace = {s["label"]: np.full((n_y, n_x), np.nan)
+                                       for s in active}
+            self._scan_data_retrace[X_TIME] = np.full((n_y, n_x), np.nan)
+        else:
+            self._scan_data_retrace = {}
 
     def _setup_live_display(self, cfg, active):
         mode, n_x, n_y = self._scan_dims(cfg)
         if mode == "2D":
-            x_arr = np.linspace(cfg["act1_start"], cfg["act1_stop"], n_x)
-            y_arr = np.linspace(cfg["act2_start"], cfg["act2_stop"], n_y)
-            self.map2d.setup(x_arr, y_arr,
-                             f"{cfg['act1_label']} ({cfg['act1_unit']})",
-                             f"{cfg['act2_label']} ({cfg['act2_unit']})",
-                             cfg.get("display_sensor",""), cfg.get("colormap","RdBu_r"))
+            x_arr  = np.linspace(cfg["act1_start"], cfg["act1_stop"], n_x)
+            y_arr  = np.linspace(cfg["act2_start"], cfg["act2_stop"], n_y)
+            xl     = f"{cfg['act1_label']} ({cfg['act1_unit']})"
+            yl     = f"{cfg['act2_label']} ({cfg['act2_unit']})"
+            sensor = cfg.get("display_sensor", "")
+            cmap   = cfg.get("colormap", "RdBu_r")
+            self.map2d.setup(x_arr, y_arr, xl, yl, sensor, cmap)
+            if cfg.get("_interleaved_2d"):
+                self.map2d_retrace.show()
+                self.map2d_retrace.setup(x_arr, y_arr, xl, yl,
+                                         sensor + " (retrace)", cmap)
+                self._map_split.setSizes([1000, 1000])
+            else:
+                self.map2d_retrace.hide()
+                self.map2d_retrace.clear()
             self.live_tabs.setCurrentIndex(TAB_MAP2D)
         else:
             if   mode == "FIELD":   xl, xu = cfg.get("field_x_label", "Field"), cfg.get("field_x_unit", "T")
@@ -1149,10 +1178,12 @@ class CryoMainWindow(QMainWindow):
         """Create a ScanWorker and connect its signals. Returns the worker."""
         worker = ScanWorker(cfg, setup)
         worker.point_done.connect(self._on_point)
+        worker.point_retrace.connect(self._on_point_retrace)
         worker.progress.connect(self._on_progress)
         worker.status_msg.connect(self._on_status)
         worker.log_msg.connect(self._log_append)
         worker.scan_done.connect(lambda fn: setattr(self, "_last_fn", fn))
+        worker.scan_done_retrace.connect(lambda fn: setattr(self, "_last_fn_retrace", fn))
         worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         worker.finished.connect(self._on_worker_finished)
@@ -1242,36 +1273,61 @@ class CryoMainWindow(QMainWindow):
 
         # ── Build direction queue ─────────────────────────────────────────────
         # Each axis can carry up to 2 [start, stop] directions.
-        # For 2D: directions are paired by index (zip, not product) → max 2 maps.
-        # For 1D: each direction on the active axis → up to 2 files.
-        mode, _, __ = self._scan_dims(cfg)
+        # For 1D: each direction on the active axis → sequential scans (up to 2).
+        # For 2D with one axis having retrace: interleaved per-row/column scan
+        #   (trace + retrace built simultaneously, single ScanWorker, two HDF5 files).
+        # For 2D with no retrace on either axis: single standard scan.
         scan_x = cfg.get("scan_x", True)
         scan_y = cfg.get("scan_y", False)
         dirs1 = cfg.get("act1_directions", [[cfg.get("act1_start", 0.0), cfg.get("act1_stop", 0.0)]])
         dirs2 = cfg.get("act2_directions", [[cfg.get("act2_start", 0.0), cfg.get("act2_stop", 0.0)]])
+        base_name = cfg["name"]
+
+        self._interleaved_2d = False
 
         if scan_x and scan_y:
-            n = max(len(dirs1), len(dirs2))
-            combos = [(dirs1[min(i, len(dirs1)-1)], dirs2[min(i, len(dirs2)-1)]) for i in range(n)]
+            x_has_retrace = len(dirs1) > 1
+            y_has_retrace = len(dirs2) > 1
+            if x_has_retrace or y_has_retrace:
+                # Interleaved 2D: one worker, two simultaneous HDF5 files.
+                interleave_axis = "x" if x_has_retrace else "y"
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                c["name"]              = f"{base_name}_trace"
+                c["_interleaved_2d"]   = True
+                c["_interleave_axis"]  = interleave_axis
+                c["_retrace_name"]     = f"{base_name}_retrace"
+                cfgs = [c]
+                self._interleaved_2d = True
+            else:
+                # No retrace — single standard 2D scan
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                cfgs = [c]
         elif scan_x:
             combos = [(d, None) for d in dirs1]
+            use_sfx = len(combos) > 1
+            cfgs = []
+            for i, (d1, _) in enumerate(combos):
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = d1
+                c["name"] = f"{base_name}_{'trace' if i==0 else 'retrace'}" if use_sfx else base_name
+                cfgs.append(c)
         elif scan_y:
             combos = [(None, d) for d in dirs2]
+            use_sfx = len(combos) > 1
+            cfgs = []
+            for i, (_, d2) in enumerate(combos):
+                c = copy.deepcopy(cfg)
+                c["act2_start"], c["act2_stop"] = d2
+                c["name"] = f"{base_name}_{'trace' if i==0 else 'retrace'}" if use_sfx else base_name
+                cfgs.append(c)
         else:
-            combos = [(None, None)]   # TIME scan
+            cfgs = [copy.deepcopy(cfg)]   # TIME scan
 
-        use_suffix = len(combos) > 1
-        base_name  = cfg["name"]
-        cfgs = []
-        for i, (d1, d2) in enumerate(combos):
-            c = copy.deepcopy(cfg)
-            if d1 is not None:
-                c["act1_start"], c["act1_stop"] = d1[0], d1[1]
-            if d2 is not None:
-                c["act2_start"], c["act2_stop"] = d2[0], d2[1]
-            dir_name = "trace" if i == 0 else "retrace"
-            c["name"] = f"{base_name}_{dir_name}" if use_suffix else base_name
-            cfgs.append(c)
+        use_suffix = len(cfgs) > 1 or self._interleaved_2d
 
         first_cfg = cfgs[0]
         self._dir_queue = cfgs[1:]   # remaining directions run after first completes
@@ -1279,10 +1335,11 @@ class CryoMainWindow(QMainWindow):
         self._current_scan_cfg = first_cfg
         self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
         _, n_x, n_y = self._scan_dims(first_cfg)
-        total = n_x * n_y
+        total = n_x * n_y * (2 if self._interleaved_2d else 1)
         self.pbar.setMaximum(total); self.pbar.setValue(0)
         lbl = "trace" if use_suffix else ""
         self.pbar.setFormat(f"{lbl} %v / %m pts" if lbl else "%v / %m pts")
+        self._last_fn_retrace = None
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         self.log_text.clear()
 
@@ -1385,6 +1442,14 @@ class CryoMainWindow(QMainWindow):
         if getattr(self, '_calib_timescan', False):
             self.calib_panel.focus_plot.update_timescan_point(ix, x_actual, vals)
 
+    def _on_point_retrace(self, ix, iy, x_actual, vals):
+        for lbl, v in vals.items():
+            if lbl in self._scan_data_retrace:
+                self._scan_data_retrace[lbl][iy, ix] = v
+        if self._interleaved_2d:
+            disp = self.right_panel.get_display_sensor()
+            self.map2d_retrace.update_point(ix, iy, vals.get(disp, float("nan")))
+
     def _log_append(self, msg: str, level: str = "auto"):
         if level == "auto":
             ml = msg.lower()
@@ -1464,14 +1529,19 @@ class CryoMainWindow(QMainWindow):
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
+        self._interleaved_2d = False
+        self.map2d_retrace.hide()
         self.pbar.setFormat("%v / %m pts")
         try:
             self.data_browser.refresh()
         except Exception:
             log.debug("Failed to refresh data browser after scan", exc_info=True)
-        if self._last_fn:
-            QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
-            self._last_fn = None
+        saved = []
+        if self._last_fn:        saved.append(self._last_fn);        self._last_fn = None
+        if self._last_fn_retrace: saved.append(self._last_fn_retrace); self._last_fn_retrace = None
+        if saved:
+            QMessageBox.information(self, "Scan complete",
+                                    "Saved:\n" + "\n".join(saved))
         self._update_estimate()
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
@@ -1513,10 +1583,61 @@ class CryoMainWindow(QMainWindow):
         if err:
             QMessageBox.warning(self, "Invalid scan parameters", err); return
 
-        self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
-        self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
+        sl = self.sl_panel.get_settings()
 
-        self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
+        # ── Build per-cycle config list (same direction logic as _start_scan) ──
+        scan_x = cfg.get("scan_x", True)
+        scan_y = cfg.get("scan_y", False)
+        dirs1 = cfg.get("act1_directions",
+                        [[cfg.get("act1_start", 0.0), cfg.get("act1_stop", 0.0)]])
+        dirs2 = cfg.get("act2_directions",
+                        [[cfg.get("act2_start", 0.0), cfg.get("act2_stop", 0.0)]])
+        base_name = cfg["name"]
+
+        if scan_x and scan_y:
+            x_has_retrace = len(dirs1) > 1
+            y_has_retrace = len(dirs2) > 1
+            if x_has_retrace or y_has_retrace:
+                interleave_axis = "x" if x_has_retrace else "y"
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                c["name"]             = f"{base_name}_trace"
+                c["_interleaved_2d"]  = True
+                c["_interleave_axis"] = interleave_axis
+                c["_retrace_name"]    = f"{base_name}_retrace"
+                cfg_list = [c]
+            else:
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = dirs1[0]
+                c["act2_start"], c["act2_stop"] = dirs2[0]
+                cfg_list = [c]
+        elif scan_x:
+            use_sfx = len(dirs1) > 1
+            cfg_list = []
+            for idx, d1 in enumerate(dirs1):
+                c = copy.deepcopy(cfg)
+                c["act1_start"], c["act1_stop"] = d1
+                if use_sfx:
+                    c["name"] = f"{base_name}_{'trace' if idx == 0 else 'retrace'}"
+                cfg_list.append(c)
+        elif scan_y:
+            use_sfx = len(dirs2) > 1
+            cfg_list = []
+            for idx, d2 in enumerate(dirs2):
+                c = copy.deepcopy(cfg)
+                c["act2_start"], c["act2_stop"] = d2
+                if use_sfx:
+                    c["name"] = f"{base_name}_{'trace' if idx == 0 else 'retrace'}"
+                cfg_list.append(c)
+        else:
+            cfg_list = [copy.deepcopy(cfg)]
+
+        first_cfg = cfg_list[0]
+        self._current_scan_cfg = first_cfg
+        self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
+
+        self._sl_worker = ScanlistWorker(cfg_list, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
                                          setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
@@ -1595,6 +1716,10 @@ class CryoMainWindow(QMainWindow):
             disp = self.right_panel.get_display_sensor()
             if disp and disp in self._scan_data and self.map2d._img is not None:
                 self.map2d.switch_sensor(self._scan_data[disp], disp)
+            if (self._interleaved_2d and disp and disp in self._scan_data_retrace
+                    and self.map2d_retrace._img is not None):
+                self.map2d_retrace.switch_sensor(
+                    self._scan_data_retrace[disp], disp + " (retrace)")
         else:
             self.plot1d.apply_config(self.right_panel.get_plot_sensors_meta(),
                                      self.right_panel.get_x_key())
@@ -1603,6 +1728,11 @@ class CryoMainWindow(QMainWindow):
         if sensor and sensor in self._scan_data and self.map2d._img is not None:
             self.map2d.switch_sensor(self._scan_data[sensor], sensor)
         self.map2d.set_colormap(cmap)
+        if self._interleaved_2d and sensor and sensor in self._scan_data_retrace:
+            if self.map2d_retrace._img is not None:
+                self.map2d_retrace.switch_sensor(
+                    self._scan_data_retrace[sensor], sensor + " (retrace)")
+            self.map2d_retrace.set_colormap(cmap)
 
     # ── Polling: AttoDRY readbacks ───────────────────────────────────────────
     # ── Readback signal handlers (from ReadbackWorker thread) ──────────────

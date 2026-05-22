@@ -64,6 +64,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
+        "field_settle_tol":      0.02,   # 2 % — scanlist field-flip settle
+        "field_settle_timeout":  300.0,  # seconds
     },
     "IR": {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
@@ -100,6 +102,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
+        "field_settle_tol":      0.02,   # 2 % — scanlist field-flip settle
+        "field_settle_timeout":  300.0,  # seconds
     },
     "Cryo": {
         "magnet_device":         "",

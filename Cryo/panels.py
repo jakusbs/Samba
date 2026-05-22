@@ -1576,6 +1576,9 @@ class TrajectoryPanel(QWidget):
         # Connect axis toggles → update time-scan banner visibility
         self.act1_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
         self.act2_grp.scan_cb.stateChanged.connect(lambda _: self._on_axis_toggled())
+        # Cross-axis retrace mutual exclusion: only one axis may have retrace in 2D
+        self.act1_grp.dir_list.changed.connect(self._sync_retrace_buttons)
+        self.act2_grp.dir_list.changed.connect(self._sync_retrace_buttons)
 
         # ── Field panel ───────────────────────────────────────────────────────
         # Layout (all always visible, side-by-side):
@@ -1816,7 +1819,6 @@ class TrajectoryPanel(QWidget):
         x_on = self.act1_grp.scan_cb.isChecked()
         y_on = self.act2_grp.scan_cb.isChecked()
         time_mode = (not x_on and not y_on)
-        both_on   = x_on and y_on
 
         # Time-scan banner inside the X axis group
         self.time_scan_lbl.setVisible(time_mode)
@@ -1833,6 +1835,25 @@ class TrajectoryPanel(QWidget):
                 "QGroupBox{border:1px solid #45475a;border-radius:6px;"
                 "margin-top:9px;padding-top:9px;font-weight:bold;color:#89b4fa;}"
                 "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}")
+        self._sync_retrace_buttons()
+
+    def _sync_retrace_buttons(self):
+        """In 2D mode: only one axis can carry retrace. Disable the add-retrace
+        button on whichever axis does not yet have a second direction once the
+        other axis already does."""
+        x_on = self.act1_grp.scan_cb.isChecked()
+        y_on = self.act2_grp.scan_cb.isChecked()
+        if not (x_on and y_on):
+            # 1D or time — no cross-axis restriction; restore both buttons
+            self.act1_grp.dir_list._refresh_add_btn()
+            self.act2_grp.dir_list._refresh_add_btn()
+            return
+        x_has_retrace = len(self.act1_grp.dir_list._rows) > 1
+        y_has_retrace = len(self.act2_grp.dir_list._rows) > 1
+        self.act1_grp.dir_list._add_btn.setEnabled(
+            not y_has_retrace and len(self.act1_grp.dir_list._rows) < 2)
+        self.act2_grp.dir_list._add_btn.setEnabled(
+            not x_has_retrace and len(self.act2_grp.dir_list._rows) < 2)
 
     def _on_field_mode(self, m):
         self.fn.setVisible(m == 0); self.fd.setVisible(m == 1)
