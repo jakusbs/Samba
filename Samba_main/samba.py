@@ -54,6 +54,8 @@ except Exception as _e:
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
 
+from server_sync import sync_setup
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hardware snapshot helper
@@ -454,6 +456,49 @@ class MainWindow(QMainWindow):
 
         main_v.addWidget(action_bar)
 
+        # ── Server sync bar ───────────────────────────────────────────────────
+        _srv_bar = QWidget(); _srv_bar.setFixedHeight(34)
+        _srv_bar.setObjectName("server_bar")
+        _srv_bar.setStyleSheet(
+            "#server_bar{background:#0e0e1e;border:1px solid #313244;border-radius:6px;}")
+        _srv_row = QHBoxLayout(_srv_bar)
+        _srv_row.setContentsMargins(8, 4, 8, 4); _srv_row.setSpacing(4)
+        _srv_lbl = QLabel("Server:")
+        _srv_lbl.setStyleSheet("color:#89b4fa;font-size:11px;font-weight:bold;")
+        _srv_row.addWidget(_srv_lbl)
+        self.server_dir = QLineEdit()
+        self.server_dir.setFixedHeight(24)
+        self.server_dir.setPlaceholderText("Server sync directory (leave blank to disable)…")
+        self.server_dir.setStyleSheet(
+            "QLineEdit{background:#1e1e2e;border:1px solid #45475a;border-radius:4px;"
+            "padding:2px 6px;color:#a6adc8;font-size:10px;}"
+            "QLineEdit:focus{border:1px solid #89b4fa;}")
+        _srv_row.addWidget(self.server_dir, stretch=1)
+        _srv_browse = QPushButton("…")
+        _srv_browse.setFixedSize(24, 24)
+        _srv_browse.setToolTip("Browse for server sync directory")
+        _srv_browse.setStyleSheet(
+            "QPushButton{background:#252538;border:1px solid #45475a;border-radius:4px;"
+            "padding:0;font-size:11px;color:#cdd6f4;}"
+            "QPushButton:hover{background:#313244;}"
+            "QPushButton:pressed{background:#252538;}")
+        _srv_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        _srv_browse.clicked.connect(self._browse_server_dir)
+        _srv_row.addWidget(_srv_browse)
+        _srv_row.addSpacing(8)
+        _sync_btn = QPushButton("↑ Sync")
+        _sync_btn.setFixedHeight(24); _sync_btn.setMinimumWidth(66)
+        _sync_btn.setToolTip("Sync data to server now")
+        _sync_btn.setStyleSheet(
+            "QPushButton{background:#1e1e2e;border:1px solid #89b4fa;border-radius:4px;"
+            "color:#89b4fa;font-size:11px;font-weight:bold;padding:0 8px;}"
+            "QPushButton:hover{background:#252538;}"
+            "QPushButton:pressed{background:#1e1e2e;}")
+        _sync_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        _sync_btn.clicked.connect(self._manual_sync)
+        _srv_row.addWidget(_sync_btn)
+        main_v.addWidget(_srv_bar)
+
         # ── Main content ─────────────────────────────────────────────────────
         v_split = QSplitter(Qt.Orientation.Vertical)
         h_split = QSplitter(Qt.Orientation.Horizontal)
@@ -717,6 +762,7 @@ class MainWindow(QMainWindow):
         self.sl_panel.set_active_name(cfg.get("name","—"))
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
+        self.server_dir.setText(setup.get("server_sync_dir", ""))
 
     def _save_active_config(self):
         setup   = self._active_setup()
@@ -728,8 +774,9 @@ class MainWindow(QMainWindow):
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
         old["hyst_channels"]  = self.right_panel.get_dc_channels()
-        # Sync save_dir and setup defaults back into setup
+        # Sync save_dir, server_sync_dir, and setup defaults back into setup
         setup["save_dir"] = self.save_dir.text().strip()
+        setup["server_sync_dir"] = self.server_dir.text().strip()
         setup.update(self.setup_defaults.get_defaults())
         self.cfg_list.sync_name(idx, old["name"])
         save_setup(self._active_setup_name, setup)
@@ -843,6 +890,26 @@ class MainWindow(QMainWindow):
     def _browse_save_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Save directory", self.save_dir.text())
         if d: self.save_dir.setText(d)
+
+    def _browse_server_dir(self):
+        start = self.server_dir.text().strip() or f"/run/user/{os.getuid()}/gvfs"
+        d = QFileDialog.getExistingDirectory(self, "Server sync directory", start)
+        if d:
+            self.server_dir.setText(d)
+            self._active_setup()["server_sync_dir"] = d
+
+    def _manual_sync(self):
+        setup = self._active_setup()
+        server_path = self.server_dir.text().strip()
+        if not server_path:
+            self.status_lbl.setText("Server path not set — enter a path above")
+            return
+        setup["server_sync_dir"] = server_path
+        self.status_lbl.setText("Syncing to server…")
+        def _done(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, setup, done_cb=_done)
 
     def _unified_start(self):
         """Start scan or scanlist depending on which bottom tab is active.
@@ -1249,7 +1316,7 @@ class MainWindow(QMainWindow):
         if self._last_fn:
             # Lab notebook
             setup = self._active_setup()
-            nb = _nb_path(setup.get("save_dir", "~/moke_data"),
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"),
                           self._active_setup_name)
             if self._current_scan_cfg:
                 entry = dict(self._current_scan_cfg)
@@ -1264,6 +1331,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
             self._last_fn = None
         self._update_estimate()
+        _setup = self._active_setup()
+        _setup["server_sync_dir"] = self.server_dir.text().strip()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return
@@ -1295,7 +1368,8 @@ class MainWindow(QMainWindow):
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
-                                         sl["relay_flip"], sl["field_flip"])
+                                         sl["relay_flip"], sl["field_flip"],
+                                         setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(lambda c, t: self.pbar.setValue(c))
         self._sl_worker.list_progress.connect(
@@ -1319,6 +1393,12 @@ class MainWindow(QMainWindow):
         except Exception:
             log.debug("Data browser refresh failed after scanlist", exc_info=True)
         QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        _setup = self._active_setup()
+        _setup["server_sync_dir"] = self.server_dir.text().strip()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_scanlist_relay_changed(self, state: int):
         """Update relay label in both HW panels when the scanlist worker flips the relay."""

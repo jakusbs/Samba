@@ -68,6 +68,8 @@ except Exception:
     def acquire_lock(name): return True, ""   # type: ignore[misc]
     def release_lock(name): pass              # type: ignore[misc]
 
+from server_sync import sync_setup
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hardware snapshot helper
@@ -521,6 +523,49 @@ class CryoMainWindow(QMainWindow):
 
         main_v.addWidget(action_bar)
 
+        # ── Server sync bar ───────────────────────────────────────────────────
+        _srv_bar = QWidget(); _srv_bar.setFixedHeight(34)
+        _srv_bar.setObjectName("server_bar")
+        _srv_bar.setStyleSheet(
+            "#server_bar{background:#0a0a16;border:1px solid #313244;border-radius:6px;}")
+        _srv_row = QHBoxLayout(_srv_bar)
+        _srv_row.setContentsMargins(8, 4, 8, 4); _srv_row.setSpacing(4)
+        _srv_lbl = QLabel("Server:")
+        _srv_lbl.setStyleSheet("color:#0080fe;font-size:11px;font-weight:bold;")
+        _srv_row.addWidget(_srv_lbl)
+        self.server_dir = QLineEdit()
+        self.server_dir.setFixedHeight(24)
+        self.server_dir.setPlaceholderText("Server sync directory (leave blank to disable)…")
+        self.server_dir.setStyleSheet(
+            "QLineEdit{background:#1e1e2e;border:1px solid #45475a;border-radius:4px;"
+            "padding:2px 6px;color:#a6adc8;font-size:10px;}"
+            "QLineEdit:focus{border:1px solid #0080fe;}")
+        _srv_row.addWidget(self.server_dir, stretch=1)
+        _srv_browse = QPushButton("…")
+        _srv_browse.setFixedSize(24, 24)
+        _srv_browse.setToolTip("Browse for server sync directory")
+        _srv_browse.setStyleSheet(
+            "QPushButton{background:#252538;border:1px solid #45475a;border-radius:4px;"
+            "padding:0;font-size:11px;color:#cdd6f4;}"
+            "QPushButton:hover{background:#313244;}"
+            "QPushButton:pressed{background:#252538;}")
+        _srv_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        _srv_browse.clicked.connect(self._browse_server_dir)
+        _srv_row.addWidget(_srv_browse)
+        _srv_row.addSpacing(8)
+        _sync_btn = QPushButton("↑ Sync")
+        _sync_btn.setFixedHeight(24); _sync_btn.setMinimumWidth(66)
+        _sync_btn.setToolTip("Sync data to server now")
+        _sync_btn.setStyleSheet(
+            "QPushButton{background:#0a0a16;border:1px solid #0080fe;border-radius:4px;"
+            "color:#0080fe;font-size:11px;font-weight:bold;padding:0 8px;}"
+            "QPushButton:hover{background:#131325;}"
+            "QPushButton:pressed{background:#0a0a16;}")
+        _sync_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        _sync_btn.clicked.connect(self._manual_sync)
+        _srv_row.addWidget(_sync_btn)
+        main_v.addWidget(_srv_bar)
+
         # ── Main content ─────────────────────────────────────────────────────
         v_split = QSplitter(Qt.Orientation.Vertical)
         h_split = QSplitter(Qt.Orientation.Horizontal)
@@ -810,6 +855,7 @@ class CryoMainWindow(QMainWindow):
         self.sl_panel.set_active_name(cfg.get("name","—"))
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
+        self.server_dir.setText(setup.get("server_sync_dir", ""))
         # Restore geometry + piezo toggles (blockSignals to avoid recursive saves)
         geo = cfg.get("geometry",   "Faraday")
         st  = cfg.get("stage_type", "anm200")
@@ -844,6 +890,7 @@ class CryoMainWindow(QMainWindow):
         old["geometry"]       = self._get_current_geometry()
         old["stage_type"]     = self._get_current_stage_type()
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
+        self._active_setup()["server_sync_dir"] = self.server_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
         self._safe_save()
         self._update_estimate()
@@ -987,6 +1034,26 @@ class CryoMainWindow(QMainWindow):
     def _browse_save_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Save directory", self.save_dir.text())
         if d: self.save_dir.setText(d)
+
+    def _browse_server_dir(self):
+        start = self.server_dir.text().strip() or f"/run/user/{os.getuid()}/gvfs"
+        d = QFileDialog.getExistingDirectory(self, "Server sync directory", start)
+        if d:
+            self.server_dir.setText(d)
+            self._active_setup()["server_sync_dir"] = d
+
+    def _manual_sync(self):
+        setup = self._active_setup()
+        server_path = self.server_dir.text().strip()
+        if not server_path:
+            self.status_lbl.setText("Server path not set — enter a path above")
+            return
+        setup["server_sync_dir"] = server_path
+        self.status_lbl.setText("Syncing to server…")
+        def _done(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, setup, done_cb=_done)
 
     # ── Scan start ───────────────────────────────────────────────────────────
     def _unified_start(self):
@@ -1434,7 +1501,7 @@ class CryoMainWindow(QMainWindow):
         # Append to lab notebook for this completed scan direction
         if self._last_fn and self._current_scan_cfg and not getattr(self, '_calib_timescan', False):
             setup = self._active_setup()
-            nb = _nb_path(setup.get("save_dir", "~/moke_data"), "Cryo")
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"), "Cryo")
             entry = dict(self._current_scan_cfg)
             entry["_scan_start_time"] = self._scan_start_time
             entry["_hdf5_path"] = os.path.abspath(self._last_fn)
@@ -1476,6 +1543,12 @@ class CryoMainWindow(QMainWindow):
             QMessageBox.information(self, "Scan complete",
                                     "Saved:\n" + "\n".join(saved))
         self._update_estimate()
+        _setup = self._active_setup()
+        _setup["server_sync_dir"] = self.server_dir.text().strip()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
         if not self._scan_running or not self._worker: return
@@ -1565,7 +1638,8 @@ class CryoMainWindow(QMainWindow):
         self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
 
         self._sl_worker = ScanlistWorker(cfg_list, setup, sl["n_scans"], sl["list_name"],
-                                         sl["relay_flip"], sl["field_flip"])
+                                         sl["relay_flip"], sl["field_flip"],
+                                         setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.list_progress.connect(
@@ -1594,6 +1668,12 @@ class CryoMainWindow(QMainWindow):
         except Exception:
             log.debug("Failed to refresh data browser after scanlist", exc_info=True)
         QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        _setup = self._active_setup()
+        _setup["server_sync_dir"] = self.server_dir.text().strip()
+        def _done_sync(ok):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "Server sync complete" if ok else "Server sync partial (see log)"))
+        sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_scanlist_relay_changed(self, state):
         for hw in (self.traj_panel.hw, self.sl_panel.hw):

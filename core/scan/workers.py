@@ -70,7 +70,8 @@ class ScanlistWorker(QThread):
     relay_changed = pyqtSignal(int)   # emitted whenever relay state is written
 
     def __init__(self, cfg_or_list, setup: dict, n_scans: int,
-                 list_name: str, relay_flip: bool, field_flip: bool):
+                 list_name: str, relay_flip: bool, field_flip: bool,
+                 setup_name: str = ""):
         super().__init__()
         # Accept either a single config dict or a per-cycle list of configs.
         # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
@@ -78,6 +79,7 @@ class ScanlistWorker(QThread):
         self.setup = setup; self.n_scans = n_scans
         self.list_name = list_name
         self.relay_flip = relay_flip; self.field_flip = field_flip
+        self.setup_name = setup_name
         self._abort = False; self._runner = None
         self._relay_state = 0
 
@@ -116,7 +118,14 @@ class ScanlistWorker(QThread):
             self._relay_state = 0
 
         base     = os.path.expanduser(self.setup.get("save_dir", "~/moke_data"))
-        sl_dir   = os.path.join(base, "ScanLists")
+        # Place ScanLists alongside the data dir (not inside it).
+        # If save_dir is ~/moke_data/Data_Samba_Green, put scanlists in
+        # ~/moke_data/ScanLists_Green.  Fall back to <save_dir>/ScanLists.
+        if self.setup_name:
+            parent   = os.path.dirname(base.rstrip(os.sep))
+            sl_dir   = os.path.join(parent, f"ScanLists_{self.setup_name}")
+        else:
+            sl_dir   = os.path.join(base, "ScanLists")
         os.makedirs(sl_dir, exist_ok=True)
         ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
         txt_path = os.path.join(sl_dir, f"{self.list_name}_{ts}.txt")
