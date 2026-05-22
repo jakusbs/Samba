@@ -45,7 +45,7 @@ def sync_dir(src, dst):
         df = dp / f.relative_to(sp)
         df.parent.mkdir(parents=True, exist_ok=True)
         if not df.exists() or df.stat().st_size != f.stat().st_size:
-            shutil.copy2(f, df)
+            shutil.copyfile(str(f), str(df))
             copied += 1
         else:
             skipped += 1
@@ -59,7 +59,7 @@ def sync_file(src, dst_dir):
     dp.mkdir(parents=True, exist_ok=True)
     df = dp / sp.name
     if not df.exists() or df.stat().st_size != sp.stat().st_size:
-        shutil.copy2(sp, df)
+        shutil.copyfile(str(sp), str(df))
 
 args  = json.loads(sys.argv[1])
 lines = []
