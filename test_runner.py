@@ -321,13 +321,16 @@ class TestPerPointRetryLoop(unittest.TestCase):
 
     def _run_loop(self, runner, acquire_sequence):
         """
-        Run the exact retry-loop code from runner.run() with a scripted
-        sequence of (vals, ok) results from _do_acquire.
+        Faithful copy of the new while/for retry-loop from runner.run(), driven
+        by a scripted sequence of (vals, ok) results from _do_acquire.
+
+        On pause (all attempts exhausted) we force-abort instead of blocking
+        forever — the test can still inspect runner._paused == True.
 
         Returns (final_vals, log_tags) where log_tags records what happened.
         """
-        it      = iter(acquire_sequence)
-        log     = []
+        it  = iter(acquire_sequence)
+        log = []
 
         def _mock_acquire(*a, **kw):
             vals, ok = next(it)
@@ -336,20 +339,29 @@ class TestPerPointRetryLoop(unittest.TestCase):
         runner._do_acquire = _mock_acquire   # instance-level patch
 
         vals = {}
-        for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
-            if runner._abort:
+        while not runner._abort:
+            _point_ok = False
+            for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
+                if runner._abort: break
+                vals, _, _ok = runner._do_acquire(
+                    None, None, None, None, None, None, None, None, _noop)
+                if _ok:
+                    if _pt_attempt > 0:
+                        log.append(f"recovered:{_pt_attempt + 1}")
+                    _point_ok = True
+                    break
+                elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
+                    log.append(f"retry:{_pt_attempt + 1}")
+                else:
+                    log.append("pause")
+                    runner._paused = True
+
+            if _point_ok or runner._abort:
                 break
-            vals, _, _ok = runner._do_acquire(
-                None, None, None, None, None, None, None, None, _noop)
-            if _ok:
-                if _pt_attempt > 0:
-                    log.append(f"recovered:{_pt_attempt + 1}")
-                break
-            elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
-                log.append(f"retry:{_pt_attempt + 1}")
-            else:
-                log.append("pause")
-                runner._paused = True
+
+            # All attempts failed — in tests, force-abort to avoid infinite wait.
+            # The caller can inspect runner._paused to confirm the pause occurred.
+            runner._abort = True
 
         return vals, log
 
@@ -412,13 +424,21 @@ class TestPerPointRetryLoop(unittest.TestCase):
 
         r._do_acquire = _mock_acquire
 
-        for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
-            if r._abort:
+        # Mirror the while/for structure from runner.run()
+        while not r._abort:
+            _point_ok = False
+            for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
+                if r._abort: break
+                _, _, _ok = r._do_acquire(None, None, None, None,
+                                          None, None, None, None, _noop)
+                if _ok:
+                    _point_ok = True
+                    break
+                elif _pt_attempt == AUTO_PAUSE_THRESHOLD - 1:
+                    r._paused = True
+            if _point_ok or r._abort:
                 break
-            _, _, _ok = r._do_acquire(None, None, None, None,
-                                      None, None, None, None, _noop)
-            if not _ok and _pt_attempt == AUTO_PAUSE_THRESHOLD - 1:
-                r._paused = True
+            r._abort = True   # prevent infinite loop in test
 
         self.assertFalse(r._paused, "Abort must not trigger pause")
         self.assertEqual(call_count[0], 2)

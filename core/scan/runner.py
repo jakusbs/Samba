@@ -610,33 +610,49 @@ class ScanRunner:
                     x_actual[iy, ix] = x_read
 
                     # ── Lock-in settling + acquire — retried up to AUTO_PAUSE_THRESHOLD times ──
+                    # If all attempts fail the scan pauses here (not at the top of the
+                    # next iteration) so the same point is retried after the user resumes.
                     vals: Dict[str, float] = {}
                     t_trigger = time.time() - t0
-                    for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
-                        if self._abort: break
+                    _first_settle_logged = False
+                    while not self._abort:
+                        _point_ok = False
+                        for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
+                            if self._abort: break
 
-                        if max_lockin_settling > 0:
-                            if count == 0 and _pt_attempt == 0:
-                                lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
-                            time.sleep(max_lockin_settling)
+                            if max_lockin_settling > 0:
+                                if count == 0 and not _first_settle_logged:
+                                    lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+                                    _first_settle_logged = True
+                                time.sleep(max_lockin_settling)
 
-                        vals, t_trigger, _ok = self._do_acquire(
-                            devp, dev_sensors, trigger_devs, int_time,
-                            t0, _RUNNING, cfg, _zi_timeout_ms, lg)
+                            vals, t_trigger, _ok = self._do_acquire(
+                                devp, dev_sensors, trigger_devs, int_time,
+                                t0, _RUNNING, cfg, _zi_timeout_ms, lg)
 
-                        if _ok:
-                            if _pt_attempt > 0:
-                                lg(f"  ✓ Point recovered on attempt "
-                                   f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD}")
-                            break
-                        elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
-                            lg(f"⚠ {x_lbl}={x_read:.4g} attempt "
-                               f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD} failed — retrying…")
-                        else:
-                            lg(f"⚠ {x_lbl}={x_read:.4g} failed all "
-                               f"{AUTO_PAUSE_THRESHOLD} attempts — pausing")
-                            self._paused = True
-                            st(f"⚠ AUTO-PAUSED — fix the issue and press Resume")
+                            if _ok:
+                                if _pt_attempt > 0:
+                                    lg(f"  ✓ Point recovered on attempt "
+                                       f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD}")
+                                _point_ok = True
+                                break
+                            elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
+                                lg(f"⚠ {x_lbl}={x_read:.4g} attempt "
+                                   f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD} failed — retrying…")
+                            else:
+                                lg(f"⚠ {x_lbl}={x_read:.4g} failed all "
+                                   f"{AUTO_PAUSE_THRESHOLD} attempts — pausing")
+                                self._paused = True
+                                st(f"⚠ AUTO-PAUSED — fix the issue and press Resume")
+
+                        if _point_ok or self._abort:
+                            break   # success or abort — leave the while loop
+
+                        # All attempts failed; block here until the user resumes
+                        while self._paused and not self._abort:
+                            time.sleep(0.05)
+                        if not self._abort:
+                            lg(f"  ↩ Resuming — retrying {x_lbl}={x_read:.4g}…")
 
                     # Update in-memory data buffer with the final values
                     for s in active:
