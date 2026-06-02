@@ -308,7 +308,6 @@ class CryoMainWindow(QMainWindow):
         self._scan_running:        bool                     = False
         self._meta_syncing:        bool                     = False
         self._timing_syncing:      bool                     = False
-        self._running_scan_setup:  str                      = ""
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -1457,7 +1456,6 @@ class CryoMainWindow(QMainWindow):
             c.update(hw_snap)
 
         self._worker = self._wire_worker(first_cfg, setup)
-        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1622,7 +1620,6 @@ class CryoMainWindow(QMainWindow):
 
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
-        self._running_scan_setup = ""
         self._calib_timescan = False
         self._interleaved_2d = False
         self.map2d_retrace.hide()
@@ -1759,7 +1756,6 @@ class CryoMainWindow(QMainWindow):
         self.pbar.setMaximum(n_x * n_y); self.pbar.setValue(0)
         self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
-        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
 
@@ -1779,7 +1775,6 @@ class CryoMainWindow(QMainWindow):
     def _on_sl_worker_finished(self):
         self._set_running(False)
         self._scan_running = False
-        self._running_scan_setup = ""
         self._sl_worker = None
 
     def _on_scanlist_relay_changed(self, state):

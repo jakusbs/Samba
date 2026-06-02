@@ -211,7 +211,6 @@ class MainWindow(QMainWindow):
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
         self._trmoke_x_factor:   Optional[float]          = None
-        self._running_scan_setup: str                     = ""
         self._meta_syncing:      bool                     = False
         self._timing_syncing:    bool                     = False
 
@@ -1280,7 +1279,6 @@ class MainWindow(QMainWindow):
 
         self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
-        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1323,7 +1321,6 @@ class MainWindow(QMainWindow):
         self._wire_worker(self._worker)
 
         self._scan_start_time = _time.time()
-        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1409,7 +1406,6 @@ class MainWindow(QMainWindow):
         cfg_type = self._current_scan_cfg.get("scan_type", "") if self._current_scan_cfg else ""
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
-        self._running_scan_setup = ""
         self._calib_timescan = False
         # Auto-zero the field after every DC hysteresis scan
         if cfg_type == "DC_HYST":
@@ -1494,7 +1490,6 @@ class MainWindow(QMainWindow):
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self.sl_panel.list_bar.setMaximum(100); self.sl_panel.list_bar.setValue(0)
-        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
 
@@ -1528,7 +1523,6 @@ class MainWindow(QMainWindow):
     def _on_sl_worker_finished(self):
         self._set_running(False)
         self._scan_running = False
-        self._running_scan_setup = ""
         self._sl_worker = None
 
     def _abort_scanlist(self):
