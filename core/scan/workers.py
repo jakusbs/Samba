@@ -151,7 +151,7 @@ class ScanlistWorker(QThread):
                         # Wait until field stops changing (rate-of-change settles to ~0).
                         # We don't assume a target value — just wait for |Δfield/0.5s|
                         # to drop below field_settle_rate (default 1 mT equivalent).
-                        rate_thr = self.setup.get("field_settle_rate",    1e-3)
+                        rate_thr = self.setup.get("field_settle_rate",    2.0)
                         timeout  = self.setup.get("field_settle_timeout", 300.0)
                         t_flip   = time.time()
                         last_log = t_flip

@@ -181,9 +181,9 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "relay_device":        "",
         # AttoDRY uses a superconducting magnet — never demagnetize
         "demagnetize_after_scan": False,
-        # Field settle between scanlist steps: poll readback until within
-        # field_settle_tol (fraction) of the target, up to field_settle_timeout s.
-        "field_settle_tol":     0.02,   # 2 %
+        # Field settle between scanlist steps: poll until |Δfield|/0.5s < rate.
+        # AttoDRY MagneticField is in T, so 0.002 T = 2 mT per 0.5 s.
+        "field_settle_rate":    0.002,  # T — max |ΔMagneticField| per 0.5 s
         "field_settle_timeout": 300.0,  # seconds
         "keithley_device":     "hpp-N42/current/PyKeithley2",
         "zi_device":           "hpp-N42/measure/ZI2",
