@@ -209,6 +209,7 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
+        self._trmoke_x_factor:   Optional[float]          = None
 
         for n in SETUP_NAMES:
             self._setups[n] = load_setup(n)
