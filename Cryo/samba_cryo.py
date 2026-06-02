@@ -60,6 +60,7 @@ from script_console import ScriptConsolePanel
 from calibration import CryoCalibrationPanel
 from device_registry import DeviceRegistryPanel, load_registry, registry_to_sensors
 from defaults_panel  import SetupDefaultsPanel
+from core.bd_calibration import BDCalibrationPanel
 import play_intro
 
 try:
@@ -198,12 +199,13 @@ CRYO_SETUP = "Cryo"
 
 # ── Named tab indices (avoid magic numbers) ──────────────────────────────
 # Bottom tabs
-TAB_TRAJECTORY   = 0
-TAB_SCANLIST     = 1
-TAB_DATA_BROWSER = 2
-TAB_SCRIPT       = 3
-TAB_DEV_REGISTRY = 4
-TAB_DEFAULTS     = 5
+TAB_TRAJECTORY      = 0
+TAB_SCANLIST        = 1
+TAB_BD_CALIBRATION  = 2
+TAB_DATA_BROWSER    = 3
+TAB_SCRIPT          = 4
+TAB_DEV_REGISTRY    = 5
+TAB_DEFAULTS        = 6
 
 # Live (top) tabs
 TAB_MAP2D       = 0
@@ -300,10 +302,13 @@ class CryoMainWindow(QMainWindow):
         self.setWindowTitle("Samba Cryo — ETH Zürich")
         self.setMinimumSize(1360, 920)
 
-        self._setups:            Dict[str, dict]          = {}
-        self._worker:            Optional[ScanWorker]     = None
-        self._sl_worker:         Optional[ScanlistWorker] = None
-        self._scan_running:      bool                     = False
+        self._setups:              Dict[str, dict]          = {}
+        self._worker:              Optional[ScanWorker]     = None
+        self._sl_worker:           Optional[ScanlistWorker] = None
+        self._scan_running:        bool                     = False
+        self._meta_syncing:        bool                     = False
+        self._timing_syncing:      bool                     = False
+        self._running_scan_setup:  str                      = ""
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -718,8 +723,10 @@ class CryoMainWindow(QMainWindow):
         tr.addWidget(self.piezo_anm_btn); tr.addWidget(self.piezo_anc_btn)
         tr.addStretch()
 
-        self.bottom_tabs.addTab(self.traj_panel,   "Trajectory")
-        self.bottom_tabs.addTab(self.sl_panel,     "Scanlist")
+        self.bd_cal_panel = BDCalibrationPanel()
+        self.bottom_tabs.addTab(self.traj_panel,    "Trajectory")
+        self.bottom_tabs.addTab(self.sl_panel,      "Scanlist")
+        self.bottom_tabs.addTab(self.bd_cal_panel,  "BD Calibration")
         self.bottom_tabs.addTab(self.data_browser,  "Data Browser")
         self.script_console = ScriptConsolePanel()
         self.bottom_tabs.addTab(self.script_console, "Script")
@@ -769,6 +776,24 @@ class CryoMainWindow(QMainWindow):
             setup_getter=self._active_setup,
             config_getter=self._build_full_config)
 
+        # ── Metadata bidirectional sync (Trajectory ↔ Scanlist) ──────────────
+        self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
+        self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
+
+        # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
+        self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.traj_panel.settle.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.traj_panel.timeout.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.sl_panel.int_time.valueChanged.connect(self._sync_sl_timing_to_traj)
+        self.sl_panel.settle.valueChanged.connect(self._sync_sl_timing_to_traj)
+        self.sl_panel.timeout.valueChanged.connect(self._sync_sl_timing_to_traj)
+
+        # ── BD Calibration panel callbacks ────────────────────────────────────
+        self.bd_cal_panel.set_callbacks(
+            save_cb=self._bd_cal_save,
+            load_cb=self._bd_cal_load,
+        )
+
         QShortcut(QKeySequence("F5"),       self, activated=self._unified_start)
         QShortcut(QKeySequence("Ctrl+L"),   self, activated=self.log_text.clear)
         QShortcut(QKeySequence("Ctrl+R"),   self, activated=self.data_browser.refresh)
@@ -781,6 +806,8 @@ class CryoMainWindow(QMainWindow):
             self.traj_panel.hw.refresh()
         elif idx == TAB_SCANLIST:
             self.sl_panel.hw.refresh()
+        elif idx == TAB_BD_CALIBRATION:
+            self.bd_cal_panel.maybe_prompt(self._active_setup_name)
 
     def _on_live_tab_changed(self, _idx):
         if self.live_tabs.currentWidget() is self.calib_panel:
@@ -856,6 +883,14 @@ class CryoMainWindow(QMainWindow):
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
+        # BD calibration — load saved values if present, update status
+        bd_vals = setup.get("bd_calibration")
+        if bd_vals:
+            self.bd_cal_panel.load_calibration(bd_vals)
+            date_str = setup.get("bd_calibration_date", "")
+            self.bd_cal_panel.set_status(
+                f"Loaded from setup 'Cryo'"
+                + (f" ({date_str})" if date_str else "") + ".")
         # Restore geometry + piezo toggles (blockSignals to avoid recursive saves)
         geo = cfg.get("geometry",   "Faraday")
         st  = cfg.get("stage_type", "anm200")
@@ -959,6 +994,60 @@ class CryoMainWindow(QMainWindow):
         if not self.status_lbl.text().startswith("⚠"):
             self.status_lbl.setText("Config saved ✓")
             self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
+
+    # ── Metadata bidirectional sync ───────────────────────────────────────────
+    def _sync_traj_meta_to_sl(self):
+        if self._meta_syncing: return
+        self._meta_syncing = True
+        try:
+            self.sl_panel.meta.load_values(self.traj_panel.meta.get_values())
+        finally:
+            self._meta_syncing = False
+
+    def _sync_sl_meta_to_traj(self):
+        if self._meta_syncing: return
+        self._meta_syncing = True
+        try:
+            self.traj_panel.meta.load_values(self.sl_panel.meta.get_values())
+        finally:
+            self._meta_syncing = False
+
+    # ── Timing bidirectional sync ─────────────────────────────────────────────
+    def _sync_traj_timing_to_sl(self):
+        if self._timing_syncing: return
+        self._timing_syncing = True
+        try:
+            self.sl_panel.int_time.setValue(self.traj_panel.int_time.value())
+            self.sl_panel.settle.setValue(self.traj_panel.settle.value())
+            self.sl_panel.timeout.setValue(self.traj_panel.timeout.value())
+        finally:
+            self._timing_syncing = False
+
+    def _sync_sl_timing_to_traj(self):
+        if self._timing_syncing: return
+        self._timing_syncing = True
+        try:
+            self.traj_panel.int_time.setValue(self.sl_panel.int_time.value())
+            self.traj_panel.settle.setValue(self.sl_panel.settle.value())
+            self.traj_panel.timeout.setValue(self.sl_panel.timeout.value())
+        finally:
+            self._timing_syncing = False
+
+    # ── BD Calibration callbacks ──────────────────────────────────────────────
+    def _bd_cal_save(self, vals: list):
+        from datetime import datetime as _dt
+        date_str = _dt.now().strftime("%Y-%m-%d %H:%M")
+        setup = self._active_setup()
+        setup["bd_calibration"]      = vals
+        setup["bd_calibration_date"] = date_str
+        save_setup(CRYO_SETUP, setup)
+        self.bd_cal_panel.set_status(f"Saved {date_str} for setup 'Cryo'.")
+
+    def _bd_cal_load(self):
+        setup = self._active_setup()
+        vals = setup.get("bd_calibration")
+        date_str = setup.get("bd_calibration_date", "unknown date")
+        return vals, date_str
 
     def _on_registry_changed(self):
         registry = self.dev_registry.get_registry()
@@ -1271,6 +1360,9 @@ class CryoMainWindow(QMainWindow):
         if cfg.get("stage_type") == "anm200":
             self._apply_anm200_scaling(cfg)
 
+        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
+        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+
         # ── Build direction queue ─────────────────────────────────────────────
         # Each axis can carry up to 2 [start, stop] directions.
         # For 1D: each direction on the active axis → sequential scans (up to 2).
@@ -1365,6 +1457,7 @@ class CryoMainWindow(QMainWindow):
             c.update(hw_snap)
 
         self._worker = self._wire_worker(first_cfg, setup)
+        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1475,7 +1568,8 @@ class CryoMainWindow(QMainWindow):
         self.status_lbl.setText(msg); self._log_append(msg)
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
-        if self._worker and self._worker.is_paused():
+        worker = self._worker or self._sl_worker
+        if worker and worker.is_paused():
             from PyQt6.QtWidgets import QStyle
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
@@ -1528,6 +1622,7 @@ class CryoMainWindow(QMainWindow):
 
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
+        self._running_scan_setup = ""
         self._calib_timescan = False
         self._interleaved_2d = False
         self.map2d_retrace.hide()
@@ -1551,14 +1646,15 @@ class CryoMainWindow(QMainWindow):
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
-        if not self._scan_running or not self._worker: return
+        worker = self._worker or self._sl_worker
+        if not self._scan_running or not worker: return
         from PyQt6.QtWidgets import QStyle
-        if self._worker.is_paused():
-            self._worker.resume()
+        if worker.is_paused():
+            worker.resume()
             self.pause_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
         else:
-            self._worker.pause()
+            worker.pause()
             self.pause_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
 
@@ -1633,6 +1729,11 @@ class CryoMainWindow(QMainWindow):
         else:
             cfg_list = [copy.deepcopy(cfg)]
 
+        # ── BD calibration — injected into all per-cycle cfgs ────────────────
+        bd_cal = self.bd_cal_panel.get_calibration()
+        for c in cfg_list:
+            c["bd_calibration"] = bd_cal
+
         first_cfg = cfg_list[0]
         self._current_scan_cfg = first_cfg
         self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
@@ -1651,14 +1752,14 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.relay_changed.connect(self._on_scanlist_relay_changed)
         self._sl_worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
-        self._sl_worker.finished.connect(
-            lambda: (self._set_running(False), setattr(self, "_scan_running", False)))
+        self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self.sl_panel.list_bar.setMaximum(100); self.sl_panel.list_bar.setValue(0)
         _, n_x, n_y = self._scan_dims(cfg)
         self.pbar.setMaximum(n_x * n_y); self.pbar.setValue(0)
         self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
+        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
 
@@ -1674,6 +1775,12 @@ class CryoMainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.status_lbl.setText(
                 "Server sync complete" if ok else "Server sync partial (see log)"))
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
+
+    def _on_sl_worker_finished(self):
+        self._set_running(False)
+        self._scan_running = False
+        self._running_scan_setup = ""
+        self._sl_worker = None
 
     def _on_scanlist_relay_changed(self, state):
         for hw in (self.traj_panel.hw, self.sl_panel.hw):
@@ -1692,6 +1799,7 @@ class CryoMainWindow(QMainWindow):
         self._setup_live_display(cfg, active)
 
     def _abort_scanlist(self):
+        if not self._scan_running: return
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting scanlist…")
 
