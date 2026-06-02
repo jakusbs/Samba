@@ -80,12 +80,24 @@ class ScanlistWorker(QThread):
         self.list_name = list_name
         self.relay_flip = relay_flip; self.field_flip = field_flip
         self.setup_name = setup_name
-        self._abort = False; self._runner = None
+        self._abort = False; self._paused = False; self._runner = None
         self._relay_state = 0
 
     def abort(self):
         self._abort = True
         if self._runner: self._runner.abort()
+
+    def pause(self):
+        self._paused = True
+        if self._runner: self._runner.pause()
+
+    def resume(self):
+        self._paused = False
+        if self._runner: self._runner.resume()
+
+    def is_paused(self):
+        if self._runner: return self._runner.is_paused()
+        return self._paused
 
     def run(self):
         try:
@@ -160,6 +172,8 @@ class ScanlistWorker(QThread):
                             f"  Settling field (threshold {rate_thr} /0.5s)…")
                         time.sleep(0.5)
                         while not self._abort:
+                            while self._paused and not self._abort:
+                                time.sleep(0.1)
                             elapsed = time.time() - t_flip
                             if elapsed > timeout:
                                 self.log_msg.emit(

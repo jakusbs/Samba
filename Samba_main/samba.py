@@ -39,6 +39,7 @@ from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
+from panels.bd_calibration import BDCalibrationPanel
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
 from calibration import CalibrationPanel
@@ -210,6 +211,9 @@ class MainWindow(QMainWindow):
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
         self._trmoke_x_factor:   Optional[float]          = None
+        self._running_scan_setup: str                     = ""
+        self._meta_syncing:      bool                     = False
+        self._timing_syncing:    bool                     = False
 
         for n in SETUP_NAMES:
             self._setups[n] = load_setup(n)
@@ -568,8 +572,10 @@ class MainWindow(QMainWindow):
         self.sl_panel    = ScanlistPanel(self._active_setup)
         self.data_browser = DataBrowserPanel(
             lambda: self._active_setup().get("save_dir", "~/moke_data"))
+        self.bd_cal_panel = BDCalibrationPanel()
         self.bottom_tabs.addTab(self.traj_panel,   "Trajectory")
         self.bottom_tabs.addTab(self.sl_panel,     "Scanlist")
+        self.bottom_tabs.addTab(self.bd_cal_panel, "BD Calibration")
         self.bottom_tabs.addTab(self.data_browser,  "Data Browser")
         self.script_console = ScriptConsolePanel()
         self.bottom_tabs.addTab(self.script_console, "Script")
@@ -622,6 +628,24 @@ class MainWindow(QMainWindow):
             setup_getter=self._active_setup,
             config_getter=self._build_full_config)
 
+        # ── Metadata bidirectional sync (Trajectory ↔ Scanlist) ──────────────
+        self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
+        self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
+
+        # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
+        self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.traj_panel.settle.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.traj_panel.timeout.valueChanged.connect(self._sync_traj_timing_to_sl)
+        self.sl_panel.int_time.valueChanged.connect(self._sync_sl_timing_to_traj)
+        self.sl_panel.settle.valueChanged.connect(self._sync_sl_timing_to_traj)
+        self.sl_panel.timeout.valueChanged.connect(self._sync_sl_timing_to_traj)
+
+        # ── BD Calibration panel callbacks ────────────────────────────────────
+        self.bd_cal_panel.set_callbacks(
+            save_cb=self._bd_cal_save,
+            load_cb=self._bd_cal_load,
+        )
+
         # ── Keyboard shortcuts (F5 only — no accidental abort/pause) ──────────
         QShortcut(QKeySequence("F5"), self, activated=self._unified_start)
 
@@ -637,6 +661,9 @@ class MainWindow(QMainWindow):
             self.traj_panel.hw.refresh()
         elif current is self.sl_panel:
             self.sl_panel.hw.refresh()
+        # BD Calibration — prompt once per setup per session
+        elif current is self.bd_cal_panel:
+            self.bd_cal_panel.maybe_prompt(self._active_setup_name)
 
     def _on_live_tab_changed(self, _idx):
         if self.live_tabs.currentWidget() is self.calib_panel:
@@ -654,8 +681,11 @@ class MainWindow(QMainWindow):
         btn = self._setup_btn_grp.button(idx)
         if btn:
             btn.blockSignals(True); btn.setChecked(True); btn.blockSignals(False)
-        # Clear plots so stale range never persists across setups
-        self.map2d.clear(); self.plot1d.clear()
+        # Clear plots so stale range never persists across setups.
+        # Skip the clear if a scan is running — worker signals are still live
+        # and clearing would destroy the active plot buffers.
+        if not self._scan_running:
+            self.map2d.clear(); self.plot1d.clear()
         # Evict stale SimProxy entries for this setup's devices
         for key in ("magnet_device", "relay_device", "keithley_device"):
             dev = self._active_setup().get(key, "")
@@ -732,9 +762,11 @@ class MainWindow(QMainWindow):
         configs = setup.get("configs", [])
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1); cfg = configs[idx]
-        # Populate all registry-driven combos FIRST so load_config finds the items
+        # Populate all registry-driven combos FIRST so load_config finds the items.
+        # preserve=False so load_monitor_settings below controls the selection,
+        # not a stale carry-over from the previous setup.
         registry = self.dev_registry.get_registry()
-        self.traj_panel.populate_monitor_combo(registry)
+        self.traj_panel.populate_monitor_combo(registry, preserve=False)
         self.setup_defaults.set_registry(registry)
         # Load setup defaults and push actuator labels / TR-MOKE device to trajectory
         self.setup_defaults.load(setup)
@@ -764,6 +796,14 @@ class MainWindow(QMainWindow):
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
+        # BD calibration — load saved values if present, update status
+        bd_vals = setup.get("bd_calibration")
+        if bd_vals:
+            self.bd_cal_panel.load_calibration(bd_vals)
+            date_str = setup.get("bd_calibration_date", "")
+            self.bd_cal_panel.set_status(
+                f"Loaded from setup '{self._active_setup_name}'"
+                + (f" ({date_str})" if date_str else "") + ".")
 
     def _save_active_config(self):
         setup   = self._active_setup()
@@ -855,6 +895,60 @@ class MainWindow(QMainWindow):
 
     def _explicit_save(self):
         self._save_active_config(); self.status_lbl.setText("Config saved ✓")
+
+    # ── Metadata bidirectional sync ───────────────────────────────────────────
+    def _sync_traj_meta_to_sl(self):
+        if self._meta_syncing: return
+        self._meta_syncing = True
+        try:
+            self.sl_panel.meta.load_values(self.traj_panel.meta.get_values())
+        finally:
+            self._meta_syncing = False
+
+    def _sync_sl_meta_to_traj(self):
+        if self._meta_syncing: return
+        self._meta_syncing = True
+        try:
+            self.traj_panel.meta.load_values(self.sl_panel.meta.get_values())
+        finally:
+            self._meta_syncing = False
+
+    # ── Timing bidirectional sync ─────────────────────────────────────────────
+    def _sync_traj_timing_to_sl(self):
+        if self._timing_syncing: return
+        self._timing_syncing = True
+        try:
+            self.sl_panel.int_time.setValue(self.traj_panel.int_time.value())
+            self.sl_panel.settle.setValue(self.traj_panel.settle.value())
+            self.sl_panel.timeout.setValue(self.traj_panel.timeout.value())
+        finally:
+            self._timing_syncing = False
+
+    def _sync_sl_timing_to_traj(self):
+        if self._timing_syncing: return
+        self._timing_syncing = True
+        try:
+            self.traj_panel.int_time.setValue(self.sl_panel.int_time.value())
+            self.traj_panel.settle.setValue(self.sl_panel.settle.value())
+            self.traj_panel.timeout.setValue(self.sl_panel.timeout.value())
+        finally:
+            self._timing_syncing = False
+
+    # ── BD Calibration callbacks ──────────────────────────────────────────────
+    def _bd_cal_save(self, vals: list):
+        from datetime import datetime as _dt
+        date_str = _dt.now().strftime("%Y-%m-%d %H:%M")
+        setup = self._active_setup()
+        setup["bd_calibration"]      = vals
+        setup["bd_calibration_date"] = date_str
+        save_setup(self._active_setup_name, setup)
+        self.bd_cal_panel.set_status(f"Saved {date_str} for setup '{self._active_setup_name}'.")
+
+    def _bd_cal_load(self):
+        setup = self._active_setup()
+        vals = setup.get("bd_calibration")
+        date_str = setup.get("bd_calibration_date", "unknown date")
+        return vals, date_str
 
     def _on_registry_changed(self):
         """Called when the Device Registry is saved — update the right panel and monitor."""
@@ -1173,6 +1267,9 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass  # fail-open: device unreachable, proceed
 
+        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
+        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
 
@@ -1183,6 +1280,7 @@ class MainWindow(QMainWindow):
 
         self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
+        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1225,6 +1323,7 @@ class MainWindow(QMainWindow):
         self._wire_worker(self._worker)
 
         self._scan_start_time = _time.time()
+        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -1236,7 +1335,10 @@ class MainWindow(QMainWindow):
             if lbl in self._scan_data: self._scan_data[lbl][iy, ix] = v
         mode, _, __ = self._scan_dims(self._current_scan_cfg)
         if mode == "2D":
-            disp = self.right_panel.get_display_sensor()
+            # Use the scan config's display sensor while running so a
+            # temporary setup switch can't redirect updates to the wrong sensor.
+            disp = (self._current_scan_cfg.get("display_sensor", "")
+                    or self.right_panel.get_display_sensor())
             self.map2d.update_point(ix, iy, vals.get(disp, float("nan")))
         else:
             self.plot1d.update_point(ix, x_actual, vals)
@@ -1280,8 +1382,9 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText(msg); self._log_append(msg)
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
-        # Detect auto-pause from ScanRunner and update button state
-        if self._worker and self._worker.is_paused():
+        # Detect auto-pause from ScanRunner (single scan or scanlist) and update button
+        _active_worker = self._worker or self._sl_worker
+        if _active_worker and _active_worker.is_paused():
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
@@ -1306,6 +1409,7 @@ class MainWindow(QMainWindow):
         cfg_type = self._current_scan_cfg.get("scan_type", "") if self._current_scan_cfg else ""
         release_lock(self._active_setup_name)
         self._scan_running = False; self._set_running(False)
+        self._running_scan_setup = ""
         self._calib_timescan = False
         # Auto-zero the field after every DC hysteresis scan
         if cfg_type == "DC_HYST":
@@ -1340,14 +1444,16 @@ class MainWindow(QMainWindow):
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
-        if not self._scan_running or not self._worker: return
+        if not self._scan_running: return
+        worker = self._worker or self._sl_worker
+        if not worker: return
         _style = self.style()
-        if self._worker.is_paused():
-            self._worker.resume()
+        if worker.is_paused():
+            worker.resume()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
         else:
-            self._worker.pause()
+            worker.pause()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
 
@@ -1368,6 +1474,9 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
+        # ── BD calibration — injected into cfg for HDF5 storage ──────────────
+        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
                                          setup_name=self._active_setup_name)
@@ -1382,10 +1491,10 @@ class MainWindow(QMainWindow):
         self._sl_worker.relay_changed.connect(self._on_scanlist_relay_changed)
         self._sl_worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
-        self._sl_worker.finished.connect(
-            lambda: (self._set_running(False), setattr(self, "_scan_running", False)))
+        self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self.sl_panel.list_bar.setMaximum(100); self.sl_panel.list_bar.setValue(0)
+        self._running_scan_setup = self._active_setup_name
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
 
@@ -1416,7 +1525,14 @@ class MainWindow(QMainWindow):
             active = [s for s in cfg["sensors"] if s["enabled"]]
         self._alloc_scan_data(cfg, active); self._setup_live_display(cfg, active)
 
+    def _on_sl_worker_finished(self):
+        self._set_running(False)
+        self._scan_running = False
+        self._running_scan_setup = ""
+        self._sl_worker = None
+
     def _abort_scanlist(self):
+        if not self._scan_running: return
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting scanlist…")
 

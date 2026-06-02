@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from panels._widgets import NoScrollSpinBox, MokeMetadataGroup
+from panels._widgets import NoScrollSpinBox, NoScrollDoubleSpinBox, MokeMetadataGroup
 from panels.hardware_panel import HardwarePanel
 
 
@@ -36,6 +36,16 @@ class ScanlistPanel(QWidget):
         root.addLayout(top_row)
 
         self.hw = HardwarePanel(self._setup_getter, "Hardware"); root.addWidget(self.hw)
+
+        # ── Timing group — kept in sync with Trajectory tab ──────────────────
+        tg = QGroupBox("Timing"); tl = QGridLayout(tg)
+        tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
+        def _dbl(lo, hi, dec, v):
+            w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
+        tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
+        tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
+        tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
+        root.addWidget(tg)
 
         sl_row = QHBoxLayout(); sl_row.setSpacing(10)
         pg = QGroupBox("Polarity control"); pl = QHBoxLayout(pg)

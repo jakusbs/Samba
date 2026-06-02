@@ -148,9 +148,10 @@ class ScanRunner:
         self._abort  = False
         self._paused = False
 
-    def abort(self):  self._abort  = True
-    def pause(self):  self._paused = True
-    def resume(self): self._paused = False
+    def abort(self):     self._abort  = True
+    def pause(self):     self._paused = True
+    def resume(self):    self._paused = False
+    def is_paused(self): return self._paused
 
     def run(self, cbs: dict) -> Optional[str]:
         """
@@ -1591,6 +1592,12 @@ class ScanRunner:
                     integ_time_attr = s.get("integ_time_attr", ""),
                     y_axis          = s.get("y_axis", "Y1"),
                     plot_axis       = s.get("plot_axis", s.get("y_axis", "Y1")))
+
+            # BD calibration — 6 mV values at λ/2 tick positions 0,5,10,15,20,25
+            bd_cal = cfg.get("bd_calibration")
+            if bd_cal:
+                cal_arr = np.array(bd_cal, dtype=np.float64)
+                _ds("calibration", cal_arr, "λ/2 calibration (mV)", "mV", "calibration")
 
             _wsa(f, "_x_key", ax_key)
             f.attrs["_is_2d"]   = is_2d

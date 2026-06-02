@@ -1015,14 +1015,19 @@ class TrajectoryPanel(QWidget):
         except Exception as e:
             self._rtv40_status.setText(f"⚠ {e}")
 
-    def populate_monitor_combo(self, registry: list):
+    def populate_monitor_combo(self, registry: list, preserve: bool = True):
         """Fill AC monitor, DC monitor, DC device, and AC device combos
-        from the device registry.  Safe to call multiple times."""
+        from the device registry.  Safe to call multiple times.
+
+        preserve=False is used on setup switch so load_monitor_settings
+        (called immediately after) exclusively controls the selection,
+        rather than carrying over the previous setup's device name.
+        """
         self._mon_registry = registry
 
         # ── AC + DC monitor dropdowns ─────────────────────────────────────────
         for dev_combo in (self._ac_mon_dev, self._dc_mon_dev):
-            prev = dev_combo.currentText()
+            prev = dev_combo.currentText() if preserve else ""
             dev_combo.blockSignals(True); dev_combo.clear()
             for dev in registry:
                 dev_combo.addItem(dev["name"], dev["tango_path"])
