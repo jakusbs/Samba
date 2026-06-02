@@ -148,15 +148,15 @@ class ScanlistWorker(QThread):
                         self.log_msg.emit(f"⚠ field flip write: {err}")
                     else:
                         self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {neg_val:.4f} A")
-                        # Poll field readback until within tolerance of target
-                        tol     = self.setup.get("field_settle_tol",     0.02)
-                        timeout = self.setup.get("field_settle_timeout", 300.0)
-                        t_flip  = time.time()
+                        # Wait until field stops changing (rate-of-change settles to ~0).
+                        # We don't assume a target value — just wait for |Δfield/0.5s|
+                        # to drop below field_settle_rate (default 1 mT equivalent).
+                        rate_thr = self.setup.get("field_settle_rate",    1e-3)
+                        timeout  = self.setup.get("field_settle_timeout", 300.0)
+                        t_flip   = time.time()
                         last_log = t_flip
-                        target_fld_est = -cur_val * 0.15
-                        v0, _ = safe_read(mag_p, mag_fld)
-                        if v0 is not None:
-                            target_fld_est = -v0
+                        prev_fv, _ = safe_read(mag_p, mag_fld)
+                        time.sleep(0.5)
                         while not self._abort:
                             elapsed = time.time() - t_flip
                             if elapsed > timeout:
@@ -164,23 +164,20 @@ class ScanlistWorker(QThread):
                                     f"⚠ Field settle timeout after {timeout:.0f} s")
                                 break
                             fv, ferr = safe_read(mag_p, mag_fld)
-                            if ferr:
-                                time.sleep(0.5); continue
-                            if abs(target_fld_est) > 1e-6:
-                                err_frac = abs(fv - target_fld_est) / abs(target_fld_est)
-                            else:
-                                err_frac = abs(fv - target_fld_est)
+                            if ferr or fv is None or prev_fv is None:
+                                time.sleep(0.5); prev_fv = fv; continue
+                            rate = abs(fv - prev_fv)   # change over last 0.5 s
                             if time.time() - last_log >= 10.0:
                                 self.log_msg.emit(
-                                    f"  Waiting for field: {fv:+.4f} T "
-                                    f"(target {target_fld_est:+.4f} T, "
-                                    f"{err_frac*100:.1f}% off, {elapsed:.0f} s)")
+                                    f"  Waiting for field: {fv:+.4f}  "
+                                    f"(Δ={rate:.4f}/0.5s, {elapsed:.0f} s)")
                                 last_log = time.time()
-                            if err_frac <= tol:
+                            if rate <= rate_thr:
                                 self.log_msg.emit(
-                                    f"Field settled: {fv:+.4f} T "
-                                    f"({err_frac*100:.2f}% off target, {elapsed:.1f} s)")
+                                    f"Field settled: {fv:+.4f}  "
+                                    f"(Δ={rate:.4f}/0.5s, {elapsed:.1f} s)")
                                 break
+                            prev_fv = fv
                             time.sleep(0.5)
 
             v, _ = safe_read(mag_p, mag_fld)
