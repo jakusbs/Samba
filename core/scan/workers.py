@@ -156,6 +156,8 @@ class ScanlistWorker(QThread):
                         t_flip   = time.time()
                         last_log = t_flip
                         prev_fv, _ = safe_read(mag_p, mag_fld)
+                        self.log_msg.emit(
+                            f"  Settling field (threshold {rate_thr} /0.5s)…")
                         time.sleep(0.5)
                         while not self._abort:
                             elapsed = time.time() - t_flip
