@@ -1349,3 +1349,90 @@ every sync.
 3. The full path looks like:
    `/run/user/1001/gvfs/smb-share:server=nas22.ethz.ch,share=matl_ips_intermag_s1/projects/MOKE_lab/Scanning/Data`
 4. Set once per setup; the value is saved to the setup JSON automatically
+
+---
+
+## 23. Recent Changes (June 2026) — Scan Engine Reliability & Bug Fixes
+
+### Trigger recovery after ZI device restart mid-scan
+
+**File:** `core/scan/runner.py` — `_do_acquire()`
+
+Previously, the first `command_inout_asynch` failure on a sensor device permanently
+removed it from `trigger_devs` for the rest of the scan. If the ZI lock-in server
+crashed and was restarted mid-scan, it stopped receiving `Start` commands.
+
+**Fix:** Per-device consecutive-failure counters (`_trigger_consec_fails`) persist
+across points. On the first failure the proxy is refreshed via `fresh_proxy()` and
+the trigger is retried immediately. The device is only permanently removed after
+`AUTO_PAUSE_THRESHOLD` (5) consecutive failures. Counter resets to 0 on any success.
+
+### Per-point retry loop with immediate pause
+
+**File:** `core/scan/runner.py`
+
+The acquire cycle (lock-in settling + trigger + Phase A/B + guard + read) is now
+wrapped in a `while not self._abort` retry loop. If `_do_acquire` returns `ok=False`
+(any sensor read NaN), the point is retried up to `AUTO_PAUSE_THRESHOLD` (5) times.
+
+Key behaviour changes:
+- **Immediate pause**: when all attempts fail, `self._paused = True` is set and a
+  `while self._paused` wait loop runs **inside** the retry loop — the scan blocks on
+  the failing point without advancing to the next one.
+- **Same-point resume**: on Resume, the outer `while` iterates and retries the same
+  point from scratch (5 fresh attempts) rather than advancing.
+- **Abort-safe**: `if self._abort: break` exits both the inner `for` and outer `while`
+  cleanly at any point.
+
+### `_do_acquire()` extracted method
+
+The trigger dispatch + Phase A (wait for RUNNING) + Phase B (wait for NOT RUNNING) +
+guard delay + batch read is now a single method `_do_acquire()`. Returns
+`(vals, t_trigger, ok)`. `trigger_devs` is modified in-place (removals persist).
+This keeps the retry loop in `run()` readable and avoids deep indentation.
+
+### Field-flip settle: rate-of-change instead of target-based polling
+
+**File:** `core/scan/workers.py` — `ScanlistWorker._run_list()`
+
+The old code read the field readback **after** writing the flipped current, so `v0`
+was already mid-transition and `target_fld_est = -v0` was wrong.
+
+**Fix:** Poll every 0.5 s and wait until `|Δfield|` between consecutive reads drops
+below `field_settle_rate`. No target value assumed — works for any B-H curve.
+
+| Setup | Attribute | Units | `field_settle_rate` | Physical threshold |
+|---|---|---|---|---|
+| Green / IR | `field_polar_corr` | mT | `2.0` | 2 mT / 0.5 s |
+| Cryo | `MagneticField` | T | `0.002` | 2 mT / 0.5 s |
+
+`field_settle_timeout` (300 s) and `field_settle_rate` are both overridable in the
+setup JSON. A "Settling field…" line is always logged at settle start so fast coils
+(< 500 ms) don't go silent in the log.
+
+### `_trmoke_x_factor` AttributeError on scanlist start
+
+**File:** `Samba_main/samba.py`
+
+`_on_point` referenced `self._trmoke_x_factor` which was only assigned inside
+`_start_scan()` and `_start_calib_timescan()`. Starting a scanlist directly (which
+connects `sl_worker.point_done` → `_on_point` without going through `_start_scan()`)
+caused an immediate `AttributeError` / core dump.
+
+**Fix:** `self._trmoke_x_factor: Optional[float] = None` added to `__init__`.
+
+### Unit tests
+
+**File:** `test_runner.py` (repo root)
+
+14 tests covering:
+- `_do_acquire` happy path (correct values, `trigger_devs` unchanged, no-trigger fallback)
+- Read failures with internal retries (NaN on persistent failure, recovery within budget)
+- Trigger proxy refresh and permanent removal after `AUTO_PAUSE_THRESHOLD` failures
+- Per-point retry loop (first-attempt success, recovery on Nth attempt, all-fail → pause, abort mid-retry)
+
+Run with: `python test_runner.py -v` (no Qt, TANGO, or hardware needed).
+
+**Note:** Tests must patch `runner.fresh_proxy` (the module's own binding) rather than
+`hardware.fresh_proxy`, because `runner.py` uses `from hardware import fresh_proxy` which
+creates a local binding at import time.
