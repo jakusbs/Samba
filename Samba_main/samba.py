@@ -1429,7 +1429,7 @@ class MainWindow(QMainWindow):
                            "_temp_sweep_start_K", "_temp_sweep_stop_K", "_temp_sweep_step_K"):
                     entry.pop(_k, None)
                 append_measurement(nb, entry)
-            QMessageBox.information(self, "Scan complete", f"Saved:\n{self._last_fn}")
+            self._log_append(f"✓ Scan complete — saved {self._last_fn}", level="info")
             self._last_fn = None
         self._update_estimate()
         _setup = self._active_setup()
@@ -1497,7 +1497,7 @@ class MainWindow(QMainWindow):
         try: self.data_browser.refresh()
         except Exception:
             log.debug("Data browser refresh failed after scanlist", exc_info=True)
-        QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        self._log_append(f"✓ Scanlist complete — saved {txt_path}", level="info")
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):

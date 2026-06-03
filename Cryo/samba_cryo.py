@@ -1632,8 +1632,7 @@ class CryoMainWindow(QMainWindow):
         if self._last_fn:        saved.append(self._last_fn);        self._last_fn = None
         if self._last_fn_retrace: saved.append(self._last_fn_retrace); self._last_fn_retrace = None
         if saved:
-            QMessageBox.information(self, "Scan complete",
-                                    "Saved:\n" + "\n".join(saved))
+            self._log_append("✓ Scan complete — saved " + ", ".join(saved), level="info")
         self._update_estimate()
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
@@ -1764,7 +1763,7 @@ class CryoMainWindow(QMainWindow):
             self.data_browser.refresh()
         except Exception:
             log.debug("Failed to refresh data browser after scanlist", exc_info=True)
-        QMessageBox.information(self, "Scanlist complete", f"Saved:\n{txt_path}")
+        self._log_append(f"✓ Scanlist complete — saved {txt_path}", level="info")
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):
