@@ -1436,3 +1436,79 @@ Run with: `python test_runner.py -v` (no Qt, TANGO, or hardware needed).
 **Note:** Tests must patch `runner.fresh_proxy` (the module's own binding) rather than
 `hardware.fresh_proxy`, because `runner.py` uses `from hardware import fresh_proxy` which
 creates a local binding at import time.
+
+---
+
+## 24. Recent Changes (June 2026) — UI Polish & Metadata
+
+### Bug fixes (Samba_main + Cryo)
+
+- **Scanlist pausable**: `_toggle_pause` now uses `self._worker or self._sl_worker` so
+  the Pause button works during a scanlist run in both apps.
+- **Scanlist abort**: `_sl_worker` is cleared to `None` in a dedicated
+  `_on_sl_worker_finished` handler; `_abort_scanlist` is guarded by `_scan_running` to
+  prevent stale-reference no-ops.
+- **`_on_status` auto-pause detection**: now checks `_sl_worker` as fallback so the
+  Pause→Resume button label updates correctly during a scanlist.
+- **Samba_main only — setup-switch during scan**: `map2d.clear(); plot1d.clear()` are
+  now guarded by `if not self._scan_running`, preventing plot buffer destruction when
+  the user accidentally clicks Green↔IR during a measurement.
+- **Samba_main only — stale field-sweep monitor**: `populate_monitor_combo` gained a
+  `preserve: bool = True` parameter; called with `preserve=False` on config load to
+  prevent a stale device/attribute carrying over after setup switch.
+
+### New features (Samba_main + Cryo)
+
+**Bidirectional metadata sync** — Trajectory and Scanlist tabs share a
+`MokeMetadataGroup`; changes in either tab immediately update the other.
+A `_meta_syncing` flag prevents feedback loops.
+
+**Bidirectional timing sync** — The Timing group (Int / Settle / Timeout) on the
+Scanlist tab stays in sync with the Trajectory tab via a `_timing_syncing` flag.
+
+**Timing group moved into top row** — The Timing group (`QGroupBox`) now sits inline
+in `top_row` between the "Active config" info widget and the Metadata group, saving a
+row of vertical space.
+
+**BD-calibration tab** — New tab between Scanlist and Data Browser:
+- 6 editable mV spinboxes at λ/2 plate tick positions 0, 5, 10, 15, 20, 25
+- Save / Load buttons; values persisted per-setup in the setup JSON
+  (`bd_calibration`, `bd_calibration_date` keys)
+- First time the tab is shown per setup per session, a dialog offers to reload the
+  last saved calibration (`maybe_prompt`)
+- On every scan the 6 mV values are injected into `cfg["bd_calibration"]` and written
+  to HDF5 as `/data/calibration` (float64 array, 6 elements)
+- Implementation lives in `core/bd_calibration.py`; `Samba_main/panels/bd_calibration.py`
+  is a thin re-export wrapper
+
+**Post-scan completion popups removed** — The "Scan complete" and "Scanlist complete"
+`QMessageBox.information` dialogs replaced with color-coded log lines
+(`✓ Scan complete — saved <path>`). The "Abort and quit?" close confirmation is
+unchanged.
+
+**MokeMetadataGroup additions** (both apps, `Samba_main/panels/_widgets.py` and
+`Cryo/panels.py`):
+- **Device ID field** (`meta_device`, key `"device_id"`) added to the right of the
+  Sample field on the same row
+- **R4W / R2W spinboxes** (keys `"r_4wire_kohm"`, `"r_2wire_kohm"`, range 0–10 000 kΩ,
+  2 dp) placed in a new row below Sample/Device, above Notes
+- `build_scan_name()` inserts device_id between sample and amplitude when non-empty
+- All new fields emit `changed`, are round-tripped through `get_values`/`load_values`,
+  and default gracefully on old configs (empty string / 0.0)
+
+### Core engine additions (`core/scan/`)
+
+- `ScanRunner.is_paused()` added (`runner.py`)
+- `ScanlistWorker` gained `_paused` flag and `pause()`/`resume()`/`is_paused()` proxy
+  methods delegating to `_runner` (`workers.py`)
+- Field-flip settle loop in `ScanlistWorker._run_list` now respects `_paused`
+- `_open_hdf5` writes BD calibration array to `/data/calibration` when
+  `cfg["bd_calibration"]` is present
+- `_move()` coerces `numpy.float64` targets to Python `float` before `safe_write` to
+  avoid pytango type dispatch errors
+
+### Cleanup
+
+- `_running_scan_setup: str` instance variable removed from both `MainWindow` and
+  `CryoMainWindow` — it was set but never read (the plot-buffer guard uses
+  `_scan_running` instead)
