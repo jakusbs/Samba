@@ -4,7 +4,7 @@ ScanlistPanel — N-scan list with polarity control.
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QPushButton, QGroupBox, QProgressBar
+    QLabel, QLineEdit, QPushButton, QGroupBox
 )
 from PyQt6.QtCore import Qt
 

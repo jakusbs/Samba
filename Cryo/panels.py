@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QDoubleSpinBox, QSpinBox,
-    QCheckBox, QGroupBox, QTabWidget, QComboBox, QProgressBar,
+    QCheckBox, QGroupBox, QTabWidget, QComboBox,
     QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
     QButtonGroup, QRadioButton, QAbstractItemView, QInputDialog,
     QStackedWidget

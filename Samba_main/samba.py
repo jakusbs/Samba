@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QProgressBar, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
+    QLabel, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
     QComboBox, QLineEdit, QPushButton, QFileDialog, QButtonGroup, QFrame, QStyle,
     QStatusBar
 )
@@ -165,9 +165,6 @@ QPushButton#abort_btn{background:#f38ba8;color:#1e1e2e;font-weight:bold;border:n
 QPushButton#abort_btn:hover{background:#e07a97;}
 QPushButton#pause_btn{background:#fab387;color:#1e1e2e;font-weight:bold;border:none;}
 QPushButton#pause_btn:hover{background:#e8976e;}
-QProgressBar{background:#313244;border:1px solid #45475a;
-  border-radius:4px;text-align:center;color:#cdd6f4;}
-QProgressBar::chunk{background:#89b4fa;border-radius:3px;}
 QTextEdit{background:#12121f;border:1px solid #313244;
   border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;font-size:10px;}
 QCheckBox{spacing:6px;}
@@ -1360,7 +1357,6 @@ class MainWindow(QMainWindow):
 
         self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
-        _, n_x, n_y = self._scan_dims(cfg)
         # DC_HYST: reset DC live-plot accumulators
         if cfg.get("scan_type") == "DC_HYST":
             self._dc_loop_x = []; self._dc_loop_y = {}; self._last_dc_cycle = 0

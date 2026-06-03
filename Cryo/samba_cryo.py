@@ -33,7 +33,7 @@ from typing import Dict, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QProgressBar, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
+    QLabel, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
     QComboBox, QLineEdit, QPushButton, QFileDialog, QButtonGroup, QFrame,
     QStatusBar
 )
@@ -180,9 +180,6 @@ QPushButton#abort_btn{background:#f38ba8;color:#1e1e2e;font-weight:bold;border:n
 QPushButton#abort_btn:hover{background:#e07a97;}
 QPushButton#pause_btn{background:#fab387;color:#1e1e2e;font-weight:bold;border:none;border-radius:5px;padding:0 12px;}
 QPushButton#pause_btn:hover{background:#e8976e;}
-QProgressBar{background:#313244;border:1px solid #45475a;
-  border-radius:4px;text-align:center;color:#cdd6f4;}
-QProgressBar::chunk{background:#0080fe;border-radius:3px;}
 QTextEdit{background:#12121f;border:1px solid #313244;
   border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;font-size:10px;}
 QCheckBox{spacing:6px;}
@@ -1759,7 +1756,6 @@ class CryoMainWindow(QMainWindow):
             self._current_scan_cfg = next_cfg
             self._setup_live_display(next_cfg, active)
             self._alloc_scan_data(next_cfg, active)
-            _, n_x, n_y = self._scan_dims(next_cfg)
             self._scan_start_time = _time.time()
             self._last_fn = None
             self._worker = self._wire_worker(next_cfg, setup)
