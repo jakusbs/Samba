@@ -18,7 +18,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox
 from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
@@ -40,6 +40,7 @@ class Live2DWidget(QWidget):
         self._cmap  = "RdBu_r"
         self._sensor = self._xlbl = self._ylbl = ""
         self._dirty = False
+        self._aspect = "auto"
 
         self.fig    = Figure(figsize=(6, 5), dpi=100, facecolor="#1e1e2e")
         self.ax     = self.fig.add_subplot(111)
@@ -47,8 +48,22 @@ class Live2DWidget(QWidget):
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
 
+        # Toolbar row: nav toolbar + per-view toggles
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        self.autocolor_cb = QCheckBox("Auto color"); self.autocolor_cb.setChecked(True)
+        self.autocolor_cb.setToolTip("Rescale the colour range to the data as points arrive.")
+        self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.autocolor_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
+        top.addWidget(self.autocolor_cb)
+        self.aspect_cb = QCheckBox("Equal aspect")
+        self.aspect_cb.setToolTip("Show X and Y at the same scale (true proportions for spatial maps).")
+        self.aspect_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.aspect_cb.toggled.connect(self._on_aspect_toggled)
+        top.addWidget(self.aspect_cb)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
         self._style_axes()
 
@@ -68,13 +83,20 @@ class Live2DWidget(QWidget):
             return
         self._dirty = False
         if self._img is not None and self._data is not None:
-            v = self._data[np.isfinite(self._data)]
-            if len(v) > 1:
-                lo, hi = v.min(), v.max()
-                if lo == hi: hi = lo + 1e-12
-                self._img.set_clim(lo, hi)
+            if self.autocolor_cb.isChecked():
+                v = self._data[np.isfinite(self._data)]
+                if len(v) > 1:
+                    lo, hi = v.min(), v.max()
+                    if lo == hi: hi = lo + 1e-12
+                    self._img.set_clim(lo, hi)
             self._img.set_data(self._data)
         self.canvas.draw_idle()
+
+    def _on_aspect_toggled(self, on: bool):
+        self._aspect = "equal" if on else "auto"
+        if self._img is not None:
+            self.ax.set_aspect(self._aspect)
+            self.fig.tight_layout(); self.canvas.draw_idle()
 
     def setup(self, x_arr, y_arr, xl: str, yl: str, sensor: str, cmap: str):
         self._xarr = x_arr; self._yarr = y_arr; self._cmap = cmap
@@ -88,7 +110,7 @@ class Live2DWidget(QWidget):
             self.canvas.draw_idle(); return
         ext = [self._xarr[0], self._xarr[-1], self._yarr[0], self._yarr[-1]]
         self._img = self.ax.imshow(
-            self._data, origin="lower", aspect="auto",
+            self._data, origin="lower", aspect=self._aspect,
             extent=ext, cmap=self._cmap, interpolation="nearest")
         if self._cb:
             try: self._cb.remove()
@@ -150,8 +172,19 @@ class Live1DWidget(QWidget):
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
 
+        # Toolbar row: nav toolbar + auto-scale toggle
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
+        self.autoscale_cb.setToolTip(
+            "Rescale axes to the data on every update.\n"
+            "Uncheck to keep your zoom/pan during a live scan.")
+        self.autoscale_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.autoscale_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
+        top.addWidget(self.autoscale_cb)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
         self._style_axes()
 
@@ -190,29 +223,32 @@ class Live1DWidget(QWidget):
                 m = np.isfinite(y)
                 if m.any(): line.set_data(np.arange(len(y))[m], y[m])
 
-        # Manually compute limits — relim() is unreliable on twinx.
-        # X-axis is shared between ax1 and ax2, so compute x from all lines.
-        all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
-                     for l in ax.get_lines()
-                     if len(l.get_xdata()) > 0]
-        if all_lines:
-            all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
-            mx = np.isfinite(all_x)
-            if mx.any():
-                xlo, xhi = all_x[mx].min(), all_x[mx].max()
-                pad = max(abs(xhi - xlo) * 0.02, 1e-12)
-                self.ax1.set_xlim(xlo - pad, xhi + pad)
-        # Y-limits per axis (independent)
-        for ax in [self.ax1, self.ax2]:
-            lines = [l for l in ax.get_lines()
-                     if len(l.get_ydata()) > 0]
-            if not lines: continue
-            all_y = np.concatenate([l.get_ydata() for l in lines])
-            my = np.isfinite(all_y)
-            if my.any():
-                ylo, yhi = all_y[my].min(), all_y[my].max()
-                pad = max(abs(yhi - ylo) * 0.05, 1e-12)
-                ax.set_ylim(ylo - pad, yhi + pad)
+        # Autoscale (skip entirely when the user has unchecked it, so a manual
+        # zoom/pan survives live updates instead of being reset every frame).
+        if self.autoscale_cb.isChecked():
+            # Manually compute limits — relim() is unreliable on twinx.
+            # X-axis is shared between ax1 and ax2, so compute x from all lines.
+            all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
+                         for l in ax.get_lines()
+                         if len(l.get_xdata()) > 0]
+            if all_lines:
+                all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
+                mx = np.isfinite(all_x)
+                if mx.any():
+                    xlo, xhi = all_x[mx].min(), all_x[mx].max()
+                    pad = max(abs(xhi - xlo) * 0.02, 1e-12)
+                    self.ax1.set_xlim(xlo - pad, xhi + pad)
+            # Y-limits per axis (independent)
+            for ax in [self.ax1, self.ax2]:
+                lines = [l for l in ax.get_lines()
+                         if len(l.get_ydata()) > 0]
+                if not lines: continue
+                all_y = np.concatenate([l.get_ydata() for l in lines])
+                my = np.isfinite(all_y)
+                if my.any():
+                    ylo, yhi = all_y[my].min(), all_y[my].max()
+                    pad = max(abs(yhi - ylo) * 0.05, 1e-12)
+                    ax.set_ylim(ylo - pad, yhi + pad)
         self.canvas.draw_idle()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────

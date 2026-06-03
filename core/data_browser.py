@@ -379,11 +379,28 @@ class BrowserPlotWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        self.aspect_cb = QCheckBox("Equal aspect")
+        self.aspect_cb.setToolTip("Show X and Y at the same scale (true proportions for spatial maps).")
+        self.aspect_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.aspect_cb.toggled.connect(self._on_aspect_toggled)
+        top.addWidget(self.aspect_cb)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
-        self._cb    = None
+        self._cb     = None
+        self._aspect = "auto"
+        self._is_2d  = False
         self._style()
+
+    def _on_aspect_toggled(self, on: bool):
+        self._aspect = "equal" if on else "auto"
+        if self._is_2d:
+            self.ax.set_aspect(self._aspect)
+            self.fig.tight_layout(); self.canvas.draw_idle()
 
     def _style(self):
         self.ax.set_facecolor("#12121f")
@@ -396,6 +413,7 @@ class BrowserPlotWidget(QWidget):
             try: self._cb.remove()
             except Exception: pass
             self._cb = None
+        self._is_2d = False
         self.ax.cla(); self._style()
         self.canvas.draw_idle()
 
@@ -434,9 +452,10 @@ class BrowserPlotWidget(QWidget):
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
         if vmin == vmax: vmax = vmin + 1e-12
-        img = self.ax.imshow(data, origin="lower", aspect="auto",
+        img = self.ax.imshow(data, origin="lower", aspect=self._aspect,
                              extent=ext, cmap=cmap, interpolation="nearest",
                              vmin=vmin, vmax=vmax)
+        self._is_2d = True
         self._cb = self.fig.colorbar(img, ax=self.ax, fraction=0.046, pad=0.04)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
         self.ax.set_xlabel(x_label, color="#aaaacc")

@@ -1712,3 +1712,27 @@ called `read_1d` + `plot_1d`, so changing the Y channel collapsed the map into a
   `_plot_current()` instead of an inline auto-plot block.
 - A `ndim == 2` guard prevents `imshow` from choking if a 1D column is picked
   while in map mode.
+
+### Live-plot polish — view toggles (matplotlib retained)
+
+Task 6 was scoped to keep matplotlib (right fit for scientific data + the
+zoom/pan/save toolbar + HDF5/PyMca ecosystem) and add a few safe, user-driven
+view controls. All changes are self-contained in the plot widgets — no
+`samba.py` wiring.
+
+**`core/plot_widgets.py`:**
+- `Live1DWidget` — **"Auto-scale"** checkbox (default on) in the toolbar row.
+  When unchecked, `_throttled_draw()` skips the per-frame x/y limit recompute,
+  so a manual zoom/pan **survives live updates** instead of being reset every
+  80 ms. Re-checking marks the widget dirty so it rescales immediately.
+- `Live2DWidget` — **"Auto color"** (default on; gates the per-frame `clim`
+  recompute) and **"Equal aspect"** (X/Y at the same scale — true proportions
+  for spatial maps) toggles. Aspect is stored in `self._aspect` and applied in
+  `_redraw()` and live via `_on_aspect_toggled()`.
+
+**`core/data_browser.py`:**
+- `BrowserPlotWidget` — **"Equal aspect"** toggle for past 2D maps. Tracks
+  `self._is_2d` (set in `plot_2d`, cleared in `clear`) so toggling only affects
+  colour maps, never 1D line plots; `plot_2d` honours `self._aspect`.
+
+Shared modules → both Samba_main and Cryo get all of the above.
