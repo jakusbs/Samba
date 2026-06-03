@@ -1512,3 +1512,65 @@ unchanged.
 - `_running_scan_setup: str` instance variable removed from both `MainWindow` and
   `CryoMainWindow` — it was set but never read (the plot-buffer guard uses
   `_scan_running` instead)
+- `QProgressBar` import and related dead CSS rules (`QProgressBar{...}` / `::chunk`)
+  removed from both apps and `Samba_main/panels/scanlist.py`, `Cryo/panels.py`
+- Orphaned `_, n_x, n_y = self._scan_dims(...)` locals removed (were computed but
+  never used after the progress-bar removal)
+
+---
+
+## 25. Recent Changes (June 2026) — Bottom Status Bar
+
+### Always-visible scan status bar
+
+A `QStatusBar` strip sits at the very bottom of both `MainWindow` and `CryoMainWindow`,
+visible at all times. It displays 7 fields in a single row:
+
+```
+Scan: 1/4  │  Start: 14:32:01  │  Elapsed: 0:42  │  Run left: 3:18  │  Scan left: 0:51  │  Dead: 12%  │  Done: 18%
+```
+
+**Implementation** (`samba.py` / `samba_cryo.py`):
+
+- `_build_status_bar()` — creates the bar, three inner helper functions:
+  - `_mk_field()` — value label (`color:#cdd6f4`, 12 px)
+  - `_mk_caption(text)` — grey descriptor label (`color:#a6adc8`, 12 px)
+  - `_mk_sep()` — `│` separator (`color:#45475a`, 12 px)
+- `_refresh_status_bar()` — called from `_on_progress` and the 1 Hz `QTimer`; computes
+  and writes all 7 fields:
+  - **Scan** — `{_run_scans_done + 1} / {_run_scans_total}`
+  - **Start** — wall-clock time of `_run_start_time` (HH:MM:SS)
+  - **Elapsed** — `now - _run_start_time`
+  - **Run left** — whole-run proportional estimate:
+    `run_elapsed × (1 − frac) / frac` where `frac = _run_scans_done_frac + done/total * (1/_run_scans_total)`
+  - **Scan left** — warmup-corrected per-scan estimate: measured from point 2 onward
+    (`_scan_first_pt_time`); `(total − done) × rate_per_pt` where rate is
+    `(now − _scan_first_pt_time) / (done − 1)`
+  - **Dead%** — `(scan_elapsed − done × int_time) / scan_elapsed × 100`
+  - **Done%** — `((_run_scans_done + done/total) / _run_scans_total) × 100`
+- `_status_bar_run_start()` — called before the first `worker.start()`; initialises
+  `_run_start_time`, `_run_scans_done = 0`, `_bar_int_time` from config
+- `_status_bar_scan_done()` — increments `_run_scans_done`; called after each completed
+  direction/scan within a multi-scan run
+- `_status_bar_run_finish()` — called in `_on_sl_worker_finished` / run-end paths;
+  resets all fields to `—`
+- 1 Hz `QTimer` (`_sb_timer`) fires `_refresh_status_bar()` between `progress` signals
+  so the Elapsed and Run/Scan-left counters tick smoothly
+
+**`_run_scans_total` computation:**
+
+| Context | Value |
+|---------|-------|
+| Single scan (Samba_main) | `1` |
+| Scanlist (Samba_main) | `sl["n_scans"] × len(sl_worker.cfg_list)` |
+| Single scan (Cryo, one direction) | `1` |
+| Single scan (Cryo, trace+retrace) | `1 + len(_dir_queue)` (computed after queue assigned) |
+| Scanlist (Cryo) | `sl["n_scans"] × len(cfg_list)` |
+
+**Replaced UI elements:**
+
+- `self.pbar` (`QProgressBar` in the action bar) removed from both apps — the status
+  bar covers elapsed/done information more completely
+- `self.list_bar` (`QProgressBar` in `ScanlistPanel`) removed — scanlist progress
+  visible through the status bar's `Scan c/N` and `Done%` fields
+- `status_lbl` (text label below the plotting area) is kept for per-point log messages

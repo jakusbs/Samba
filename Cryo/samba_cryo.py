@@ -774,17 +774,17 @@ class CryoMainWindow(QMainWindow):
 
         def _mk_field():
             lbl = QLabel("—")
-            lbl.setStyleSheet("color:#cdd6f4;font-size:10px;")
+            lbl.setStyleSheet("color:#cdd6f4;font-size:12px;")
             return lbl
 
         def _mk_caption(text):
             lbl = QLabel(text)
-            lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
+            lbl.setStyleSheet("color:#a6adc8;font-size:12px;")
             return lbl
 
         def _mk_sep():
             lbl = QLabel(" │ ")
-            lbl.setStyleSheet("color:#45475a;font-size:10px;")
+            lbl.setStyleSheet("color:#45475a;font-size:12px;")
             return lbl
 
         self._sb_scan    = _mk_field()
