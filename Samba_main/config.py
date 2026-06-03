@@ -179,6 +179,7 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
         "zigzag": True,
+        "fast_axis": "act1",   # which axis is swept per line: act1 (X) or act2 (Y)
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device

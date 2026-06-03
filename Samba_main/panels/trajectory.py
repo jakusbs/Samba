@@ -298,12 +298,42 @@ class TrajectoryPanel(QWidget):
         self.act2_grp = ActuatorGroup(
             "Y axis", "Y", "nm", 0, 50000, 51,
             step_prefix="Δy", enabled=False)
-        # Zigzag container inside act2_grp — only shown when both X and Y are on
+        # Zigzag + fast-axis container inside act2_grp — only shown when both
+        # X and Y are on (i.e. a real 2-D raster, where these settings apply)
         self.zigzag_w = QWidget()
-        zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(2)
-        self.zigzag_cb = QCheckBox("Zigzag (reverse direction on every Y line)")
+        zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(3)
+        self.zigzag_cb = QCheckBox("Zigzag (reverse direction on every fast line)")
         self.zigzag_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         zz_l.addWidget(self.zigzag_cb)
+
+        # Fast (main) scanning axis — which axis is swept per line (inner loop).
+        # X (default): for each Y row, sweep all X.  Y: for each X column, sweep
+        # all Y.  Data is stored identically; only the physical traversal differs.
+        fa_row = QHBoxLayout(); fa_row.setSpacing(0)
+        fa_lbl = QLabel("Fast axis:"); fa_lbl.setStyleSheet("color:#a6adc8;font-size:11px;")
+        fa_row.addWidget(fa_lbl); fa_row.addSpacing(6)
+        self.fast_axis_bg = QButtonGroup(self); self.fast_axis_bg.setExclusive(True)
+        for _idx, _lab in enumerate(("X", "Y")):
+            b = QPushButton(_lab)
+            b.setCheckable(True); b.setChecked(_idx == 0)
+            b.setFixedHeight(24); b.setMinimumWidth(46)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if _idx == 0:
+                radius = ("border-top-left-radius:6px;border-bottom-left-radius:6px;"
+                          "border-top-right-radius:0;border-bottom-right-radius:0;")
+            else:
+                radius = ("border-top-left-radius:0;border-bottom-left-radius:0;"
+                          "border-top-right-radius:6px;border-bottom-right-radius:6px;")
+            b.setStyleSheet(
+                f"QPushButton{{background:#252538;border:1px solid #45475a;"
+                f"color:#6c7086;font-size:11px;font-weight:bold;padding:0 10px;{radius}}}"
+                f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+                f"QPushButton:checked{{background:#a6e3a1;color:#1e1e2e;border-color:#a6e3a1;}}")
+            self.fast_axis_bg.addButton(b, _idx)
+            fa_row.addWidget(b)
+        fa_row.addStretch()
+        zz_l.addLayout(fa_row)
+
         self.zigzag_w.setVisible(False)   # hidden until both axes on
         # Row 6 of act2_grp grid
         self.act2_grp.layout().addWidget(self.zigzag_w, 6, 0, 1, 4)
@@ -1516,6 +1546,8 @@ class TrajectoryPanel(QWidget):
             if self._ac_dev_combo.itemData(i) == field_dev:
                 self._ac_dev_combo.setCurrentIndex(i); break
         self.zigzag_cb.setChecked(cfg.get("zigzag", False))
+        _fa_id = 1 if cfg.get("fast_axis", "act1") == "act2" else 0
+        self.fast_axis_bg.button(_fa_id).setChecked(True)
         self.int_time.setValue(cfg.get("integration_time", 0.1))
         self.settle.setValue(  cfg.get("settle_time",      0.05))
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
@@ -1626,6 +1658,7 @@ class TrajectoryPanel(QWidget):
             "scan_x":    self.act1_grp.scan_cb.isChecked() if not is_field else False,
             "scan_y":    self.act2_grp.scan_cb.isChecked() if not is_field else False,
             "zigzag":    self.zigzag_cb.isChecked(),
+            "fast_axis": "act2" if self.fast_axis_bg.checkedId() == 1 else "act1",
         }
         p.update(self.act1_grp.get_partial("act1"))
         p.update(self.act2_grp.get_partial("act2"))

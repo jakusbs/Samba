@@ -454,7 +454,7 @@ class TestZigzag2D(unittest.TestCase):
     Zigzag must reverse the *physical* X traversal on odd Y rows while keeping
     the spatial data-column index ix correct (ascending-X storage)."""
 
-    def _run_grid(self, zigzag):
+    def _run_grid(self, zigzag, fast_axis="act1"):
         import tempfile
         proxy = InstantProxy(read_val=1.0)   # shared by stage + sensor devices
 
@@ -470,11 +470,12 @@ class TestZigzag2D(unittest.TestCase):
             "integ_time_attr": "", "settling_attr": "",
         }]
         order = []   # (iy, ix) in callback order
+        filled = {}  # (iy, ix) -> value, to confirm every cell is written
         try:
             with tempfile.TemporaryDirectory() as td:
                 cfg = {
                     "scan_type": "SPATIAL", "scan_x": True, "scan_y": True,
-                    "zigzag": zigzag, "name": "t",
+                    "zigzag": zigzag, "fast_axis": fast_axis, "name": "t",
                     "act1_start": 0.0, "act1_stop": 2.0, "act1_npts": 3,
                     "act2_start": 0.0, "act2_stop": 1.0, "act2_npts": 2,
                     "act1_label": "X", "act1_unit": "nm", "act2_label": "Y",
@@ -487,25 +488,50 @@ class TestZigzag2D(unittest.TestCase):
                 r._open_hdf5     = lambda *a, **k: MagicMock()
                 r._write_point   = lambda *a, **k: None
                 r._finalize_hdf5 = lambda *a, **k: None
-                r.run({"point": lambda ix, iy, x, v: order.append((iy, ix))})
+
+                def _pt(ix, iy, x, v):
+                    order.append((iy, ix))
+                    filled[(iy, ix)] = v.get("ZI x1")
+                r.run({"point": _pt})
         finally:
             (_runner_mod.fresh_proxy, _runner_mod.get_proxy,
              _runner_mod._make_filename) = _orig
-        return order
+        return order, filled
 
     def test_zigzag_reverses_odd_rows(self):
-        order = self._run_grid(zigzag=True)
+        order, _ = self._run_grid(zigzag=True)
         row0 = [ix for (iy, ix) in order if iy == 0]
         row1 = [ix for (iy, ix) in order if iy == 1]
         self.assertEqual(row0, [0, 1, 2], "even row should sweep X forward")
         self.assertEqual(row1, [2, 1, 0], "odd row should sweep X reversed")
 
     def test_no_zigzag_keeps_forward(self):
-        order = self._run_grid(zigzag=False)
+        order, _ = self._run_grid(zigzag=False)
         row0 = [ix for (iy, ix) in order if iy == 0]
         row1 = [ix for (iy, ix) in order if iy == 1]
         self.assertEqual(row0, [0, 1, 2])
         self.assertEqual(row1, [0, 1, 2], "without zigzag every row sweeps forward")
+
+    def test_y_fast_outer_is_x(self):
+        """Y-fast: X stepped once per column, Y swept inside. Visit order groups
+        by column (ix), inner index iy ascending; data still stored [iy, ix]."""
+        order, filled = self._run_grid(zigzag=False, fast_axis="act2")
+        self.assertEqual(
+            order,
+            [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+            "Y-fast should sweep Y within each X column")
+        # Every cell of the 2×3 grid must be written exactly once
+        self.assertEqual(set(filled), {(iy, ix) for iy in range(2) for ix in range(3)})
+
+    def test_y_fast_zigzag_reverses_odd_columns(self):
+        """Y-fast + zigzag reverses the Y sweep on odd X columns (ix=1)."""
+        order, _ = self._run_grid(zigzag=True, fast_axis="act2")
+        col0 = [iy for (iy, ix) in order if ix == 0]
+        col1 = [iy for (iy, ix) in order if ix == 1]
+        col2 = [iy for (iy, ix) in order if ix == 2]
+        self.assertEqual(col0, [0, 1], "even column sweeps Y forward")
+        self.assertEqual(col1, [1, 0], "odd column sweeps Y reversed")
+        self.assertEqual(col2, [0, 1])
 
 
 if __name__ == '__main__':

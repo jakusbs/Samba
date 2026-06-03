@@ -1574,3 +1574,83 @@ Scan: 1/4  │  Start: 14:32:01  │  Elapsed: 0:42  │  Run left: 3:18  │  S
 - `self.list_bar` (`QProgressBar` in `ScanlistPanel`) removed — scanlist progress
   visible through the status bar's `Scan c/N` and `Done%` fields
 - `status_lbl` (text label below the plotting area) is kept for per-point log messages
+
+---
+
+## 26. Recent Changes (June 2026) — 2D Scan Traversal (Samba_main)
+
+### Zigzag finally wired into the engine
+
+The `zigzag` checkbox in `trajectory.py` had always saved `cfg["zigzag"]`, but
+`core/scan/runner.py` never read it — 2D scans ran a plain forward raster with a
+full fly-back between rows. The standard 2D loop now reverses the **physical** X
+traversal on every odd Y row when `cfg["zigzag"]` is set (`SPATIAL_XY` only):
+
+```python
+if cfg.get("zigzag") and hdf_scan == "SPATIAL_XY" and iy % 2 == 1:
+    x_seq  = x_plan[::-1]
+    ix_seq = ix_seq[::-1]
+```
+
+The spatial index `ix` still maps to the correct data column, so the stored map
+stays in ascending-X order regardless of sweep direction. The `x_seq`/`ix_seq`
+zip pair was already set up for exactly this — only the reversal was missing.
+
+### Fast (main) scanning axis selector
+
+Samba_main 2D scans can now sweep **either** axis as the fast (inner) loop:
+
+- **X-fast** (default): for each Y row, sweep all X — the historic behavior.
+- **Y-fast**: for each X column, sweep all Y.
+
+Data is stored identically as `[iy, ix]`, so the saved HDF5 map and the live
+2D plot orientation are **the same** in both modes — only the physical traversal
+order changes. This matters for drift/hysteresis: the user picks which axis gets
+the continuous fine sweep.
+
+**UI** (`Samba_main/panels/trajectory.py`): a "Fast axis: [X][Y]" pill pair
+(green `#a6e3a1`, mutually exclusive `QButtonGroup`) lives in the same
+`zigzag_w` container as the zigzag checkbox, shown only when both axes are on.
+Persisted via `cfg["fast_axis"]` (`"act1"` = X / `"act2"` = Y) in
+`get_config_partial()` / `load_config()`; default added to `make_default_config`
+(`config.py`). Old configs default gracefully to `"act1"` (no migration needed).
+
+**Engine** (`core/scan/runner.py`): a dedicated branch
+`elif hdf_scan == "SPATIAL_XY" and cfg.get("fast_axis") == "act2":` implements
+the X-outer / Y-inner traversal. It is kept **separate** from the battle-tested
+X-fast loop (which still carries all the FIELD/TIME/RTV40/adaptive-settle
+special-cases) to avoid disturbing it; the two loops share the new
+`_acquire_point_retry()` helper.
+
+### `_acquire_point_retry()` extracted
+
+The per-point lock-in-settle + acquire + retry/auto-pause block (the
+`while not self._abort:` loop) was extracted from the standard loop into
+`ScanRunner._acquire_point_retry(...) -> (vals, t_trigger)`. Behavior is
+identical (verified by the existing retry tests + `TestZigzag2D`); the
+extraction lets the X-fast and Y-fast loops reuse one copy.
+
+### Zigzag generalization for Y-fast
+
+Zigzag in the Y-fast branch reverses the **Y** sweep on odd X columns — the
+natural analog of reversing X on odd Y rows. `zigzag_cb` label updated to
+"reverse direction on every fast line" to reflect that it follows the fast axis.
+
+### Cryo untouched
+
+Cryo's interleaved trace/retrace (`_interleaved_2d` / `_interleave_axis`) is a
+separate engine path checked **first**, and Cryo never sets `fast_axis`. The
+Cryo `TrajectoryPanel` is a different class with no fast-axis pills. All Cryo
+behavior is unchanged.
+
+### Tests
+
+`test_runner.py` gains `TestZigzag2D` (4 tests) driving `run()` over a 3×2 grid
+and capturing the point-callback order:
+- X-fast zigzag reverses odd rows (`[2,1,0]`), even rows forward (`[0,1,2]`)
+- X-fast without zigzag keeps every row forward
+- Y-fast groups by column, sweeps Y inside each (`[(0,0),(1,0),(0,1),…]`), and
+  writes every grid cell exactly once
+- Y-fast + zigzag reverses the Y sweep on odd columns
+
+Total suite: 18 tests, all passing (`python test_runner.py -v`).
