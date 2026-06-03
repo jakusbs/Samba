@@ -265,16 +265,20 @@ class Live1DWidget(QWidget):
         # Compute limits — shared x across both axes, independent y per axis
         all_visible = []
         for ax in [self.ax1, self.ax2]:
-            visible = [l for l in ax.get_lines()
-                       if not l.get_label().startswith("_") and len(l.get_xdata()) > 0]
-            all_visible.extend((l, ax) for l in visible)
-            if visible:
-                all_y = np.concatenate([l.get_ydata() for l in visible])
+            labelled  = [l for l in ax.get_lines() if not l.get_label().startswith("_")]
+            with_data = [l for l in labelled if len(l.get_xdata()) > 0]
+            all_visible.extend((l, ax) for l in with_data)
+            if with_data:
+                all_y = np.concatenate([l.get_ydata() for l in with_data])
                 my = np.isfinite(all_y)
                 if my.any():
                     ylo, yhi = all_y[my].min(), all_y[my].max()
                     pad = max(abs(yhi - ylo) * 0.05, 1e-12)
                     ax.set_ylim(ylo - pad, yhi + pad)
+            # Legend appears as soon as the axis has any labelled line — even
+            # before the first point arrives — so it shows from scan start
+            # without needing a manual refresh.
+            if labelled:
                 ax.legend(
                     loc="upper left" if ax == self.ax1 else "upper right",
                     fontsize=8, facecolor="#313244",

@@ -1654,3 +1654,22 @@ and capturing the point-callback order:
 - Y-fast + zigzag reverses the Y sweep on odd columns
 
 Total suite: 18 tests, all passing (`python test_runner.py -v`).
+
+---
+
+## 27. Recent Changes (June 2026) — Plotting & UI Polish
+
+### Live 1D legend shows from scan start (no manual refresh)
+
+**File:** `core/plot_widgets.py` — `Live1DWidget.apply_config()`
+
+The legend was created inside an `if visible:` block where `visible` required
+`len(line.get_xdata()) > 0`. At scan start the lines are created empty
+(`ax.plot([], [])`) with no data yet, so the legend was skipped — and
+`_throttled_draw()` never (re)creates a legend. The user had to trigger a
+config re-apply (the "refresh") *after* data existed to see it.
+
+**Fix:** split the per-axis line list into `labelled` (any non-`_` label) and
+`with_data` (has points). Y-limits still use `with_data`; the legend is now
+drawn whenever `labelled` is non-empty — so it appears immediately at scan
+start, before the first point. Shared module → fixes both Samba_main and Cryo.
