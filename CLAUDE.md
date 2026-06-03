@@ -1691,3 +1691,24 @@ minimum prevented shrinking to fit.
   back on-screen** if a saved position lands off the display (covers
   resolution / monitor changes). Falls through gracefully if no screen is
   reported.
+
+### Data browser — switch channels on a 2D map (no collapse to 1D)
+
+**File:** `core/data_browser.py` — `DataBrowserPanel`
+
+Loading a 2D scan auto-plotted a 2D colour map, but the **Plot** button always
+called `read_1d` + `plot_1d`, so changing the Y channel collapsed the map into a
+1D line — there was no way to view a different channel *as a map*.
+
+**Fix:** added a **"2D map"** checkbox next to the X/Y selectors:
+- Auto-enabled and checked for non-DC scans with a real Y axis (`n_y > 1`);
+  disabled for 1D / DC files.
+- When on, the **Y combo selects which channel** is shown and `_plot_current()`
+  renders `read_2d(sensor_key=y_key)` → `plot_2d`; uncheck for a 1D line/slice.
+- Column selectors and the toggle now **re-plot live** via `_on_combo_changed`
+  (guarded by `_populating_combos` so repopulating the combos in `_show_file`
+  doesn't trigger spurious redraws).
+- `_show_file` resolves the mode (DC/1D → line, 2D → map) and calls the unified
+  `_plot_current()` instead of an inline auto-plot block.
+- A `ndim == 2` guard prevents `imshow` from choking if a 1D column is picked
+  while in map mode.

@@ -514,15 +514,28 @@ class DataBrowserPanel(QWidget):
         left_l.addWidget(meta_grp)
 
         # Column selectors
+        self._populating_combos = False
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("X:"))
         self.x_combo = QComboBox(); self.x_combo.setMinimumWidth(90)
+        self.x_combo.currentIndexChanged.connect(self._on_combo_changed)
         sel_row.addWidget(self.x_combo, stretch=1)
         sel_row.addWidget(QLabel("Y:"))
         self.y_combo = QComboBox(); self.y_combo.setMinimumWidth(90)
+        self.y_combo.currentIndexChanged.connect(self._on_combo_changed)
         sel_row.addWidget(self.y_combo, stretch=1)
+        # 2D-map mode: render the selected Y channel as a colour map.  Enabled
+        # only for 2D scans; when on, the Y combo picks which channel is shown
+        # and the map re-renders live instead of collapsing to a 1D plot.
+        self.map2d_cb = QCheckBox("2D map")
+        self.map2d_cb.setToolTip(
+            "Show the selected Y channel as a 2D colour map (2D scans only).\n"
+            "Uncheck for a 1D line plot of the selected X/Y columns.")
+        self.map2d_cb.setEnabled(False)
+        self.map2d_cb.toggled.connect(self._on_combo_changed)
+        sel_row.addWidget(self.map2d_cb)
         plot_btn = QPushButton("Plot"); plot_btn.clicked.connect(self._plot_current)
-        plot_btn.setToolTip("Plot the selected X and Y columns from the current scan file")
+        plot_btn.setToolTip("Plot the selected columns (or 2D map) from the current scan file")
         sel_row.addWidget(plot_btn)
         left_l.addLayout(sel_row)
 
@@ -748,7 +761,8 @@ class DataBrowserPanel(QWidget):
 
         self.meta_text.setPlainText("\n".join(l for l in lines if l))
 
-        # Populate column combos
+        # Populate column combos (guard auto-replot while we rebuild them)
+        self._populating_combos = True
         cols = sf.list_columns()
         self.x_combo.clear(); self.y_combo.clear()
         for key, lbl in cols:
@@ -773,26 +787,27 @@ class DataBrowserPanel(QWidget):
             if self.y_combo.itemData(i) == y_default:
                 self.y_combo.setCurrentIndex(i); break
 
-        # Auto-plot: DC_HYST is always 1D
-        if is_dc:
-            result = sf.read_1d()
-            if result:
-                result["legend"] = sf.basename
-                self.plot.plot_1d([result], title=m["scan_name"])
-        elif m["n_y"] > 1:
-            result = sf.read_2d()
-            if result:
-                self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
-                                  result["x_label"], result["y_label"],
-                                  result["sensor_label"])
-        else:
-            result = sf.read_1d()
-            if result:
-                result["legend"] = sf.basename
-                self.plot.plot_1d([result], title=m["scan_name"])
+        # 2D-map mode is available only for non-DC scans with a real Y axis.
+        is_2d = (not is_dc) and m["n_y"] > 1
+        self.map2d_cb.blockSignals(True)
+        self.map2d_cb.setEnabled(is_2d)
+        self.map2d_cb.setChecked(is_2d)   # default to the map for 2D scans
+        self.map2d_cb.blockSignals(False)
+        self._populating_combos = False
+
+        # Auto-plot in the resolved mode (DC/1D → line, 2D → colour map)
+        self._plot_current()
+
+    def _on_combo_changed(self, *_):
+        """Live re-plot when the user changes a column selector or the 2D-map
+        toggle — but not while the combos are being repopulated in _show_file."""
+        if self._populating_combos:
+            return
+        self._plot_current()
 
     def _plot_current(self):
-        """Plot with the user's column selection."""
+        """Plot with the user's column selection — a 2D colour map when the
+        2D-map toggle is on, otherwise a 1D line plot."""
         # Find the last selected file
         fp = None
         for item in reversed(self.tree.selectedItems()):
@@ -805,11 +820,25 @@ class DataBrowserPanel(QWidget):
             return
         x_key = self.x_combo.currentData()
         y_key = self.y_combo.currentData()
-        if not x_key or not y_key:
-            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
-            return
         sf = self._loaded_files[fp]
         is_dc = sf.meta.get("is_dc_hyst", False)
+
+        # ── 2D colour map of the selected Y channel ───────────────────────────
+        if self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc:
+            sensor_key = y_key or "auto"
+            result = sf.read_2d(sensor_key=sensor_key)
+            if result and np.asarray(result["data"]).ndim == 2:
+                self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
+                                  result["x_label"], result["y_label"],
+                                  result["sensor_label"])
+            else:
+                self.meta_text.append("\n⚠ Could not read a 2D map for the selected channel.")
+            return
+
+        # ── 1D line plot ──────────────────────────────────────────────────────
+        if not y_key or (not x_key and not is_dc):
+            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
+            return
         if is_dc:
             result = sf.read_1d(y_key=y_key)
         else:
