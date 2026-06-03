@@ -2260,7 +2260,7 @@ class ScanlistPanel(QWidget):
         self._hw_panel_class = hw_panel_class or HardwarePanel
         root = QVBoxLayout(self); root.setContentsMargins(8, 6, 8, 6); root.setSpacing(6)
 
-        # ── Top row: active config + metadata side by side ────────────────────
+        # ── Top row: active config + timing + metadata side by side ─────────
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
         info_w = QWidget(); info_l = QVBoxLayout(info_w)
@@ -2272,13 +2272,6 @@ class ScanlistPanel(QWidget):
         info_l.addStretch()
         top_row.addWidget(info_w)
 
-        self.meta = MokeMetadataGroup("Metadata")
-        self.meta.changed.connect(self._update_auto_name)
-        top_row.addWidget(self.meta)
-        root.addLayout(top_row)
-
-        self.hw = self._hw_panel_class(self._setup_getter, "Hardware"); root.addWidget(self.hw)
-
         # ── Timing group — kept in sync with Trajectory tab ──────────────────
         tg = QGroupBox("Timing"); tl = QGridLayout(tg)
         tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
@@ -2287,7 +2280,14 @@ class ScanlistPanel(QWidget):
         tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
         tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
         tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
-        root.addWidget(tg)
+        top_row.addWidget(tg)
+
+        self.meta = MokeMetadataGroup("Metadata")
+        self.meta.changed.connect(self._update_auto_name)
+        top_row.addWidget(self.meta)
+        root.addLayout(top_row)
+
+        self.hw = self._hw_panel_class(self._setup_getter, "Hardware"); root.addWidget(self.hw)
 
         sl_row = QHBoxLayout(); sl_row.setSpacing(10)
         pg = QGroupBox("Polarity control"); pl = QHBoxLayout(pg)
