@@ -566,11 +566,10 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.live_tabs)
 
         pr = QHBoxLayout()
-        self.pbar = QProgressBar(); self.pbar.setFixedHeight(16)
         self.status_lbl = QLabel("Ready")
         self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
         self.status_lbl.setWordWrap(True)
-        pr.addWidget(self.pbar, stretch=1); pr.addWidget(self.status_lbl, stretch=2)
+        pr.addWidget(self.status_lbl, stretch=1)
         cl.addLayout(pr)
         h_split.addWidget(center)
 
@@ -1362,14 +1361,11 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
         _, n_x, n_y = self._scan_dims(cfg)
-        # For DC_HYST use cycle count for the progress bar; reset DC accumulators
+        # DC_HYST: reset DC live-plot accumulators
         if cfg.get("scan_type") == "DC_HYST":
-            self.pbar.setMaximum(int(cfg.get("hyst_cycles", 1)))
             self._dc_loop_x = []; self._dc_loop_y = {}; self._last_dc_cycle = 0
             self.traj_panel.reset_dc_monitor()
-        else:
-            self.pbar.setMaximum(n_x * n_y)
-        self.pbar.setValue(0); self.log_text.clear()
+        self.log_text.clear()
 
         # TR_MOKE is executed as a standard SPATIAL 1D scan — the actuator
         # is the DG645 delay attribute. Store unit factor for x-axis display,
@@ -1436,7 +1432,6 @@ class MainWindow(QMainWindow):
         if cfg.get("scan_type") == "DC_HYST":
             self._worker.dc_loop_ready.connect(self.traj_panel.update_dc_live)
 
-        self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
         # A single Start produces exactly one scan-file (TR-MOKE, DC_HYST,
         # trace/retrace and interleaved-2D are all one file here — Samba_main
@@ -1477,8 +1472,6 @@ class MainWindow(QMainWindow):
         # Also set up the main live display for the Log tab
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
-        self.pbar.setMaximum(n_pts); self.pbar.setValue(0)
-        self.pbar.setFormat("%v / %m pts")
 
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)
@@ -1551,26 +1544,11 @@ class MainWindow(QMainWindow):
             self.pause_btn.setText("Resume")
 
     def _on_progress(self, done: int, total: int):
-        """Update progress bar and show elapsed + ETA."""
-        self.pbar.setValue(done)
-        # ── Status-bar bookkeeping ──────────────────────────────────────────
+        """Record scan progress for the bottom status bar."""
         self._bar_last_done  = done
         self._bar_last_total = total
         if done == 1:
             self._scan_first_pt_time = _time.time()
-        if done <= 0 or not self._scan_start_time:
-            self._refresh_status_bar()
-            return
-        elapsed = _time.time() - self._scan_start_time
-        if done < total:
-            eta = elapsed / done * (total - done)
-            def _fmt(s):
-                m, sec = divmod(int(s), 60)
-                return f"{m}m {sec:02d}s" if m else f"{sec}s"
-            self.pbar.setFormat(
-                f"%v / %m pts  —  {_fmt(elapsed)} elapsed  ~{_fmt(eta)} left")
-        else:
-            self.pbar.setFormat(f"%v / %m pts  —  done")
         self._refresh_status_bar()
 
     def _on_worker_finished(self):
@@ -1650,8 +1628,6 @@ class MainWindow(QMainWindow):
                                          setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
-        self._sl_worker.list_progress.connect(
-            lambda c, t: self.sl_panel.list_bar.setValue(int(c * 100 // t)))
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
         self._sl_worker.scan_done.connect(lambda i, fn: self._status_bar_scan_done())
         self._sl_worker.status_msg.connect(self._on_status)
@@ -1662,13 +1638,8 @@ class MainWindow(QMainWindow):
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
-        # Per-scan progress bar bounds (now driven through _on_progress).
-        _, n_x, n_y = self._scan_dims(cfg)
-        self.pbar.setMaximum(n_x * n_y); self.pbar.setValue(0)
-        self.pbar.setFormat("%v / %m pts")
         # Status bar: one scan-file per (cycle × direction).
         self._status_bar_run_start(cfg, sl["n_scans"] * len(self._sl_worker.cfg_list))
-        self.sl_panel.list_bar.setMaximum(100); self.sl_panel.list_bar.setValue(0)
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
 

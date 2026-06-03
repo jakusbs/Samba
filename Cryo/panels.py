@@ -2338,10 +2338,6 @@ class ScanlistPanel(QWidget):
         sl_row.addWidget(ng)
         root.addLayout(sl_row)
 
-        pr = QHBoxLayout(); pr.addWidget(QLabel("Scans:"))
-        self.list_bar = QProgressBar(); self.list_bar.setFixedHeight(16)
-        pr.addWidget(self.list_bar, stretch=1); root.addLayout(pr)
-
         # Auto-update name when HW spins change too
         self.hw.amp_spin.valueChanged.connect(lambda _: self._update_auto_name())
         self.hw.freq_spin.valueChanged.connect(lambda _: self._update_auto_name())

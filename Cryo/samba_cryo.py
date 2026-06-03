@@ -642,11 +642,10 @@ class CryoMainWindow(QMainWindow):
         cl.addWidget(self.live_tabs)
 
         pr = QHBoxLayout()
-        self.pbar = QProgressBar(); self.pbar.setFixedHeight(16)
         self.status_lbl = QLabel("Ready")
         self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
         self.status_lbl.setWordWrap(True)
-        pr.addWidget(self.pbar, stretch=1); pr.addWidget(self.status_lbl, stretch=2)
+        pr.addWidget(self.status_lbl, stretch=1)
         cl.addLayout(pr)
         h_split.addWidget(center)
 
@@ -1577,8 +1576,6 @@ class CryoMainWindow(QMainWindow):
         else:
             cfgs = [copy.deepcopy(cfg)]   # TIME scan
 
-        use_suffix = len(cfgs) > 1 or self._interleaved_2d
-
         first_cfg = cfgs[0]
         self._dir_queue = cfgs[1:]   # remaining directions run after first completes
 
@@ -1586,9 +1583,6 @@ class CryoMainWindow(QMainWindow):
         self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
         _, n_x, n_y = self._scan_dims(first_cfg)
         total = n_x * n_y * (2 if self._interleaved_2d else 1)
-        self.pbar.setMaximum(total); self.pbar.setValue(0)
-        lbl = "trace" if use_suffix else ""
-        self.pbar.setFormat(f"{lbl} %v / %m pts" if lbl else "%v / %m pts")
         self._last_fn_retrace = None
         self._scan_start_time = _time.time(); self._scan_total_pts = total
         # Status bar: first direction + any queued directions = total scan-files.
@@ -1677,7 +1671,6 @@ class CryoMainWindow(QMainWindow):
         self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors if plot_sensors else active)
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
-        self.pbar.setMaximum(n_pts); self.pbar.setValue(0)
 
         self._worker = self._wire_worker(cfg, setup)
         self._scan_start_time = _time.time()
@@ -1738,26 +1731,11 @@ class CryoMainWindow(QMainWindow):
             self.pause_btn.setText("Resume")
 
     def _on_progress(self, done: int, total: int):
-        """Update progress bar and show elapsed + ETA."""
-        self.pbar.setValue(done)
-        # ── Status-bar bookkeeping ──────────────────────────────────────────
+        """Record scan progress for the bottom status bar."""
         self._bar_last_done  = done
         self._bar_last_total = total
         if done == 1:
             self._scan_first_pt_time = _time.time()
-        if done <= 0 or not self._scan_start_time:
-            self._refresh_status_bar()
-            return
-        elapsed = _time.time() - self._scan_start_time
-        if done < total:
-            eta = elapsed / done * (total - done)
-            def _fmt(s):
-                m, sec = divmod(int(s), 60)
-                return f"{m}m {sec:02d}s" if m else f"{sec}s"
-            self.pbar.setFormat(
-                f"%v / %m pts  —  {_fmt(elapsed)} elapsed  ~{_fmt(eta)} left")
-        else:
-            self.pbar.setFormat(f"%v / %m pts  —  done")
         self._refresh_status_bar()
 
     def _on_worker_finished(self):
@@ -1782,10 +1760,6 @@ class CryoMainWindow(QMainWindow):
             self._setup_live_display(next_cfg, active)
             self._alloc_scan_data(next_cfg, active)
             _, n_x, n_y = self._scan_dims(next_cfg)
-            total = n_x * n_y
-            self.pbar.setMaximum(total); self.pbar.setValue(0)
-            dir_suffix = next_cfg["name"].rsplit("_", 1)[-1] if "_" in next_cfg["name"] else ""
-            self.pbar.setFormat(f"{dir_suffix} %v / %m pts" if dir_suffix else "%v / %m pts")
             self._scan_start_time = _time.time()
             self._last_fn = None
             self._worker = self._wire_worker(next_cfg, setup)
@@ -1798,7 +1772,6 @@ class CryoMainWindow(QMainWindow):
         self._calib_timescan = False
         self._interleaved_2d = False
         self.map2d_retrace.hide()
-        self.pbar.setFormat("%v / %m pts")
         try:
             self.data_browser.refresh()
         except Exception:
@@ -1914,8 +1887,6 @@ class CryoMainWindow(QMainWindow):
                                          setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
-        self._sl_worker.list_progress.connect(
-            lambda c, t: self.sl_panel.list_bar.setValue(int(c * 100 // t)))
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
         self._sl_worker.scan_done.connect(lambda i, fn: self._status_bar_scan_done())
         self._sl_worker.status_msg.connect(self._on_status)
@@ -1926,10 +1897,6 @@ class CryoMainWindow(QMainWindow):
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
-        self.sl_panel.list_bar.setMaximum(100); self.sl_panel.list_bar.setValue(0)
-        _, n_x, n_y = self._scan_dims(cfg)
-        self.pbar.setMaximum(n_x * n_y); self.pbar.setValue(0)
-        self.pbar.setFormat("%v / %m pts")
         self._scan_start_time = _time.time()
         # Status bar: one scan-file per (cycle × direction).
         self._status_bar_run_start(cfg, sl["n_scans"] * len(cfg_list))
