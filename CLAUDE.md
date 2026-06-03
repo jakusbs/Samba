@@ -1673,3 +1673,21 @@ config re-apply (the "refresh") *after* data existed to see it.
 `with_data` (has points). Y-limits still use `with_data`; the legend is now
 drawn whenever `labelled` is non-empty — so it appears immediately at scan
 start, before the first point. Shared module → fixes both Samba_main and Cryo.
+
+### Screen-aware window sizing (both apps)
+
+**Files:** `Samba_main/samba.py`, `Cryo/samba_cryo.py` — `_restore_geometry()`
+
+The main window used a hard `setMinimumSize(1360, 920)` and opened with a plain
+`show()`. On smaller laptop screens (e.g. 1366×768) the 920 px minimum height
+exceeded the usable area, so the bottom status/action bar was clipped — and the
+minimum prevented shrinking to fit.
+
+**Fix:**
+- Minimum lowered to `1180 × 640` (fits any modern laptop).
+- `_restore_geometry()` now: restores saved geometry if present, else opens at
+  the preferred `1360 × 920`; then **clamps** the size to the usable screen
+  (`availableGeometry()` minus a small decoration margin) and **pulls the window
+  back on-screen** if a saved position lands off the display (covers
+  resolution / monitor changes). Falls through gracefully if no screen is
+  reported.

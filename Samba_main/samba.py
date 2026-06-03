@@ -201,7 +201,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Samba v3 — ETH Zürich")
-        self.setMinimumSize(1360, 920)
+        # Modest minimum so the window fits smaller laptop screens; the larger
+        # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
+        self.setMinimumSize(1180, 640)
 
         self._setups:            Dict[str, dict]          = {}
         self._worker:            Optional[ScanWorker]     = None
@@ -1850,8 +1852,28 @@ class MainWindow(QMainWindow):
             self._split_initialised = True
 
     def _restore_geometry(self):
-        s = QSettings("ETH-Intermag","SambaV3"); g = s.value("geometry")
-        if g: self.restoreGeometry(bytes(g))
+        """Restore saved geometry, or open at a sensible preferred size — but
+        never larger than the current screen, and never positioned off-display,
+        so nothing is clipped on first open (or after a resolution/monitor change)."""
+        scr   = QApplication.primaryScreen()
+        avail = scr.availableGeometry() if scr else None
+        s = QSettings("ETH-Intermag", "SambaV3"); g = s.value("geometry")
+        restored = bool(g) and self.restoreGeometry(bytes(g))
+        if not restored:
+            self.resize(1360, 920)
+        if avail:
+            # Clamp size to the usable screen (small margin for window decorations)
+            w = min(self.width(),  avail.width()  - 20)
+            h = min(self.height(), avail.height() - 60)
+            if w < self.width() or h < self.height():
+                self.resize(max(w, self.minimumWidth()), max(h, self.minimumHeight()))
+            # Pull back on-screen if a saved position lands off the display
+            x = min(max(self.x(), avail.left()),
+                    max(avail.right()  - self.width(),  avail.left()))
+            y = min(max(self.y(), avail.top()),
+                    max(avail.bottom() - self.height(), avail.top()))
+            if (x, y) != (self.x(), self.y()):
+                self.move(x, y)
 
     def closeEvent(self, ev):
         if self._scan_running:
