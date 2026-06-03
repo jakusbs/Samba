@@ -571,6 +571,14 @@ class ScanRunner:
 
                 x_seq  = x_plan
                 ix_seq = list(range(n_x))
+                # Zigzag: on every odd Y row, traverse X in reverse physical
+                # order so the stage doesn't fly back across the full range
+                # between rows. The spatial index ix still maps to the correct
+                # data column, so the stored map stays in ascending-X order
+                # regardless of sweep direction.
+                if cfg.get("zigzag") and hdf_scan == "SPATIAL_XY" and iy % 2 == 1:
+                    x_seq  = x_plan[::-1]
+                    ix_seq = ix_seq[::-1]
                 _prev_x_pos = None   # for adaptive settle tracking (reset each row)
                 _adap_k     = float(cfg.get("adaptive_settle_k", 0.0)) if cfg.get("adaptive_settle_enabled") else 0.0
                 if _adap_k > 0 and count == 0:
