@@ -232,9 +232,9 @@ class HardwarePanel(QGroupBox):
         # Row 1: Range + Compliance side by side
         csg.addWidget(QLabel("Range:"), row, 0)
         self.range_combo = NoScrollComboBox()
-        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setFixedWidth(70)
+        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setMinimumWidth(84)
         csg.addWidget(self.range_combo, row, 1)
-        btn_range = QPushButton("Set"); btn_range.setFixedWidth(30)
+        btn_range = QPushButton("Set"); btn_range.setFixedWidth(44)
         btn_range.clicked.connect(self._write_range)
         csg.addWidget(btn_range, row, 2)
         csg.addWidget(QLabel("Compl:"), row, 3)
@@ -1423,17 +1423,20 @@ class ActuatorGroup(QGroupBox):
         self._attr_display = QLineEdit(attr)
         self._attr_display.setReadOnly(True)
         self._attr_display.setStyleSheet(self._RO_STYLE)
-        self._attr_display.setFixedWidth(72)
+        self._attr_display.setMinimumWidth(72)
         self._attr_display.setToolTip("Set in the Setup Defaults tab")
         g.addWidget(self._attr_display, 2, 1)
         g.addWidget(QLabel("Label:"), 2, 2)
-        self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
+        self.lbl = QLineEdit(lbl)
         self.lbl.setReadOnly(True); self.lbl.setStyleSheet(self._RO_STYLE)
+        self.lbl.setMinimumWidth(50)
         g.addWidget(self.lbl, 2, 3)
         g.addWidget(QLabel("Unit:"), 2, 4)
-        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(35)
+        self.unit_edit = QLineEdit(unit)
         self.unit_edit.setReadOnly(True); self.unit_edit.setStyleSheet(self._RO_STYLE)
+        self.unit_edit.setMinimumWidth(45)
         g.addWidget(self.unit_edit, 2, 5)
+        g.setColumnStretch(1, 2); g.setColumnStretch(3, 1); g.setColumnStretch(5, 1)
 
         # Row 3: Direction list (replaces fixed start/stop spinboxes)
         self.dir_list = ScanDirectionList(start, stop)
@@ -1467,6 +1470,7 @@ class ActuatorGroup(QGroupBox):
                         label: str, unit: str):
         self._dev_path = dev_path; self._dev_name = dev_name; self._attr = attr
         self._dev_display.setText(dev_name or dev_path)
+        self._dev_display.setToolTip(dev_path)
         self._attr_display.setText(attr)
         self.lbl.setText(label); self.unit_edit.setText(unit)
 

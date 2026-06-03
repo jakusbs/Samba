@@ -76,9 +76,9 @@ class HardwarePanel(QGroupBox):
         # Row 1: Range + Compliance side by side
         csg.addWidget(QLabel("Range:"), row, 0)
         self.range_combo = NoScrollComboBox()
-        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setFixedWidth(70)
+        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setMinimumWidth(84)
         csg.addWidget(self.range_combo, row, 1)
-        btn_range = QPushButton("Set"); btn_range.setFixedWidth(30)
+        btn_range = QPushButton("Set"); btn_range.setFixedWidth(44)
         btn_range.clicked.connect(self._write_range)
         csg.addWidget(btn_range, row, 2)
         csg.addWidget(QLabel("Compl:"), row, 3)

@@ -147,21 +147,25 @@ class ActuatorGroup(QGroupBox):
         self.dev_lbl.setStyleSheet(_ro_style + "font-size:10px;")
         g.addWidget(self.dev_lbl, 1, 1, 1, 4)
         self.attr_lbl = QLineEdit(); self.attr_lbl.setReadOnly(True)
-        self.attr_lbl.setFixedWidth(44)
+        self.attr_lbl.setMinimumWidth(60)
         self.attr_lbl.setStyleSheet(_ro_style + "font-size:10px;")
         g.addWidget(self.attr_lbl, 1, 5)
 
         # Row 2: Label + Unit (display-only — populated from Setup Defaults)
+        # Layout mirrors row 3 (Start/Stop): label spans cols 1-2, unit spans cols 4-5
         g.addWidget(QLabel("Label:"), 2, 0)
-        self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
+        self.lbl = QLineEdit(lbl)
         self.lbl.setReadOnly(True)
+        self.lbl.setMinimumWidth(60)
         self.lbl.setStyleSheet(_ro_style)
-        g.addWidget(self.lbl, 2, 1)
-        g.addWidget(QLabel("Unit:"), 2, 2)
-        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(40)
+        g.addWidget(self.lbl, 2, 1, 1, 2)
+        g.addWidget(QLabel("Unit:"), 2, 3)
+        self.unit_edit = QLineEdit(unit)
         self.unit_edit.setReadOnly(True)
+        self.unit_edit.setMinimumWidth(50)
         self.unit_edit.setStyleSheet(_ro_style)
-        g.addWidget(self.unit_edit, 2, 3)
+        g.addWidget(self.unit_edit, 2, 4, 1, 2)
+        g.setColumnStretch(1, 2); g.setColumnStretch(4, 2)
 
         # Row 3: Start / Stop
         g.addWidget(QLabel("Start:"), 3, 0)
@@ -198,7 +202,7 @@ class ActuatorGroup(QGroupBox):
     # ── Update from setup defaults ────────────────────────────────────────────
     def set_defaults(self, dev: str, attr: str, lbl: str, unit: str):
         """Called by samba.py when Setup Defaults change."""
-        self.dev_lbl.setText(dev)
+        self.dev_lbl.setText(dev); self.dev_lbl.setToolTip(dev)
         self.attr_lbl.setText(attr)
         self.lbl.setText(lbl)
         self.unit_edit.setText(unit)

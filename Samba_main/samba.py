@@ -603,7 +603,7 @@ class MainWindow(QMainWindow):
         bw_l.addWidget(self.bottom_tabs, stretch=1)
 
         v_split.addWidget(bottom_w)
-        v_split.setSizes([600, 300])
+        v_split.setSizes([500, 400])
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 1)
         self._v_split = v_split
@@ -1846,7 +1846,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         if not self._split_initialised and self.height() > 100:
-            top = int(self.height() * 0.55)
+            top = int(self.height() * 0.50)
             bot = self.height() - top
             self._v_split.setSizes([top, bot])
             self._split_initialised = True
