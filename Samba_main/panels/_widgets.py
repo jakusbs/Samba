@@ -67,13 +67,13 @@ class MokeMetadataGroup(QGroupBox):
 
         left.addWidget(QLabel("R4W:"), 2, 0)
         self.r4w_spin = NoScrollDoubleSpinBox()
-        self.r4w_spin.setRange(0, 10000); self.r4w_spin.setDecimals(2)
-        self.r4w_spin.setSuffix(" kΩ"); self.r4w_spin.setMinimumWidth(80)
+        self.r4w_spin.setRange(0, 10_000_000); self.r4w_spin.setDecimals(3)
+        self.r4w_spin.setSuffix(" Ω"); self.r4w_spin.setMinimumWidth(80)
         left.addWidget(self.r4w_spin, 2, 1)
         left.addWidget(QLabel("R2W:"), 2, 2)
         self.r2w_spin = NoScrollDoubleSpinBox()
-        self.r2w_spin.setRange(0, 10000); self.r2w_spin.setDecimals(2)
-        self.r2w_spin.setSuffix(" kΩ"); self.r2w_spin.setMinimumWidth(80)
+        self.r2w_spin.setRange(0, 10_000_000); self.r2w_spin.setDecimals(3)
+        self.r2w_spin.setSuffix(" Ω"); self.r2w_spin.setMinimumWidth(80)
         left.addWidget(self.r2w_spin, 2, 3)
 
         left.addWidget(QLabel("Notes:"), 3, 0)
@@ -168,8 +168,8 @@ class MokeMetadataGroup(QGroupBox):
             "lam2":         self.lam2_cb.isChecked(),
             "lam4":         self.lam4_cb.isChecked(),
             "noDC":         self.nodc_cb.isChecked(),
-            "r_4wire_kohm": self.r4w_spin.value(),
-            "r_2wire_kohm": self.r2w_spin.value(),
+            "r_4wire_ohm": self.r4w_spin.value(),
+            "r_2wire_ohm": self.r2w_spin.value(),
         }
 
     def load_values(self, cfg: dict):
@@ -192,8 +192,8 @@ class MokeMetadataGroup(QGroupBox):
         self.lam2_cb.setChecked(cfg.get("lam2", False))
         self.lam4_cb.setChecked(cfg.get("lam4", False))
         self.nodc_cb.setChecked(cfg.get("noDC", False))
-        self.r4w_spin.setValue(cfg.get("r_4wire_kohm", 0.0))
-        self.r2w_spin.setValue(cfg.get("r_2wire_kohm", 0.0))
+        self.r4w_spin.setValue(cfg.get("r_4wire_ohm", cfg.get("r_4wire_kohm", 0.0) * 1000))
+        self.r2w_spin.setValue(cfg.get("r_2wire_ohm", cfg.get("r_2wire_kohm", 0.0) * 1000))
 
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
