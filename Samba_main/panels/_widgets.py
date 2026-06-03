@@ -37,8 +37,8 @@ class _NoUnderscoreValidator:
 
 
 class MokeMetadataGroup(QGroupBox):
-    """Metadata fields: operator, sample, notes, incidence, polarization,
-    λ/2, λ/4, noDC.  Emits `changed` whenever any value changes."""
+    """Metadata fields: operator, sample, device, notes, incidence, polarization,
+    λ/2, λ/4, noDC, R4W, R2W.  Emits `changed` whenever any value changes."""
     changed = pyqtSignal()
 
     def __init__(self, title: str = "Metadata", parent=None):
@@ -46,25 +46,40 @@ class MokeMetadataGroup(QGroupBox):
         top = QHBoxLayout(self)
         top.setSpacing(8); top.setContentsMargins(4, 4, 4, 4)
 
-        # ── Left: Op / Sample / Notes (vertical pairs) ───────────────────────
+        # ── Left: Op / Sample+Device / Notes / R4W+R2W ───────────────────────
         left = QGridLayout(); left.setSpacing(2)
-        left.setColumnStretch(1, 1)
+        left.setColumnStretch(1, 1); left.setColumnStretch(3, 1)
 
         left.addWidget(QLabel("Op:"), 0, 0)
         self.meta_operator = QLineEdit(); self.meta_operator.setPlaceholderText("Name")
         self.meta_operator.setMinimumWidth(50)
         _NoUnderscoreValidator.install(self.meta_operator)
-        left.addWidget(self.meta_operator, 0, 1)
+        left.addWidget(self.meta_operator, 0, 1, 1, 3)
 
         left.addWidget(QLabel("Sample:"), 1, 0)
         self.meta_sample = QLineEdit(); self.meta_sample.setPlaceholderText("Sample ID")
         _NoUnderscoreValidator.install(self.meta_sample)
         left.addWidget(self.meta_sample, 1, 1)
+        left.addWidget(QLabel("Dev:"), 1, 2)
+        self.meta_device = QLineEdit(); self.meta_device.setPlaceholderText("Device ID")
+        _NoUnderscoreValidator.install(self.meta_device)
+        left.addWidget(self.meta_device, 1, 3)
 
         left.addWidget(QLabel("Notes:"), 2, 0)
         self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
         _NoUnderscoreValidator.install(self.meta_notes)
-        left.addWidget(self.meta_notes, 2, 1)
+        left.addWidget(self.meta_notes, 2, 1, 1, 3)
+
+        left.addWidget(QLabel("R4W:"), 3, 0)
+        self.r4w_spin = NoScrollDoubleSpinBox()
+        self.r4w_spin.setRange(0, 10000); self.r4w_spin.setDecimals(2)
+        self.r4w_spin.setSuffix(" kΩ"); self.r4w_spin.setMinimumWidth(80)
+        left.addWidget(self.r4w_spin, 3, 1)
+        left.addWidget(QLabel("R2W:"), 3, 2)
+        self.r2w_spin = NoScrollDoubleSpinBox()
+        self.r2w_spin.setRange(0, 10000); self.r2w_spin.setDecimals(2)
+        self.r2w_spin.setSuffix(" kΩ"); self.r2w_spin.setMinimumWidth(80)
+        left.addWidget(self.r2w_spin, 3, 3)
 
         top.addLayout(left, stretch=1)
 
@@ -113,13 +128,15 @@ class MokeMetadataGroup(QGroupBox):
         top.addLayout(right)
 
         # Connect everything to changed signal
-        for w in [self.meta_operator, self.meta_sample, self.meta_notes, self.pol_custom]:
+        for w in [self.meta_operator, self.meta_sample, self.meta_device, self.meta_notes, self.pol_custom]:
             w.textChanged.connect(self.changed.emit)
         for w in [self.incidence_combo, self.pol_combo]:
             w.currentTextChanged.connect(self.changed.emit)
         for w in [self.lam2_cb, self.lam4_cb, self.nodc_cb]:
             w.toggled.connect(self.changed.emit)
         self.mirror_shift.valueChanged.connect(self.changed.emit)
+        self.r4w_spin.valueChanged.connect(self.changed.emit)
+        self.r2w_spin.valueChanged.connect(self.changed.emit)
 
         # Trigger initial visibility
         self._on_incidence_changed(self.incidence_combo.currentText())
@@ -143,6 +160,7 @@ class MokeMetadataGroup(QGroupBox):
         return {
             "operator":     self.meta_operator.text().strip(),
             "sample_id":    self.meta_sample.text().strip(),
+            "device_id":    self.meta_device.text().strip(),
             "notes":        self.meta_notes.text().strip(),
             "incidence":    inc,
             "mirror_shift": ms,
@@ -150,11 +168,14 @@ class MokeMetadataGroup(QGroupBox):
             "lam2":         self.lam2_cb.isChecked(),
             "lam4":         self.lam4_cb.isChecked(),
             "noDC":         self.nodc_cb.isChecked(),
+            "r_4wire_kohm": self.r4w_spin.value(),
+            "r_2wire_kohm": self.r2w_spin.value(),
         }
 
     def load_values(self, cfg: dict):
         self.meta_operator.setText(cfg.get("operator", ""))
         self.meta_sample.setText(cfg.get("sample_id", ""))
+        self.meta_device.setText(cfg.get("device_id", ""))
         self.meta_notes.setText(cfg.get("notes", ""))
         inc = cfg.get("incidence", "PMOKE")
         idx = self.incidence_combo.findText(inc)
@@ -171,6 +192,8 @@ class MokeMetadataGroup(QGroupBox):
         self.lam2_cb.setChecked(cfg.get("lam2", False))
         self.lam4_cb.setChecked(cfg.get("lam4", False))
         self.nodc_cb.setChecked(cfg.get("noDC", False))
+        self.r4w_spin.setValue(cfg.get("r_4wire_kohm", 0.0))
+        self.r2w_spin.setValue(cfg.get("r_2wire_kohm", 0.0))
 
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
@@ -180,13 +203,16 @@ class MokeMetadataGroup(QGroupBox):
         v = self.get_values()
         ts = datetime.now().strftime("%Y%m%d")
         sample = v["sample_id"].replace(" ", "-") or "sample"
+        device = v["device_id"].replace(" ", "-")
         amp_str = f"{amplitude_mA:.4g}mA"
         freq_str = f"{freq_Hz:.4g}Hz"
         cfg = config_name.replace(" ", "-").replace("_", "-") or "cfg"
         inc = v["incidence"]
         ms = f"{v['mirror_shift']:.2f}mm".replace(".", "p")
         notes = v["notes"].replace(" ", "-")
-        parts = [ts, sample, amp_str, freq_str, cfg, inc, ms]
+        parts = [ts, sample]
+        if device: parts.append(device)
+        parts += [amp_str, freq_str, cfg, inc, ms]
         if notes:  parts.append(notes)
         if v["noDC"]:  parts.append("noDC")
         if v["lam2"]:  parts.append("lam2")
