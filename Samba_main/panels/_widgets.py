@@ -65,21 +65,21 @@ class MokeMetadataGroup(QGroupBox):
         _NoUnderscoreValidator.install(self.meta_device)
         left.addWidget(self.meta_device, 1, 3)
 
-        left.addWidget(QLabel("Notes:"), 2, 0)
-        self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
-        _NoUnderscoreValidator.install(self.meta_notes)
-        left.addWidget(self.meta_notes, 2, 1, 1, 3)
-
-        left.addWidget(QLabel("R4W:"), 3, 0)
+        left.addWidget(QLabel("R4W:"), 2, 0)
         self.r4w_spin = NoScrollDoubleSpinBox()
         self.r4w_spin.setRange(0, 10000); self.r4w_spin.setDecimals(2)
         self.r4w_spin.setSuffix(" kΩ"); self.r4w_spin.setMinimumWidth(80)
-        left.addWidget(self.r4w_spin, 3, 1)
-        left.addWidget(QLabel("R2W:"), 3, 2)
+        left.addWidget(self.r4w_spin, 2, 1)
+        left.addWidget(QLabel("R2W:"), 2, 2)
         self.r2w_spin = NoScrollDoubleSpinBox()
         self.r2w_spin.setRange(0, 10000); self.r2w_spin.setDecimals(2)
         self.r2w_spin.setSuffix(" kΩ"); self.r2w_spin.setMinimumWidth(80)
-        left.addWidget(self.r2w_spin, 3, 3)
+        left.addWidget(self.r2w_spin, 2, 3)
+
+        left.addWidget(QLabel("Notes:"), 3, 0)
+        self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
+        _NoUnderscoreValidator.install(self.meta_notes)
+        left.addWidget(self.meta_notes, 3, 1, 1, 3)
 
         top.addLayout(left, stretch=1)
 
