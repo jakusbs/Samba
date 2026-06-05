@@ -118,6 +118,11 @@ def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) 
         v = _read(k_dev, attr)
         if v is not None:
             snap[hw_key] = v
+    # Keithley output current readback ("I out" in the hardware panel)
+    cur_attr = setup.get("keithley_attr_current") or setup.get("keithley_current_attr", "current")
+    v = _read(k_dev, cur_attr)
+    if v is not None:
+        snap["hw_keithley_current_mA"] = v
 
     # Lock-in amplifier settings
     zi_dev = setup.get("zi_device", "")
@@ -143,6 +148,16 @@ def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) 
                   setup.get("attodry_attr_temp_rb", "Temperature"))
         if v is not None:
             snap["hw_temperature_K"] = v
+
+    # Extra cryostat temperatures (VTI + magnet) — always recorded
+    v = _read(setup.get("attodry_device", ""),
+              setup.get("attodry_attr_vti_temp", "VtiTemperature"))
+    if v is not None:
+        snap["hw_vti_temp_K"] = v
+    v = _read(setup.get("attodry_device", ""),
+              setup.get("attodry_attr_mag_temp", "MagnetTemperature"))
+    if v is not None:
+        snap["hw_magnet_temp_K"] = v
 
     # Stage position at scan start — only relevant for SPATIAL scans
     if scan_type not in ("FIELD",) and not is_temp_sweep:

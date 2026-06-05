@@ -40,9 +40,11 @@ class Live2DWidget(QWidget):
         self._cmap  = "RdBu_r"
         self._sensor = self._xlbl = self._ylbl = ""
         self._dirty = False
-        self._aspect = "auto"
 
-        self.fig    = Figure(figsize=(6, 5), dpi=100, facecolor="#1e1e2e")
+        # constrained_layout keeps the axes filling the figure (with the
+        # colorbar) across resizes — avoids the map shrinking to a narrow strip.
+        self.fig    = Figure(figsize=(6, 5), dpi=100, facecolor="#1e1e2e",
+                             constrained_layout=True)
         self.ax     = self.fig.add_subplot(111)
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
@@ -56,11 +58,6 @@ class Live2DWidget(QWidget):
         self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
         self.autocolor_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
         top.addWidget(self.autocolor_cb)
-        self.aspect_cb = QCheckBox("Equal aspect")
-        self.aspect_cb.setToolTip("Show X and Y at the same scale (true proportions for spatial maps).")
-        self.aspect_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
-        self.aspect_cb.toggled.connect(self._on_aspect_toggled)
-        top.addWidget(self.aspect_cb)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -92,12 +89,6 @@ class Live2DWidget(QWidget):
             self._img.set_data(self._data)
         self.canvas.draw_idle()
 
-    def _on_aspect_toggled(self, on: bool):
-        self._aspect = "equal" if on else "auto"
-        if self._img is not None:
-            self.ax.set_aspect(self._aspect)
-            self.fig.tight_layout(); self.canvas.draw_idle()
-
     def setup(self, x_arr, y_arr, xl: str, yl: str, sensor: str, cmap: str):
         self._xarr = x_arr; self._yarr = y_arr; self._cmap = cmap
         self._sensor = sensor; self._xlbl = xl; self._ylbl = yl
@@ -110,17 +101,17 @@ class Live2DWidget(QWidget):
             self.canvas.draw_idle(); return
         ext = [self._xarr[0], self._xarr[-1], self._yarr[0], self._yarr[-1]]
         self._img = self.ax.imshow(
-            self._data, origin="lower", aspect=self._aspect,
+            self._data, origin="lower", aspect="auto",
             extent=ext, cmap=self._cmap, interpolation="nearest")
         if self._cb:
             try: self._cb.remove()
             except Exception: pass
-        self._cb = self.fig.colorbar(self._img, ax=self.ax, fraction=0.046, pad=0.04)
+        self._cb = self.fig.colorbar(self._img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
         self.ax.set_title(self._sensor, color="#ccccff", fontsize=10)
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
     def update_point(self, ix: int, iy: int, val: float):
         if self._data is None or self._img is None: return
@@ -141,6 +132,10 @@ class Live2DWidget(QWidget):
     def clear(self):
         self._data = self._xarr = self._yarr = self._img = None
         self._dirty = False
+        if self._cb:
+            try: self._cb.remove()
+            except Exception: pass
+            self._cb = None
         self.ax.cla(); self._style_axes(); self.canvas.draw_idle()
 
 

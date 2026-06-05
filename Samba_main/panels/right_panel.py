@@ -251,8 +251,13 @@ class RightPanel(QWidget):
         self.x_combo.blockSignals(False)
 
     def set_display(self, sensor: str, cmap: str):
+        # Block signals so a programmatic restore (config load / setup switch)
+        # doesn't emit display_changed — only genuine user combo interaction
+        # should redirect the live 2D map's display sensor.
+        self.disp_combo.blockSignals(True); self.cmap_combo.blockSignals(True)
         if self.disp_combo.findText(sensor) >= 0: self.disp_combo.setCurrentText(sensor)
         if self.cmap_combo.findText(cmap)   >= 0: self.cmap_combo.setCurrentText(cmap)
+        self.disp_combo.blockSignals(False); self.cmap_combo.blockSignals(False)
 
     # ── DC mode switching ────────────────────────────────────────────────────
     def set_dc_mode(self, dc: bool):

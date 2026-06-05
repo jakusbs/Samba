@@ -106,6 +106,10 @@ def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
         v = _read(k_dev, setup.get(attr_key, ""))
         if v is not None:
             snap[hw_key] = v
+    # Keithley output current readback ("I out" in the hardware panel)
+    v = _read(k_dev, setup.get("keithley_current_attr", "current"))
+    if v is not None:
+        snap["hw_keithley_current_mA"] = v
 
     # Lock-in amplifier settings
     zi_dev = setup.get("zi_device", "")
@@ -123,11 +127,14 @@ def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
     if v is not None:
         snap["hw_relay_state"] = v
 
-    # Field at scan start — skip when field is being swept
+    # Field + magnet current at scan start — skip when field is being swept
     if scan_type != "FIELD":
         v = _read(setup.get("magnet_device", ""), setup.get("magnet_field_attr", ""))
         if v is not None:
             snap["hw_field_mT"] = v
+        v = _read(setup.get("magnet_device", ""), setup.get("magnet_current_attr", ""))
+        if v is not None:
+            snap["hw_magnet_current_A"] = v
 
     # Stage position at scan start — only relevant for SPATIAL scans
     if scan_type not in ("FIELD", "DC_HYST"):
@@ -1728,6 +1735,11 @@ class MainWindow(QMainWindow):
                                      self.right_panel.get_x_key())
 
     def _on_display_changed(self, sensor: str, cmap: str):
+        # Redirect the running scan's incoming points to the newly-selected
+        # sensor too — otherwise only the already-acquired data would switch
+        # and new points would keep filling the previous (frozen) sensor.
+        if sensor and self._current_scan_cfg:
+            self._current_scan_cfg["display_sensor"] = sensor
         if sensor and sensor in self._scan_data and self.map2d._img is not None:
             self.map2d.switch_sensor(self._scan_data[sensor], sensor)
         self.map2d.set_colormap(cmap)

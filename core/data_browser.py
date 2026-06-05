@@ -115,10 +115,13 @@ class ScanFile:
                 for k in (
                     "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
                     "hw_keithley_range",        "hw_keithley_compliance_V",
+                    "hw_keithley_current_mA",
                     "hw_zi_tc_s",               "hw_zi_order",
                     "hw_zi_settling_s",         "hw_relay_state",
-                    "hw_field_mT",              "hw_act1_pos",
-                    "hw_act2_pos",              "hw_temperature_K",
+                    "hw_field_mT",              "hw_magnet_current_A",
+                    "hw_act1_pos",              "hw_act2_pos",
+                    "hw_temperature_K",         "hw_vti_temp_K",
+                    "hw_magnet_temp_K",
                     "act1_step", "act2_step",   "field_step_A",
                     "is_temp_sweep",
                     "temp_sweep_start_K", "temp_sweep_stop_K", "temp_sweep_step_K",
@@ -374,7 +377,10 @@ class BrowserPlotWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e")
+        # constrained_layout keeps the axes filling the figure (with the
+        # colorbar) across resizes — avoids the map shrinking to a narrow strip.
+        self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e",
+                             constrained_layout=True)
         self.ax     = self.fig.add_subplot(111)
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
@@ -382,25 +388,13 @@ class BrowserPlotWidget(QWidget):
 
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
-        self.aspect_cb = QCheckBox("Equal aspect")
-        self.aspect_cb.setToolTip("Show X and Y at the same scale (true proportions for spatial maps).")
-        self.aspect_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
-        self.aspect_cb.toggled.connect(self._on_aspect_toggled)
-        top.addWidget(self.aspect_cb)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
         self._cb     = None
-        self._aspect = "auto"
         self._is_2d  = False
         self._style()
-
-    def _on_aspect_toggled(self, on: bool):
-        self._aspect = "equal" if on else "auto"
-        if self._is_2d:
-            self.ax.set_aspect(self._aspect)
-            self.fig.tight_layout(); self.canvas.draw_idle()
 
     def _style(self):
         self.ax.set_facecolor("#12121f")
@@ -441,7 +435,7 @@ class BrowserPlotWidget(QWidget):
         self.ax.legend(fontsize=8, facecolor="#313244",
                        edgecolor="#45475a", labelcolor="#cdd6f4",
                        loc="best")
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
     def plot_2d(self, data: np.ndarray, x_arr, y_arr,
                 x_label: str, y_label: str, sensor_label: str,
@@ -452,16 +446,16 @@ class BrowserPlotWidget(QWidget):
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
         if vmin == vmax: vmax = vmin + 1e-12
-        img = self.ax.imshow(data, origin="lower", aspect=self._aspect,
+        img = self.ax.imshow(data, origin="lower", aspect="auto",
                              extent=ext, cmap=cmap, interpolation="nearest",
                              vmin=vmin, vmax=vmax)
         self._is_2d = True
-        self._cb = self.fig.colorbar(img, ax=self.ax, fraction=0.046, pad=0.04)
+        self._cb = self.fig.colorbar(img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
         self.ax.set_xlabel(x_label, color="#aaaacc")
         self.ax.set_ylabel(y_label, color="#aaaacc")
         self.ax.set_title(sensor_label, color="#ccccff", fontsize=10)
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -480,6 +474,7 @@ class DataBrowserPanel(QWidget):
         self._save_dir_getter = save_dir_getter
         self._loaded_files: Dict[str, ScanFile] = {}  # path → ScanFile
         self._overlay_paths: List[str] = []  # paths selected for overlay
+        self._last_y_key: str = ""   # remember last viewed detector across files
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(4)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -756,6 +751,7 @@ class DataBrowserPanel(QWidget):
         _HW_DISPLAY = [
             ("hw_keithley_amplitude_mA", "Keithley amp",   "mA"),
             ("hw_keithley_frequency_Hz", "Keithley freq",  "Hz"),
+            ("hw_keithley_current_mA",   "Keithley I out", "mA"),
             ("hw_keithley_range",        "Keithley range", ""),
             ("hw_keithley_compliance_V", "Keithley compl", "V"),
             ("hw_zi_tc_s",               "ZI TC",          "s"),
@@ -763,7 +759,10 @@ class DataBrowserPanel(QWidget):
             ("hw_zi_settling_s",         "ZI settling",    "s"),
             ("hw_relay_state",           "Relay",          ""),
             ("hw_field_mT",              "Field @start",   "mT"),
+            ("hw_magnet_current_A",      "Magnet I @start","A"),
             ("hw_temperature_K",         "Temp @start",    "K"),
+            ("hw_vti_temp_K",            "VTI temp",       "K"),
+            ("hw_magnet_temp_K",         "Magnet temp",    "K"),
             ("hw_act1_pos",              "Act1 @start",    ""),
             ("hw_act2_pos",              "Act2 @start",    ""),
         ]
@@ -797,7 +796,15 @@ class DataBrowserPanel(QWidget):
                 x_default = key; break
         if is_dc and x_default is None:
             x_default = "field_mT"
-        y_default = sf.sensor_keys[0] if sf.sensor_keys else ""
+        # Prefer the detector the user last looked at (sticky across files) if
+        # this file also has it; otherwise fall back to the first sensor.
+        y_default = ""
+        if self._last_y_key:
+            for i in range(self.y_combo.count()):
+                if self.y_combo.itemData(i) == self._last_y_key:
+                    y_default = self._last_y_key; break
+        if not y_default:
+            y_default = sf.sensor_keys[0] if sf.sensor_keys else ""
         if x_default:
             for i in range(self.x_combo.count()):
                 if self.x_combo.itemData(i) == x_default:
@@ -822,6 +829,10 @@ class DataBrowserPanel(QWidget):
         toggle — but not while the combos are being repopulated in _show_file."""
         if self._populating_combos:
             return
+        # Remember the chosen detector so the next file opened defaults to it
+        yk = self.y_combo.currentData()
+        if yk:
+            self._last_y_key = yk
         self._plot_current()
 
     def _plot_current(self):

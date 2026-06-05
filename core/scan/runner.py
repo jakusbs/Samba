@@ -88,10 +88,13 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
     _HW_KEYS = [
         "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
         "hw_keithley_range",        "hw_keithley_compliance_V",
+        "hw_keithley_current_mA",
         "hw_zi_tc_s",               "hw_zi_order",
         "hw_zi_settling_s",         "hw_relay_state",
-        "hw_field_mT",              "hw_act1_pos",
-        "hw_act2_pos",              "hw_temperature_K",
+        "hw_field_mT",              "hw_magnet_current_A",
+        "hw_act1_pos",              "hw_act2_pos",
+        "hw_temperature_K",         "hw_vti_temp_K",
+        "hw_magnet_temp_K",
     ]
     for k in _HW_KEYS:
         v = cfg.get(k)
