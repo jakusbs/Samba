@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
-from config import LEFT_COLORS, RIGHT_COLORS
+from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -548,6 +548,15 @@ class DataBrowserPanel(QWidget):
         self.map2d_cb.setEnabled(False)
         self.map2d_cb.toggled.connect(self._on_combo_changed)
         sel_row.addWidget(self.map2d_cb)
+        # Colormap picker — applies to 2D colour maps.
+        sel_row.addWidget(QLabel("Cmap:"))
+        self.cmap_combo = QComboBox(); self.cmap_combo.setMinimumWidth(90)
+        for cm in COLORMAPS:
+            self.cmap_combo.addItem(cm)
+        self.cmap_combo.setToolTip("Colormap for 2D colour maps")
+        # Connect after populating so filling the list doesn't trigger a re-plot.
+        self.cmap_combo.currentIndexChanged.connect(self._on_combo_changed)
+        sel_row.addWidget(self.cmap_combo)
         plot_btn = QPushButton("Plot"); plot_btn.clicked.connect(self._plot_current)
         plot_btn.setToolTip("Plot the selected columns (or 2D map) from the current scan file")
         sel_row.addWidget(plot_btn)
@@ -860,7 +869,8 @@ class DataBrowserPanel(QWidget):
             if result and np.asarray(result["data"]).ndim == 2:
                 self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
                                   result["x_label"], result["y_label"],
-                                  result["sensor_label"])
+                                  result["sensor_label"],
+                                  cmap=self.cmap_combo.currentText())
             else:
                 self.meta_text.append("\n⚠ Could not read a 2D map for the selected channel.")
             return
