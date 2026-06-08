@@ -342,6 +342,8 @@ class CryoMainWindow(QMainWindow):
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
+        self._sl_scan_t0:        float                    = 0.0
+        self._sl_cfg_list:       list                     = []
         self._scan_total_pts:    int                      = 0
         self._dir_queue:         list                     = []   # pending direction cfgs
         self._interleaved_2d:    bool                     = False
@@ -1892,6 +1894,24 @@ class CryoMainWindow(QMainWindow):
             c["bd_calibration"] = bd_cal
 
         first_cfg = cfg_list[0]
+        self._sl_cfg_list = cfg_list
+
+        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
+        is_temp_sweep = "temp_start" in first_cfg
+        hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
+                                    is_temp_sweep=is_temp_sweep)
+        if is_temp_sweep:
+            hw_snap["_is_temp_sweep"] = True
+            t_start = first_cfg.get("temp_start", 0.0)
+            t_stop  = first_cfg.get("temp_stop",  0.0)
+            t_pts   = int(first_cfg.get("temp_npts", 1))
+            hw_snap["_temp_sweep_start_K"] = t_start
+            hw_snap["_temp_sweep_stop_K"]  = t_stop
+            hw_snap["_temp_sweep_step_K"]  = (
+                (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
+        for c in cfg_list:
+            c.update(hw_snap)
+
         self._current_scan_cfg = first_cfg
         self._setup_live_display(first_cfg, active); self._alloc_scan_data(first_cfg, active)
 
@@ -1901,7 +1921,7 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
-        self._sl_worker.scan_done.connect(lambda i, fn: self._status_bar_scan_done())
+        self._sl_worker.scan_done.connect(self._on_sl_scan_done)
         self._sl_worker.status_msg.connect(self._on_status)
         self._sl_worker.log_msg.connect(self._log_append)
         self._sl_worker.all_done.connect(self._on_scanlist_done)
@@ -1911,10 +1931,33 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self._scan_start_time = _time.time()
+        self._sl_scan_t0 = _time.time()
         # Status bar: one scan-file per (cycle × direction).
         self._status_bar_run_start(cfg, sl["n_scans"] * len(cfg_list))
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
+
+    def _on_sl_scan_done(self, idx: int, fn: str):
+        """Per-file callback from ScanlistWorker — updates status bar and
+        records a lab-notebook entry for the file just written (each
+        scanlist file previously produced no notebook row at all)."""
+        self._status_bar_scan_done()
+        t_start = self._sl_scan_t0
+        self._sl_scan_t0 = _time.time()   # next file starts now
+        cfg_list = getattr(self, "_sl_cfg_list", None) or (
+            [self._current_scan_cfg] if self._current_scan_cfg else [])
+        if not fn or not cfg_list:
+            return
+        try:
+            setup = self._active_setup()
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"), "Cryo")
+            base_cfg = cfg_list[idx % len(cfg_list)]
+            entry = dict(base_cfg)
+            entry["_scan_start_time"] = t_start
+            entry["_hdf5_path"] = os.path.abspath(fn)
+            append_measurement(nb, entry)
+        except Exception:
+            log.debug("Lab notebook append failed for scanlist file", exc_info=True)
 
     def _on_scanlist_done(self, txt_path):
         self._status_bar_run_finish()

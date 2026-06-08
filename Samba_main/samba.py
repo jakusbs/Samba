@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
+        self._sl_scan_t0:        float                    = 0.0
         self._trmoke_x_factor:   Optional[float]          = None
         self._meta_syncing:      bool                     = False
         self._timing_syncing:    bool                     = False
@@ -1628,13 +1629,16 @@ class MainWindow(QMainWindow):
         # ── BD calibration — injected into cfg for HDF5 storage ──────────────
         cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
 
+        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
+        cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
+
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
                                          setup_name=self._active_setup_name)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
-        self._sl_worker.scan_done.connect(lambda i, fn: self._status_bar_scan_done())
+        self._sl_worker.scan_done.connect(self._on_sl_scan_done)
         self._sl_worker.status_msg.connect(self._on_status)
         self._sl_worker.log_msg.connect(self._log_append)
         self._sl_worker.all_done.connect(self._on_scanlist_done)
@@ -1645,8 +1649,33 @@ class MainWindow(QMainWindow):
 
         # Status bar: one scan-file per (cycle × direction).
         self._status_bar_run_start(cfg, sl["n_scans"] * len(self._sl_worker.cfg_list))
+        self._sl_scan_t0 = _time.time()
         self._scan_running = True; self._set_running(True); self.log_text.clear()
         self._sl_worker.start()
+
+    def _on_sl_scan_done(self, idx: int, fn: str):
+        """Per-file callback from ScanlistWorker — updates status bar and
+        records a lab-notebook entry for the file just written (each
+        scanlist file previously produced no notebook row at all)."""
+        self._status_bar_scan_done()
+        t_start = self._sl_scan_t0
+        self._sl_scan_t0 = _time.time()   # next file starts now
+        if not fn or not self._current_scan_cfg:
+            return
+        try:
+            setup = self._active_setup()
+            nb = _nb_path(setup.get("notebook_dir", "~/moke_data"),
+                          self._active_setup_name)
+            entry = dict(self._current_scan_cfg)
+            entry["_scan_start_time"] = t_start
+            entry["_hdf5_path"] = os.path.abspath(fn)
+            for _k in ("geometry", "stage_type",
+                       "hw_temperature_K",
+                       "_temp_sweep_start_K", "_temp_sweep_stop_K", "_temp_sweep_step_K"):
+                entry.pop(_k, None)
+            append_measurement(nb, entry)
+        except Exception:
+            log.debug("Lab notebook append failed for scanlist file", exc_info=True)
 
     def _on_scanlist_done(self, txt_path: str):
         self._status_bar_run_finish()
