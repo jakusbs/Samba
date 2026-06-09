@@ -28,11 +28,20 @@ class ThreadZI2(threading.Thread):
             collect_time = max(self.p.attr_integrationtime_read, MIN_COLLECT)
             timeout_ms   = int((collect_time + 5.0) * 1000)
 
+            # ── 0. Wake idle data server ────────────────────────────────
+            # LabOne pauses sample delivery when the API connection is idle.
+            # A getDouble() call re-activates streaming before flush+collect.
+            daq.getDouble('/{}/demods/0/rate'.format(DEVICE))
+
             # ── 1. Flush stale samples ──────────────────────────────────
             daq.poll(0.01, 100, 0, True)
 
             # ── 2. Collect for integration window ──────────────────────
             data = daq.poll(collect_time, timeout_ms, 0, True)
+            if not data:
+                self.p.warn_stream(
+                    'ZI2: server returned no samples for {:.3f}s window '
+                    '(idle connection; check LabOne)'.format(collect_time))
 
             # ── 3. Average each demod channel with numpy ────────────────
             sqrt2 = np.sqrt(2)
