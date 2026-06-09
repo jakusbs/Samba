@@ -437,23 +437,21 @@ class HardwarePanel(QGroupBox):
         self.field_rb.setText(f"{val_T:.1f} mT" if val_T is not None else "— mT")
 
     def set_scan_running(self, running: bool):
-        """Disable/enable the Read buttons and guard refresh() during active scans.
+        """Track scan state. Hardware reads stay AVAILABLE during scans.
 
-        A scan runner and a concurrent hardware read both call state()/read_attribute()
-        on the ZI device server (Device_4Impl — single-threaded CORBA).  Simultaneous
-        requests can cause IMP_LIMIT errors in the scan's state poller.  Blocking the
-        Read buttons while a scan is running avoids this collision entirely.
+        Previously the Read buttons were disabled during a scan: with the old
+        single-threaded ZI server, a hardware read would block inside the
+        server while a poll was in progress, piling up the scan's state-poller
+        requests into IMP_LIMIT CORBA errors.  The v5 ZI/ZI2 servers serialize
+        all ziDAQ access behind a lock and make the filter reads
+        (timeconstant/filterorder/settlingtime) non-blocking, so a read now
+        returns instantly and can no longer collide with the state poller.
+        Reads also run on background daemon threads, so the GUI never blocks.
         """
         self._scan_running = running
-        tip = "Cannot read during an active scan" if running else ""
-        for btn in (self._btn_zi_read, self._btn_ks_read):
-            btn.setEnabled(not running)
-            btn.setToolTip(tip)
 
     def refresh(self):
-        """Re-read all hardware values. Skipped silently during active scans."""
-        if getattr(self, '_scan_running', False):
-            return
+        """Re-read all hardware values (safe during scans — see set_scan_running)."""
         self._read_lockin()
         self._read_keithley()
 
