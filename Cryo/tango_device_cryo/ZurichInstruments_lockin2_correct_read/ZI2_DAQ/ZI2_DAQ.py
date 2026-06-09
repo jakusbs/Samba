@@ -162,6 +162,12 @@ class ZI2(Device):
         self._samplingrate = self.daq.getDouble(self._path('demods/0/rate'))
         self._frequency    = self.daq.getDouble(self._path('oscs/0/freq'))
         self._amplitude    = self.daq.getDouble(self._path('sigouts/0/amplitudes/0'))
+        # Warm the filter caches so non-blocking reads return real values even
+        # if the first read happens during an acquisition (see timeconstant/
+        # filterorder/settlingtime — they fall back to these cached values).
+        self._timeconstant = self.daq.getDouble(self._path('demods/0/timeconstant'))
+        self._filterorder  = int(self.daq.getDouble(self._path('demods/0/order')))
+        self._settlingtime = SETTLE_99.get(self._filterorder, 16.0) * self._timeconstant
 
     def always_executed_hook(self):
         if self.daq is None and self.get_state() != DevState.FAULT:
@@ -302,27 +308,49 @@ class ZI2(Device):
 
     # ---- read-only filter info -----------------------------------------
 
+    # The three read-only filter attributes are NON-BLOCKING: they refresh from
+    # hardware only when the daq lock is free, and otherwise return the last
+    # cached value.  TC / order / settling are constant during a scan, so the
+    # cached value is still correct — this lets Samba / Jive / the HW panel read
+    # them mid-acquisition without ever waiting for the integration poll.
     @attribute(dtype=float, access=AttrWriteType.READ, unit='s',
-               doc="Demod 0 low-pass filter time constant (read from hardware)")
+               doc="Demod 0 low-pass filter time constant. Refreshed when the "
+                   "daq is free; cached value returned during an acquisition.")
     def timeconstant(self):
         self._require_daq()
-        with self._daq_lock:
-            self._timeconstant = self.daq.getDouble(self._path('demods/0/timeconstant'))
+        if self._daq_lock.acquire(blocking=False):
+            try:
+                self._timeconstant = self.daq.getDouble(self._path('demods/0/timeconstant'))
+            finally:
+                self._daq_lock.release()
         return self._timeconstant
 
     @attribute(dtype=int, access=AttrWriteType.READ,
-               doc="Demod 0 filter order 1-8 (read from hardware)")
+               doc="Demod 0 filter order 1-8. Refreshed when the daq is free; "
+                   "cached value returned during an acquisition.")
     def filterorder(self):
         self._require_daq()
-        with self._daq_lock:
-            self._filterorder = int(self.daq.getDouble(self._path('demods/0/order')))
+        if self._daq_lock.acquire(blocking=False):
+            try:
+                self._filterorder = int(self.daq.getDouble(self._path('demods/0/order')))
+            finally:
+                self._daq_lock.release()
         return self._filterorder
 
     @attribute(dtype=float, access=AttrWriteType.READ, unit='s',
-               doc="99% settling time = settle_factor(order) * timeconstant")
+               doc="99% settling time = settle_factor(order) * timeconstant. "
+                   "Refreshed when the daq is free; cached during an acquisition.")
     def settlingtime(self):
-        settling, _, _ = self._settling_time()
-        self._settlingtime = settling
+        self._require_daq()
+        if self._daq_lock.acquire(blocking=False):
+            try:
+                tc = self.daq.getDouble(self._path('demods/0/timeconstant'))
+                order = int(self.daq.getDouble(self._path('demods/0/order')))
+                self._timeconstant = tc
+                self._filterorder = order
+                self._settlingtime = SETTLE_99.get(order, 16.0) * tc
+            finally:
+                self._daq_lock.release()
         return self._settlingtime
 
     # ---- commands -------------------------------------------------------
