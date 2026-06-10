@@ -46,7 +46,10 @@ class ScanWorker(QThread):
                 'log':           self.log_msg.emit,
                 'dc_loop':       self.dc_loop_ready.emit,
             })
-            (self.scan_done if fn else self.scan_aborted).emit(*(fn,) if fn else ())
+            if fn:
+                self.scan_done.emit(fn)
+            else:
+                self.scan_aborted.emit()
             rfn = getattr(self._runner, '_retrace_filename', None)
             if rfn:
                 self.scan_done_retrace.emit(rfn)

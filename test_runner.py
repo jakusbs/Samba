@@ -673,5 +673,33 @@ class TestWritePointFailure(unittest.TestCase):
         self.assertTrue(r._paused, "Persistent write failure must pause the scan")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Setup-lock stale-stamp parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSetupLockStamp(unittest.TestCase):
+    """Stale-lock recovery relies on parsing the timestamp in the info stamp."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from core import setup_lock
+        self.sl = setup_lock
+
+    def test_fresh_stamp_age_near_zero(self):
+        age = self.sl._stamp_age_hours(self.sl._make_stamp())
+        self.assertIsNotNone(age)
+        self.assertLess(abs(age), 0.01)
+
+    def test_old_stamp_is_stale(self):
+        age = self.sl._stamp_age_hours("pc3:412 @ 2020-01-01 08:00:00")
+        self.assertGreater(age, self.sl.STALE_LOCK_HOURS)
+
+    def test_legacy_stamp_without_date_unparseable(self):
+        # Old-format stamps (no date) must be treated as held, not stale
+        self.assertIsNone(self.sl._stamp_age_hours("pc3:412 @ 14:02:31"))
+        self.assertIsNone(self.sl._stamp_age_hours(""))
+        self.assertIsNone(self.sl._stamp_age_hours(None))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

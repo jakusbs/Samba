@@ -243,6 +243,10 @@ class ScanRunner:
             mag_cur_attr = (cfg.get("field_current_attr", "")
                             or setup.get("magnet_current_attr", "current_polar"))
             mag_fld_attr = setup.get("magnet_field_attr", "field_polar_corr")
+            # Rough field-per-current estimate (T/A), used only when the
+            # field readback fails mid-scan.  Override per setup if the
+            # magnet calibration differs.
+            field_per_amp = float(setup.get("field_per_amp_estimate", 0.15))
             hdf_scan = "FIELD"
             fast_attr = None
         elif scan_type == "SPATIAL" and scan_x and scan_y:
@@ -285,6 +289,11 @@ class ScanRunner:
 
         n_x, n_y  = len(x_plan), len(y_plan)
         total     = n_x * n_y
+        # Position-mismatch warning tolerance: half a scan step, in the axis'
+        # own units.  None (zero-span or single-point axes) falls back to the
+        # legacy heuristic inside _move().
+        x_tol = (abs(x_plan[1] - x_plan[0]) / 2.0 if n_x > 1 else 0.0) or None
+        y_tol = (abs(y_plan[1] - y_plan[0]) / 2.0 if n_y > 1 else 0.0) or None
         # In-memory buffers (still used for live plotting callbacks)
         data      = {s["label"]: np.full((n_y, n_x), np.nan) for s in active}
         x_actual  = np.zeros((n_y, n_x))
@@ -483,7 +492,7 @@ class ScanRunner:
                 for iy, y_pos in enumerate(y_plan):
                     if self._abort: break
                     st(f"Moving {cfg['act2_label']} → {y_pos:.4g}")
-                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
 
                     # ── Trace sweep (x+) ─────────────────────────────────────
                     for ix, x_pos in enumerate(x_plan):
@@ -491,7 +500,7 @@ class ScanRunner:
                         while self._paused:
                             time.sleep(0.05)
                             if self._abort: break
-                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
                         if settle > 0: time.sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
@@ -513,7 +522,7 @@ class ScanRunner:
                         while self._paused:
                             time.sleep(0.05)
                             if self._abort: break
-                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                        x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
                         if settle > 0: time.sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
@@ -539,7 +548,7 @@ class ScanRunner:
                 retrace_y = y_plan[::-1]
                 for ix, x_pos in enumerate(x_plan):
                     if self._abort: break
-                    x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                    x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
                     if settle > 0: time.sleep(settle)
                     st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
 
@@ -549,7 +558,7 @@ class ScanRunner:
                         while self._paused:
                             time.sleep(0.05)
                             if self._abort: break
-                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
                         if settle > 0: time.sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
@@ -571,7 +580,7 @@ class ScanRunner:
                         while self._paused:
                             time.sleep(0.05)
                             if self._abort: break
-                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                        self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
                         if settle > 0: time.sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
@@ -593,9 +602,7 @@ class ScanRunner:
 
             finally:
                 if hfile2 is not None:
-                    self._finalize_hdf5(hfile2, count_r, total,
-                                        x_actual, t_actual, data, x_plan, y_plan,
-                                        active, x_lbl, x_unit, hdf_scan, retrace_cfg)
+                    self._finalize_hdf5(hfile2, count_r, t_actual)
 
           elif hdf_scan == "SPATIAL_XY" and cfg.get("fast_axis", "act1") == "act2":
             # ── Y-fast 2D raster: X is the slow (outer) axis, Y the fast inner ──
@@ -613,7 +620,7 @@ class ScanRunner:
             for ix, x_pos in enumerate(x_plan):
                 if self._abort: break
                 st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
-                x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+                x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
 
                 # Zigzag: reverse the Y sweep on every odd X column.
                 y_seq  = y_plan
@@ -629,7 +636,7 @@ class ScanRunner:
                         time.sleep(0.05)
                         if self._abort: break
 
-                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
                     if settle > 0:
                         time.sleep(settle)
                     if _adap_k > 0 and _prev_y_pos is not None:
@@ -673,7 +680,7 @@ class ScanRunner:
                 if self._abort: break
                 if hdf_scan == "SPATIAL_XY":
                     st(f"Moving {cfg['act2_label']} → {y_pos:.4g}")
-                    self._move(act2_p, cfg["act2_attr"], y_pos, cfg["move_timeout"], log=lg)
+                    self._move(act2_p, cfg["act2_attr"], y_pos, cfg["move_timeout"], log=lg, tol=y_tol)
 
                 x_seq  = x_plan
                 ix_seq = list(range(n_x))
@@ -702,11 +709,11 @@ class ScanRunner:
                             lg(f"⚠ Magnet write failed at {x_pos:.4g} A: {_mag_err}")
                         time.sleep(max(cfg["settle_time"], 0.05))
                         v, _ = safe_read(mag_p, mag_fld_attr)
-                        x_read = v if v is not None else x_pos * 0.15
+                        x_read = v if v is not None else x_pos * field_per_amp
                     elif hdf_scan == "TIME":
                         x_read = time.time() - t0
                     else:
-                        x_read = self._move(act1_p, fast_attr, x_pos, cfg["move_timeout"], log=lg)
+                        x_read = self._move(act1_p, fast_attr, x_pos, cfg["move_timeout"], log=lg, tol=x_tol)
                         if rtv40_p is not None:
                             delta_ns = (x_pos - rtv40_ref_s) * 1e9
                             new_width_ns = max(0.3, min(20.0, rtv40_base_ns - delta_ns))
@@ -774,9 +781,7 @@ class ScanRunner:
 
         finally:
             # ── Finalize: update status and close ─────────────────────────────
-            self._finalize_hdf5(hfile, count, total, x_actual, t_actual,
-                                data, x_plan, y_plan, active,
-                                x_lbl, x_unit, hdf_scan, cfg)
+            self._finalize_hdf5(hfile, count, t_actual)
             if rtv40_p is not None and rtv40_base_ns is not None:
                 safe_write(rtv40_p, "PulseWidth", rtv40_base_ns)
                 lg(f"── RTV40 reset to base width {rtv40_base_ns:.3f} ns ──")
@@ -1356,14 +1361,15 @@ class ScanRunner:
 
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,
-              log=None) -> float:
+              log=None, tol: Optional[float] = None) -> float:
         """
         Move a stage and verify arrival via position readback.
 
         Returns the actual position read back after movement.  If readback
         fails, returns the target value as a fallback.  Logs a warning if
-        the readback deviates from the target by more than POSITION_TOLERANCE_FRAC
-        of the scan range (default 1 %).
+        the readback deviates from the target by more than *tol* (typically
+        half the scan step, in the axis' own units).  When tol is None a
+        legacy unit-blind heuristic (1 % of target, minimum 50) is used.
         """
         # Coerce to Python float — some pytango versions reject numpy scalars
         # with "unsupported data_format" when the C extension does type dispatch.
@@ -1388,8 +1394,9 @@ class ScanRunner:
             return target
 
         delta = abs(actual - target)
-        # Warn if off by more than 1% of target or > 50 absolute units
-        threshold = max(abs(target) * 0.01, 50.0)
+        # Tolerance: half a scan step when known (unit-aware); otherwise the
+        # legacy heuristic of 1 % of target with a floor of 50 absolute units.
+        threshold = tol if tol is not None else max(abs(target) * 0.01, 50.0)
         if delta > threshold and log:
             log(f"⚠ Position mismatch on '{attr}': "
                 f"target={target:.4g}  actual={actual:.4g}  Δ={delta:.4g}")
@@ -1625,9 +1632,7 @@ class ScanRunner:
                 self._paused = True
 
     # ── Incremental HDF5: finalize ────────────────────────────────────────────
-    def _finalize_hdf5(self, f, count, total, x_actual, t_actual,
-                       data, x_plan, y_plan, sensors,
-                       x_lbl, x_unit, hdf_scan, cfg):
+    def _finalize_hdf5(self, f, count, t_actual):
         """Write final status/timing and close the file."""
         try:
             if count == 0:
