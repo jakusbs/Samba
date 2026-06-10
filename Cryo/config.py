@@ -129,7 +129,14 @@ def _sanitize(obj):
 # ─────────────────────────────────────────────────────────────────────────────
 LEFT_COLORS  = ['#89b4fa','#74c7ec','#89dceb','#a6e3a1','#94e2d5']
 RIGHT_COLORS = ['#f38ba8','#fab387','#f9e2af','#cba6f7','#eba0ac']
-COLORMAPS    = ['RdBu_r','seismic','bwr','viridis','plasma','inferno','gray','hot','coolwarm']
+COLORMAPS    = [
+    # Diverging (signed MOKE data) — listed first
+    'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',
+    # Sequential
+    'viridis','plasma','inferno','magma','cividis','turbo',
+    # Classic / misc
+    'gray','hot','cool','copper','jet','rainbow','nipy_spectral',
+]
 SETUP_NAMES  = ["Green", "IR", "Cryo"]
 
 # Sentinel keys used as x-axis identifiers in the live 1D plot

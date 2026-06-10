@@ -43,11 +43,9 @@ from .ThreadZI import ThreadZI
 EOF
 
 # Patch imports in the copied device server:
-# - Change "from ThreadZI import*" to relative import
-sed -i 's/from ThreadZI import\*/from .ThreadZI import ThreadZI/' \
+# - Convert top-level "from ThreadZI import ThreadZI" to a relative import
+sed -i 's/^from ThreadZI import ThreadZI$/from .ThreadZI import ThreadZI/' \
     "$SCRIPT_DIR/$DEVICE_NAME/${DEVICE_NAME}.py"
-
-# Patch the thread reference: ThreadZI(self) stays the same (class name unchanged)
 
 # ── 3. Create setup.py ──────────────────────────────────────────────
 cat > "$SCRIPT_DIR/setup.py" << EOF
@@ -66,7 +64,7 @@ setup(
     install_requires=[
         'pytango',
         'numpy',
-        'zhinst',
+        'zhinst>=24,<26',  # pin within supported LabOne major versions (24.x or 25.x)
     ],
 )
 EOF

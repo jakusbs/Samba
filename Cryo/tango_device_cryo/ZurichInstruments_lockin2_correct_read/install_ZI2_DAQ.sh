@@ -64,7 +64,7 @@ setup(
     install_requires=[
         'pytango',
         'numpy',
-        'zhinst',
+        'zhinst>=24,<26',  # pin within supported LabOne major versions (24.x or 25.x)
     ],
 )
 EOF

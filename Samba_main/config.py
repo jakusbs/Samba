@@ -16,7 +16,14 @@ SCHEMA_VERSION = 3
 # ─────────────────────────────────────────────────────────────────────────────
 LEFT_COLORS  = ['#89b4fa','#74c7ec','#89dceb','#a6e3a1','#94e2d5']
 RIGHT_COLORS = ['#f38ba8','#fab387','#f9e2af','#cba6f7','#eba0ac']
-COLORMAPS    = ['RdBu_r','seismic','bwr','viridis','plasma','inferno','gray','hot','coolwarm']
+COLORMAPS    = [
+    # Diverging (signed MOKE data) — listed first
+    'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',
+    # Sequential
+    'viridis','plasma','inferno','magma','cividis','turbo',
+    # Classic / misc
+    'gray','hot','cool','copper','jet','rainbow','nipy_spectral',
+]
 SETUP_NAMES  = ["Green", "IR"]
 
 # Sentinel keys used as x-axis identifiers in the live 1D plot
@@ -179,6 +186,7 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
         "zigzag": True,
+        "fast_axis": "act1",   # which axis is swept per line: act1 (X) or act2 (Y)
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device

@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
-from config import LEFT_COLORS, RIGHT_COLORS
+from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,10 +115,13 @@ class ScanFile:
                 for k in (
                     "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
                     "hw_keithley_range",        "hw_keithley_compliance_V",
+                    "hw_keithley_current_mA",
                     "hw_zi_tc_s",               "hw_zi_order",
                     "hw_zi_settling_s",         "hw_relay_state",
-                    "hw_field_mT",              "hw_act1_pos",
-                    "hw_act2_pos",              "hw_temperature_K",
+                    "hw_field_mT",              "hw_magnet_current_A",
+                    "hw_act1_pos",              "hw_act2_pos",
+                    "hw_temperature_K",         "hw_vti_temp_K",
+                    "hw_magnet_temp_K",
                     "act1_step", "act2_step",   "field_step_A",
                     "is_temp_sweep",
                     "temp_sweep_start_K", "temp_sweep_stop_K", "temp_sweep_step_K",
@@ -374,15 +377,23 @@ class BrowserPlotWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e")
+        # constrained_layout keeps the axes filling the figure (with the
+        # colorbar) across resizes — avoids the map shrinking to a narrow strip.
+        self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e",
+                             constrained_layout=True)
         self.ax     = self.fig.add_subplot(111)
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
-        self._cb    = None
+        self._cb     = None
+        self._is_2d  = False
         self._style()
 
     def _style(self):
@@ -396,6 +407,7 @@ class BrowserPlotWidget(QWidget):
             try: self._cb.remove()
             except Exception: pass
             self._cb = None
+        self._is_2d = False
         self.ax.cla(); self._style()
         self.canvas.draw_idle()
 
@@ -423,7 +435,7 @@ class BrowserPlotWidget(QWidget):
         self.ax.legend(fontsize=8, facecolor="#313244",
                        edgecolor="#45475a", labelcolor="#cdd6f4",
                        loc="best")
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
     def plot_2d(self, data: np.ndarray, x_arr, y_arr,
                 x_label: str, y_label: str, sensor_label: str,
@@ -437,12 +449,13 @@ class BrowserPlotWidget(QWidget):
         img = self.ax.imshow(data, origin="lower", aspect="auto",
                              extent=ext, cmap=cmap, interpolation="nearest",
                              vmin=vmin, vmax=vmax)
-        self._cb = self.fig.colorbar(img, ax=self.ax, fraction=0.046, pad=0.04)
+        self._is_2d = True
+        self._cb = self.fig.colorbar(img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
         self.ax.set_xlabel(x_label, color="#aaaacc")
         self.ax.set_ylabel(y_label, color="#aaaacc")
         self.ax.set_title(sensor_label, color="#ccccff", fontsize=10)
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,6 +474,7 @@ class DataBrowserPanel(QWidget):
         self._save_dir_getter = save_dir_getter
         self._loaded_files: Dict[str, ScanFile] = {}  # path → ScanFile
         self._overlay_paths: List[str] = []  # paths selected for overlay
+        self._last_y_key: str = ""   # remember last viewed detector across files
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(4)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -514,15 +528,37 @@ class DataBrowserPanel(QWidget):
         left_l.addWidget(meta_grp)
 
         # Column selectors
+        self._populating_combos = False
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("X:"))
         self.x_combo = QComboBox(); self.x_combo.setMinimumWidth(90)
+        self.x_combo.currentIndexChanged.connect(self._on_combo_changed)
         sel_row.addWidget(self.x_combo, stretch=1)
         sel_row.addWidget(QLabel("Y:"))
         self.y_combo = QComboBox(); self.y_combo.setMinimumWidth(90)
+        self.y_combo.currentIndexChanged.connect(self._on_combo_changed)
         sel_row.addWidget(self.y_combo, stretch=1)
+        # 2D-map mode: render the selected Y channel as a colour map.  Enabled
+        # only for 2D scans; when on, the Y combo picks which channel is shown
+        # and the map re-renders live instead of collapsing to a 1D plot.
+        self.map2d_cb = QCheckBox("2D map")
+        self.map2d_cb.setToolTip(
+            "Show the selected Y channel as a 2D colour map (2D scans only).\n"
+            "Uncheck for a 1D line plot of the selected X/Y columns.")
+        self.map2d_cb.setEnabled(False)
+        self.map2d_cb.toggled.connect(self._on_combo_changed)
+        sel_row.addWidget(self.map2d_cb)
+        # Colormap picker — applies to 2D colour maps.
+        sel_row.addWidget(QLabel("Cmap:"))
+        self.cmap_combo = QComboBox(); self.cmap_combo.setMinimumWidth(90)
+        for cm in COLORMAPS:
+            self.cmap_combo.addItem(cm)
+        self.cmap_combo.setToolTip("Colormap for 2D colour maps")
+        # Connect after populating so filling the list doesn't trigger a re-plot.
+        self.cmap_combo.currentIndexChanged.connect(self._on_combo_changed)
+        sel_row.addWidget(self.cmap_combo)
         plot_btn = QPushButton("Plot"); plot_btn.clicked.connect(self._plot_current)
-        plot_btn.setToolTip("Plot the selected X and Y columns from the current scan file")
+        plot_btn.setToolTip("Plot the selected columns (or 2D map) from the current scan file")
         sel_row.addWidget(plot_btn)
         left_l.addLayout(sel_row)
 
@@ -724,6 +760,7 @@ class DataBrowserPanel(QWidget):
         _HW_DISPLAY = [
             ("hw_keithley_amplitude_mA", "Keithley amp",   "mA"),
             ("hw_keithley_frequency_Hz", "Keithley freq",  "Hz"),
+            ("hw_keithley_current_mA",   "Keithley I out", "mA"),
             ("hw_keithley_range",        "Keithley range", ""),
             ("hw_keithley_compliance_V", "Keithley compl", "V"),
             ("hw_zi_tc_s",               "ZI TC",          "s"),
@@ -731,7 +768,10 @@ class DataBrowserPanel(QWidget):
             ("hw_zi_settling_s",         "ZI settling",    "s"),
             ("hw_relay_state",           "Relay",          ""),
             ("hw_field_mT",              "Field @start",   "mT"),
+            ("hw_magnet_current_A",      "Magnet I @start","A"),
             ("hw_temperature_K",         "Temp @start",    "K"),
+            ("hw_vti_temp_K",            "VTI temp",       "K"),
+            ("hw_magnet_temp_K",         "Magnet temp",    "K"),
             ("hw_act1_pos",              "Act1 @start",    ""),
             ("hw_act2_pos",              "Act2 @start",    ""),
         ]
@@ -748,7 +788,8 @@ class DataBrowserPanel(QWidget):
 
         self.meta_text.setPlainText("\n".join(l for l in lines if l))
 
-        # Populate column combos
+        # Populate column combos (guard auto-replot while we rebuild them)
+        self._populating_combos = True
         cols = sf.list_columns()
         self.x_combo.clear(); self.y_combo.clear()
         for key, lbl in cols:
@@ -764,7 +805,15 @@ class DataBrowserPanel(QWidget):
                 x_default = key; break
         if is_dc and x_default is None:
             x_default = "field_mT"
-        y_default = sf.sensor_keys[0] if sf.sensor_keys else ""
+        # Prefer the detector the user last looked at (sticky across files) if
+        # this file also has it; otherwise fall back to the first sensor.
+        y_default = ""
+        if self._last_y_key:
+            for i in range(self.y_combo.count()):
+                if self.y_combo.itemData(i) == self._last_y_key:
+                    y_default = self._last_y_key; break
+        if not y_default:
+            y_default = sf.sensor_keys[0] if sf.sensor_keys else ""
         if x_default:
             for i in range(self.x_combo.count()):
                 if self.x_combo.itemData(i) == x_default:
@@ -773,26 +822,31 @@ class DataBrowserPanel(QWidget):
             if self.y_combo.itemData(i) == y_default:
                 self.y_combo.setCurrentIndex(i); break
 
-        # Auto-plot: DC_HYST is always 1D
-        if is_dc:
-            result = sf.read_1d()
-            if result:
-                result["legend"] = sf.basename
-                self.plot.plot_1d([result], title=m["scan_name"])
-        elif m["n_y"] > 1:
-            result = sf.read_2d()
-            if result:
-                self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
-                                  result["x_label"], result["y_label"],
-                                  result["sensor_label"])
-        else:
-            result = sf.read_1d()
-            if result:
-                result["legend"] = sf.basename
-                self.plot.plot_1d([result], title=m["scan_name"])
+        # 2D-map mode is available only for non-DC scans with a real Y axis.
+        is_2d = (not is_dc) and m["n_y"] > 1
+        self.map2d_cb.blockSignals(True)
+        self.map2d_cb.setEnabled(is_2d)
+        self.map2d_cb.setChecked(is_2d)   # default to the map for 2D scans
+        self.map2d_cb.blockSignals(False)
+        self._populating_combos = False
+
+        # Auto-plot in the resolved mode (DC/1D → line, 2D → colour map)
+        self._plot_current()
+
+    def _on_combo_changed(self, *_):
+        """Live re-plot when the user changes a column selector or the 2D-map
+        toggle — but not while the combos are being repopulated in _show_file."""
+        if self._populating_combos:
+            return
+        # Remember the chosen detector so the next file opened defaults to it
+        yk = self.y_combo.currentData()
+        if yk:
+            self._last_y_key = yk
+        self._plot_current()
 
     def _plot_current(self):
-        """Plot with the user's column selection."""
+        """Plot with the user's column selection — a 2D colour map when the
+        2D-map toggle is on, otherwise a 1D line plot."""
         # Find the last selected file
         fp = None
         for item in reversed(self.tree.selectedItems()):
@@ -805,11 +859,26 @@ class DataBrowserPanel(QWidget):
             return
         x_key = self.x_combo.currentData()
         y_key = self.y_combo.currentData()
-        if not x_key or not y_key:
-            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
-            return
         sf = self._loaded_files[fp]
         is_dc = sf.meta.get("is_dc_hyst", False)
+
+        # ── 2D colour map of the selected Y channel ───────────────────────────
+        if self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc:
+            sensor_key = y_key or "auto"
+            result = sf.read_2d(sensor_key=sensor_key)
+            if result and np.asarray(result["data"]).ndim == 2:
+                self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
+                                  result["x_label"], result["y_label"],
+                                  result["sensor_label"],
+                                  cmap=self.cmap_combo.currentText())
+            else:
+                self.meta_text.append("\n⚠ Could not read a 2D map for the selected channel.")
+            return
+
+        # ── 1D line plot ──────────────────────────────────────────────────────
+        if not y_key or (not x_key and not is_dc):
+            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
+            return
         if is_dc:
             result = sf.read_1d(y_key=y_key)
         else:

@@ -18,7 +18,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox
 from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
@@ -41,14 +41,26 @@ class Live2DWidget(QWidget):
         self._sensor = self._xlbl = self._ylbl = ""
         self._dirty = False
 
-        self.fig    = Figure(figsize=(6, 5), dpi=100, facecolor="#1e1e2e")
+        # constrained_layout keeps the axes filling the figure (with the
+        # colorbar) across resizes — avoids the map shrinking to a narrow strip.
+        self.fig    = Figure(figsize=(6, 5), dpi=100, facecolor="#1e1e2e",
+                             constrained_layout=True)
         self.ax     = self.fig.add_subplot(111)
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
 
+        # Toolbar row: nav toolbar + per-view toggles
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        self.autocolor_cb = QCheckBox("Auto color"); self.autocolor_cb.setChecked(True)
+        self.autocolor_cb.setToolTip("Rescale the colour range to the data as points arrive.")
+        self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.autocolor_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
+        top.addWidget(self.autocolor_cb)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
         self._style_axes()
 
@@ -68,11 +80,12 @@ class Live2DWidget(QWidget):
             return
         self._dirty = False
         if self._img is not None and self._data is not None:
-            v = self._data[np.isfinite(self._data)]
-            if len(v) > 1:
-                lo, hi = v.min(), v.max()
-                if lo == hi: hi = lo + 1e-12
-                self._img.set_clim(lo, hi)
+            if self.autocolor_cb.isChecked():
+                v = self._data[np.isfinite(self._data)]
+                if len(v) > 1:
+                    lo, hi = v.min(), v.max()
+                    if lo == hi: hi = lo + 1e-12
+                    self._img.set_clim(lo, hi)
             self._img.set_data(self._data)
         self.canvas.draw_idle()
 
@@ -93,12 +106,12 @@ class Live2DWidget(QWidget):
         if self._cb:
             try: self._cb.remove()
             except Exception: pass
-        self._cb = self.fig.colorbar(self._img, ax=self.ax, fraction=0.046, pad=0.04)
+        self._cb = self.fig.colorbar(self._img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
         self.ax.set_title(self._sensor, color="#ccccff", fontsize=10)
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
     def update_point(self, ix: int, iy: int, val: float):
         if self._data is None or self._img is None: return
@@ -119,6 +132,10 @@ class Live2DWidget(QWidget):
     def clear(self):
         self._data = self._xarr = self._yarr = self._img = None
         self._dirty = False
+        if self._cb:
+            try: self._cb.remove()
+            except Exception: pass
+            self._cb = None
         self.ax.cla(); self._style_axes(); self.canvas.draw_idle()
 
 
@@ -150,8 +167,19 @@ class Live1DWidget(QWidget):
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
 
+        # Toolbar row: nav toolbar + auto-scale toggle
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
+        self.autoscale_cb.setToolTip(
+            "Rescale axes to the data on every update.\n"
+            "Uncheck to keep your zoom/pan during a live scan.")
+        self.autoscale_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
+        self.autoscale_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
+        top.addWidget(self.autoscale_cb)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
         self._style_axes()
 
@@ -190,29 +218,32 @@ class Live1DWidget(QWidget):
                 m = np.isfinite(y)
                 if m.any(): line.set_data(np.arange(len(y))[m], y[m])
 
-        # Manually compute limits — relim() is unreliable on twinx.
-        # X-axis is shared between ax1 and ax2, so compute x from all lines.
-        all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
-                     for l in ax.get_lines()
-                     if len(l.get_xdata()) > 0]
-        if all_lines:
-            all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
-            mx = np.isfinite(all_x)
-            if mx.any():
-                xlo, xhi = all_x[mx].min(), all_x[mx].max()
-                pad = max(abs(xhi - xlo) * 0.02, 1e-12)
-                self.ax1.set_xlim(xlo - pad, xhi + pad)
-        # Y-limits per axis (independent)
-        for ax in [self.ax1, self.ax2]:
-            lines = [l for l in ax.get_lines()
-                     if len(l.get_ydata()) > 0]
-            if not lines: continue
-            all_y = np.concatenate([l.get_ydata() for l in lines])
-            my = np.isfinite(all_y)
-            if my.any():
-                ylo, yhi = all_y[my].min(), all_y[my].max()
-                pad = max(abs(yhi - ylo) * 0.05, 1e-12)
-                ax.set_ylim(ylo - pad, yhi + pad)
+        # Autoscale (skip entirely when the user has unchecked it, so a manual
+        # zoom/pan survives live updates instead of being reset every frame).
+        if self.autoscale_cb.isChecked():
+            # Manually compute limits — relim() is unreliable on twinx.
+            # X-axis is shared between ax1 and ax2, so compute x from all lines.
+            all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
+                         for l in ax.get_lines()
+                         if len(l.get_xdata()) > 0]
+            if all_lines:
+                all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
+                mx = np.isfinite(all_x)
+                if mx.any():
+                    xlo, xhi = all_x[mx].min(), all_x[mx].max()
+                    pad = max(abs(xhi - xlo) * 0.02, 1e-12)
+                    self.ax1.set_xlim(xlo - pad, xhi + pad)
+            # Y-limits per axis (independent)
+            for ax in [self.ax1, self.ax2]:
+                lines = [l for l in ax.get_lines()
+                         if len(l.get_ydata()) > 0]
+                if not lines: continue
+                all_y = np.concatenate([l.get_ydata() for l in lines])
+                my = np.isfinite(all_y)
+                if my.any():
+                    ylo, yhi = all_y[my].min(), all_y[my].max()
+                    pad = max(abs(yhi - ylo) * 0.05, 1e-12)
+                    ax.set_ylim(ylo - pad, yhi + pad)
         self.canvas.draw_idle()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -265,16 +296,20 @@ class Live1DWidget(QWidget):
         # Compute limits — shared x across both axes, independent y per axis
         all_visible = []
         for ax in [self.ax1, self.ax2]:
-            visible = [l for l in ax.get_lines()
-                       if not l.get_label().startswith("_") and len(l.get_xdata()) > 0]
-            all_visible.extend((l, ax) for l in visible)
-            if visible:
-                all_y = np.concatenate([l.get_ydata() for l in visible])
+            labelled  = [l for l in ax.get_lines() if not l.get_label().startswith("_")]
+            with_data = [l for l in labelled if len(l.get_xdata()) > 0]
+            all_visible.extend((l, ax) for l in with_data)
+            if with_data:
+                all_y = np.concatenate([l.get_ydata() for l in with_data])
                 my = np.isfinite(all_y)
                 if my.any():
                     ylo, yhi = all_y[my].min(), all_y[my].max()
                     pad = max(abs(yhi - ylo) * 0.05, 1e-12)
                     ax.set_ylim(ylo - pad, yhi + pad)
+            # Legend appears as soon as the axis has any labelled line — even
+            # before the first point arrives — so it shows from scan start
+            # without needing a manual refresh.
+            if labelled:
                 ax.legend(
                     loc="upper left" if ax == self.ax1 else "upper right",
                     fontsize=8, facecolor="#313244",

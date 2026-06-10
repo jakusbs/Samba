@@ -33,7 +33,7 @@ _RO_STYLE = ("background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
 
 def _ro(text: str = "—") -> QLineEdit:
     w = QLineEdit(text); w.setReadOnly(True); w.setStyleSheet(_RO_STYLE)
-    w.setFixedWidth(60); return w
+    w.setMinimumWidth(55); return w
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,7 +55,7 @@ class ActuatorDefaultRow(QWidget):
         self.ch_combo = NoScrollComboBox(); self.ch_combo.setMinimumWidth(70)
 
         self.lbl_edit  = _ro()
-        self.unit_edit = _ro(); self.unit_edit.setFixedWidth(45)
+        self.unit_edit = _ro(); self.unit_edit.setMinimumWidth(45)
 
         lay.addWidget(self.dev_combo)
         lay.addWidget(self.ch_combo)

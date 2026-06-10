@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QDoubleSpinBox, QSpinBox,
-    QCheckBox, QGroupBox, QTabWidget, QComboBox, QProgressBar,
+    QCheckBox, QGroupBox, QTabWidget, QComboBox,
     QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
     QButtonGroup, QRadioButton, QAbstractItemView, QInputDialog,
     QStackedWidget
@@ -232,9 +232,9 @@ class HardwarePanel(QGroupBox):
         # Row 1: Range + Compliance side by side
         csg.addWidget(QLabel("Range:"), row, 0)
         self.range_combo = NoScrollComboBox()
-        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setFixedWidth(70)
+        self.range_combo.addItems(KEITHLEY_RANGES); self.range_combo.setMinimumWidth(84)
         csg.addWidget(self.range_combo, row, 1)
-        btn_range = QPushButton("Set"); btn_range.setFixedWidth(30)
+        btn_range = QPushButton("Set"); btn_range.setFixedWidth(44)
         btn_range.clicked.connect(self._write_range)
         csg.addWidget(btn_range, row, 2)
         csg.addWidget(QLabel("Compl:"), row, 3)
@@ -557,8 +557,8 @@ class _NoUnderscoreValidator:
 # MokeMetadataGroup — reusable metadata widget (Trajectory + Scanlist)
 # ─────────────────────────────────────────────────────────────────────────────
 class MokeMetadataGroup(QGroupBox):
-    """Metadata fields: operator, sample, notes, incidence, polarization,
-    λ/2, λ/4, noDC.  Emits `changed` whenever any value changes."""
+    """Metadata fields: operator, sample, device, notes, incidence, polarization,
+    λ/2, λ/4, noDC, R4W, R2W.  Emits `changed` whenever any value changes."""
     changed = pyqtSignal()
 
     def __init__(self, title: str = "Metadata", parent=None):
@@ -566,25 +566,40 @@ class MokeMetadataGroup(QGroupBox):
         top = QHBoxLayout(self)
         top.setSpacing(8); top.setContentsMargins(4, 4, 4, 4)
 
-        # ── Left: Op / Sample / Notes (vertical pairs) ───────────────────────
+        # ── Left: Op / Sample+Device / Notes / R4W+R2W ───────────────────────
         left = QGridLayout(); left.setSpacing(2)
-        left.setColumnStretch(1, 1)
+        left.setColumnStretch(1, 1); left.setColumnStretch(3, 1)
 
         left.addWidget(QLabel("Op:"), 0, 0)
         self.meta_operator = QLineEdit(); self.meta_operator.setPlaceholderText("Name")
         self.meta_operator.setMinimumWidth(50)
         _NoUnderscoreValidator.install(self.meta_operator)
-        left.addWidget(self.meta_operator, 0, 1)
+        left.addWidget(self.meta_operator, 0, 1, 1, 3)
 
         left.addWidget(QLabel("Sample:"), 1, 0)
         self.meta_sample = QLineEdit(); self.meta_sample.setPlaceholderText("Sample ID")
         _NoUnderscoreValidator.install(self.meta_sample)
         left.addWidget(self.meta_sample, 1, 1)
+        left.addWidget(QLabel("Dev:"), 1, 2)
+        self.meta_device = QLineEdit(); self.meta_device.setPlaceholderText("Device ID")
+        _NoUnderscoreValidator.install(self.meta_device)
+        left.addWidget(self.meta_device, 1, 3)
 
-        left.addWidget(QLabel("Notes:"), 2, 0)
+        left.addWidget(QLabel("R4W:"), 2, 0)
+        self.r4w_spin = NoScrollDoubleSpinBox()
+        self.r4w_spin.setRange(0, 10_000_000); self.r4w_spin.setDecimals(3)
+        self.r4w_spin.setSuffix(" Ω"); self.r4w_spin.setMinimumWidth(80)
+        left.addWidget(self.r4w_spin, 2, 1)
+        left.addWidget(QLabel("R2W:"), 2, 2)
+        self.r2w_spin = NoScrollDoubleSpinBox()
+        self.r2w_spin.setRange(0, 10_000_000); self.r2w_spin.setDecimals(3)
+        self.r2w_spin.setSuffix(" Ω"); self.r2w_spin.setMinimumWidth(80)
+        left.addWidget(self.r2w_spin, 2, 3)
+
+        left.addWidget(QLabel("Notes:"), 3, 0)
         self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
         _NoUnderscoreValidator.install(self.meta_notes)
-        left.addWidget(self.meta_notes, 2, 1)
+        left.addWidget(self.meta_notes, 3, 1, 1, 3)
 
         top.addLayout(left, stretch=1)
 
@@ -633,13 +648,15 @@ class MokeMetadataGroup(QGroupBox):
         top.addLayout(right)
 
         # Connect everything to changed signal
-        for w in [self.meta_operator, self.meta_sample, self.meta_notes, self.pol_custom]:
+        for w in [self.meta_operator, self.meta_sample, self.meta_device, self.meta_notes, self.pol_custom]:
             w.textChanged.connect(self.changed.emit)
         for w in [self.incidence_combo, self.pol_combo]:
             w.currentTextChanged.connect(self.changed.emit)
         for w in [self.lam2_cb, self.lam4_cb, self.nodc_cb]:
             w.toggled.connect(self.changed.emit)
         self.mirror_shift.valueChanged.connect(self.changed.emit)
+        self.r4w_spin.valueChanged.connect(self.changed.emit)
+        self.r2w_spin.valueChanged.connect(self.changed.emit)
 
         # Trigger initial visibility
         self._on_incidence_changed(self.incidence_combo.currentText())
@@ -663,6 +680,7 @@ class MokeMetadataGroup(QGroupBox):
         return {
             "operator":     self.meta_operator.text().strip(),
             "sample_id":    self.meta_sample.text().strip(),
+            "device_id":    self.meta_device.text().strip(),
             "notes":        self.meta_notes.text().strip(),
             "incidence":    inc,
             "mirror_shift": ms,
@@ -670,11 +688,14 @@ class MokeMetadataGroup(QGroupBox):
             "lam2":         self.lam2_cb.isChecked(),
             "lam4":         self.lam4_cb.isChecked(),
             "noDC":         self.nodc_cb.isChecked(),
+            "r_4wire_ohm": self.r4w_spin.value(),
+            "r_2wire_ohm": self.r2w_spin.value(),
         }
 
     def load_values(self, cfg: dict):
         self.meta_operator.setText(cfg.get("operator", ""))
         self.meta_sample.setText(cfg.get("sample_id", ""))
+        self.meta_device.setText(cfg.get("device_id", ""))
         self.meta_notes.setText(cfg.get("notes", ""))
         inc = cfg.get("incidence", "PMOKE")
         idx = self.incidence_combo.findText(inc)
@@ -691,6 +712,8 @@ class MokeMetadataGroup(QGroupBox):
         self.lam2_cb.setChecked(cfg.get("lam2", False))
         self.lam4_cb.setChecked(cfg.get("lam4", False))
         self.nodc_cb.setChecked(cfg.get("noDC", False))
+        self.r4w_spin.setValue(cfg.get("r_4wire_ohm", cfg.get("r_4wire_kohm", 0.0) * 1000))
+        self.r2w_spin.setValue(cfg.get("r_2wire_ohm", cfg.get("r_2wire_kohm", 0.0) * 1000))
 
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
@@ -700,13 +723,16 @@ class MokeMetadataGroup(QGroupBox):
         v = self.get_values()
         ts = datetime.now().strftime("%Y%m%d")
         sample = v["sample_id"].replace(" ", "-") or "sample"
+        device = v["device_id"].replace(" ", "-")
         amp_str = f"{amplitude_mA:.4g}mA"
         freq_str = f"{freq_Hz:.4g}Hz"
         cfg = config_name.replace(" ", "-").replace("_", "-") or "cfg"
         inc = v["incidence"]
         ms = f"{v['mirror_shift']:.2f}mm".replace(".", "p")
         notes = v["notes"].replace(" ", "-")
-        parts = [ts, sample, amp_str, freq_str, cfg, inc, ms]
+        parts = [ts, sample]
+        if device: parts.append(device)
+        parts += [amp_str, freq_str, cfg, inc, ms]
         if notes:  parts.append(notes)
         if v["noDC"]:  parts.append("noDC")
         if v["lam2"]:  parts.append("lam2")
@@ -1397,17 +1423,20 @@ class ActuatorGroup(QGroupBox):
         self._attr_display = QLineEdit(attr)
         self._attr_display.setReadOnly(True)
         self._attr_display.setStyleSheet(self._RO_STYLE)
-        self._attr_display.setFixedWidth(72)
+        self._attr_display.setMinimumWidth(72)
         self._attr_display.setToolTip("Set in the Setup Defaults tab")
         g.addWidget(self._attr_display, 2, 1)
         g.addWidget(QLabel("Label:"), 2, 2)
-        self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
+        self.lbl = QLineEdit(lbl)
         self.lbl.setReadOnly(True); self.lbl.setStyleSheet(self._RO_STYLE)
+        self.lbl.setMinimumWidth(50)
         g.addWidget(self.lbl, 2, 3)
         g.addWidget(QLabel("Unit:"), 2, 4)
-        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(35)
+        self.unit_edit = QLineEdit(unit)
         self.unit_edit.setReadOnly(True); self.unit_edit.setStyleSheet(self._RO_STYLE)
+        self.unit_edit.setMinimumWidth(45)
         g.addWidget(self.unit_edit, 2, 5)
+        g.setColumnStretch(1, 2); g.setColumnStretch(3, 1); g.setColumnStretch(5, 1)
 
         # Row 3: Direction list (replaces fixed start/stop spinboxes)
         self.dir_list = ScanDirectionList(start, stop)
@@ -1441,6 +1470,7 @@ class ActuatorGroup(QGroupBox):
                         label: str, unit: str):
         self._dev_path = dev_path; self._dev_name = dev_name; self._attr = attr
         self._dev_display.setText(dev_name or dev_path)
+        self._dev_display.setToolTip(dev_path)
         self._attr_display.setText(attr)
         self.lbl.setText(label); self.unit_edit.setText(unit)
 
@@ -2260,7 +2290,7 @@ class ScanlistPanel(QWidget):
         self._hw_panel_class = hw_panel_class or HardwarePanel
         root = QVBoxLayout(self); root.setContentsMargins(8, 6, 8, 6); root.setSpacing(6)
 
-        # ── Top row: active config + metadata side by side ────────────────────
+        # ── Top row: active config + timing + metadata side by side ─────────
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
         info_w = QWidget(); info_l = QVBoxLayout(info_w)
@@ -2271,6 +2301,16 @@ class ScanlistPanel(QWidget):
         info_l.addLayout(hl0)
         info_l.addStretch()
         top_row.addWidget(info_w)
+
+        # ── Timing group — kept in sync with Trajectory tab ──────────────────
+        tg = QGroupBox("Timing"); tl = QGridLayout(tg)
+        tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
+        def _dbl(lo, hi, dec, v):
+            w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
+        tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
+        tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
+        tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
+        top_row.addWidget(tg)
 
         self.meta = MokeMetadataGroup("Metadata")
         self.meta.changed.connect(self._update_auto_name)
@@ -2301,10 +2341,6 @@ class ScanlistPanel(QWidget):
         nl.addWidget(self.sl_name, 1, 1)
         sl_row.addWidget(ng)
         root.addLayout(sl_row)
-
-        pr = QHBoxLayout(); pr.addWidget(QLabel("Scans:"))
-        self.list_bar = QProgressBar(); self.list_bar.setFixedHeight(16)
-        pr.addWidget(self.list_bar, stretch=1); root.addLayout(pr)
 
         # Auto-update name when HW spins change too
         self.hw.amp_spin.valueChanged.connect(lambda _: self._update_auto_name())

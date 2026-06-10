@@ -88,10 +88,13 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
     _HW_KEYS = [
         "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
         "hw_keithley_range",        "hw_keithley_compliance_V",
+        "hw_keithley_current_mA",
         "hw_zi_tc_s",               "hw_zi_order",
         "hw_zi_settling_s",         "hw_relay_state",
-        "hw_field_mT",              "hw_act1_pos",
-        "hw_act2_pos",              "hw_temperature_K",
+        "hw_field_mT",              "hw_magnet_current_A",
+        "hw_act1_pos",              "hw_act2_pos",
+        "hw_temperature_K",         "hw_vti_temp_K",
+        "hw_magnet_temp_K",
     ]
     for k in _HW_KEYS:
         v = cfg.get(k)
@@ -148,9 +151,10 @@ class ScanRunner:
         self._abort  = False
         self._paused = False
 
-    def abort(self):  self._abort  = True
-    def pause(self):  self._paused = True
-    def resume(self): self._paused = False
+    def abort(self):     self._abort  = True
+    def pause(self):     self._paused = True
+    def resume(self):    self._paused = False
+    def is_paused(self): return self._paused
 
     def run(self, cbs: dict) -> Optional[str]:
         """
@@ -561,6 +565,77 @@ class ScanRunner:
                                         x_actual, t_actual, data, x_plan, y_plan,
                                         active, x_lbl, x_unit, hdf_scan, retrace_cfg)
 
+          elif hdf_scan == "SPATIAL_XY" and cfg.get("fast_axis", "act1") == "act2":
+            # ── Y-fast 2D raster: X is the slow (outer) axis, Y the fast inner ──
+            # X is stepped once per column; Y is swept (with optional zigzag) for
+            # each X.  Data is still stored as [iy, ix] so the saved map and live
+            # plot orientation are identical to an X-fast scan — only the physical
+            # traversal order differs.  Shares _acquire_point_retry with the
+            # X-fast loop; the heavy FIELD/TIME/RTV40 special-cases don't apply
+            # here (those scan types are always 1-D / X-fast).
+            move_t  = cfg["move_timeout"]
+            settle  = cfg["settle_time"]
+            _adap_k = float(cfg.get("adaptive_settle_k", 0.0)) if cfg.get("adaptive_settle_enabled") else 0.0
+            if _adap_k > 0:
+                lg(f"── Adaptive settle: k = {_adap_k:.4f} s/µm ──")
+            for ix, x_pos in enumerate(x_plan):
+                if self._abort: break
+                st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
+                x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
+
+                # Zigzag: reverse the Y sweep on every odd X column.
+                y_seq  = y_plan
+                iy_seq = list(range(n_y))
+                if cfg.get("zigzag") and ix % 2 == 1:
+                    y_seq  = y_plan[::-1]
+                    iy_seq = iy_seq[::-1]
+                _prev_y_pos = None
+
+                for iy, y_pos in zip(iy_seq, y_seq):
+                    if self._abort: break
+                    while self._paused:
+                        time.sleep(0.05)
+                        if self._abort: break
+
+                    self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
+                    if settle > 0:
+                        time.sleep(settle)
+                    if _adap_k > 0 and _prev_y_pos is not None:
+                        extra = _adap_k * abs(y_pos - _prev_y_pos)
+                        if extra > 0:
+                            time.sleep(extra)
+                    _prev_y_pos = y_pos
+
+                    x_actual[iy, ix] = x_read   # X coordinate (column-constant)
+
+                    vals, t_trigger = self._acquire_point_retry(
+                        devp, dev_sensors, trigger_devs, int_time, t0, _RUNNING,
+                        cfg, _zi_timeout_ms, max_lockin_settling,
+                        count == 0, x_lbl, x_read, lg, st)
+
+                    for s in active:
+                        data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
+
+                    t_elapsed = t_trigger + int_time / 2.0
+                    t_actual[iy, ix] = t_elapsed
+                    vals[X_TIME] = t_elapsed
+
+                    self._write_point(hfile, iy, ix, x_read, t_elapsed,
+                                      vals, active, hdf_scan)
+                    count += 1
+                    if count == 1:
+                        lg(f"── First point acquired ──")
+                        lg(f"  Triggers active: {list(trigger_devs.keys()) if trigger_devs else '(none — using sleep)'}")
+                        lg(f"  t_trigger={t_trigger:.3f}s  t_elapsed={t_elapsed:.3f}s")
+                    pt(ix, iy, x_read, vals)
+                    pg(count, total)
+                    st(f"[{count}/{total}]  {cfg['act2_label']}={y_pos:.4g}  "
+                       f"x={x_read:.4g}{x_unit}  t={t_elapsed:.1f}s")
+
+                # Flush after each X column (important for crash-safety)
+                try: hfile.flush()
+                except Exception as e: lg(f"⚠ HDF5 flush failed: {e}")
+
           else:
             for iy, y_pos in enumerate(y_plan):
                 if self._abort: break
@@ -570,6 +645,14 @@ class ScanRunner:
 
                 x_seq  = x_plan
                 ix_seq = list(range(n_x))
+                # Zigzag: on every odd Y row, traverse X in reverse physical
+                # order so the stage doesn't fly back across the full range
+                # between rows. The spatial index ix still maps to the correct
+                # data column, so the stored map stays in ascending-X order
+                # regardless of sweep direction.
+                if cfg.get("zigzag") and hdf_scan == "SPATIAL_XY" and iy % 2 == 1:
+                    x_seq  = x_plan[::-1]
+                    ix_seq = ix_seq[::-1]
                 _prev_x_pos = None   # for adaptive settle tracking (reset each row)
                 _adap_k     = float(cfg.get("adaptive_settle_k", 0.0)) if cfg.get("adaptive_settle_enabled") else 0.0
                 if _adap_k > 0 and count == 0:
@@ -609,50 +692,11 @@ class ScanRunner:
 
                     x_actual[iy, ix] = x_read
 
-                    # ── Lock-in settling + acquire — retried up to AUTO_PAUSE_THRESHOLD times ──
-                    # If all attempts fail the scan pauses here (not at the top of the
-                    # next iteration) so the same point is retried after the user resumes.
-                    vals: Dict[str, float] = {}
-                    t_trigger = time.time() - t0
-                    _first_settle_logged = False
-                    while not self._abort:
-                        _point_ok = False
-                        for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
-                            if self._abort: break
-
-                            if max_lockin_settling > 0:
-                                if count == 0 and not _first_settle_logged:
-                                    lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
-                                    _first_settle_logged = True
-                                time.sleep(max_lockin_settling)
-
-                            vals, t_trigger, _ok = self._do_acquire(
-                                devp, dev_sensors, trigger_devs, int_time,
-                                t0, _RUNNING, cfg, _zi_timeout_ms, lg)
-
-                            if _ok:
-                                if _pt_attempt > 0:
-                                    lg(f"  ✓ Point recovered on attempt "
-                                       f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD}")
-                                _point_ok = True
-                                break
-                            elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
-                                lg(f"⚠ {x_lbl}={x_read:.4g} attempt "
-                                   f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD} failed — retrying…")
-                            else:
-                                lg(f"⚠ {x_lbl}={x_read:.4g} failed all "
-                                   f"{AUTO_PAUSE_THRESHOLD} attempts — pausing")
-                                self._paused = True
-                                st(f"⚠ AUTO-PAUSED — fix the issue and press Resume")
-
-                        if _point_ok or self._abort:
-                            break   # success or abort — leave the while loop
-
-                        # All attempts failed; block here until the user resumes
-                        while self._paused and not self._abort:
-                            time.sleep(0.05)
-                        if not self._abort:
-                            lg(f"  ↩ Resuming — retrying {x_lbl}={x_read:.4g}…")
+                    # ── Lock-in settling + acquire (retry/auto-pause inside) ──
+                    vals, t_trigger = self._acquire_point_retry(
+                        devp, dev_sensors, trigger_devs, int_time, t0, _RUNNING,
+                        cfg, _zi_timeout_ms, max_lockin_settling,
+                        count == 0, x_lbl, x_read, lg, st)
 
                     # Update in-memory data buffer with the final values
                     for s in active:
@@ -1386,6 +1430,61 @@ class ScanRunner:
         vals[X_TIME] = t_elapsed
         return vals, t_elapsed
 
+    # ── Per-point acquire with retry + auto-pause ─────────────────────────────
+    def _acquire_point_retry(self, devp, dev_sensors, trigger_devs, int_time,
+                             t0, running, cfg, zi_timeout_ms,
+                             max_lockin_settling, first_point, x_lbl, x_read,
+                             lg, st):
+        """Lock-in settling + acquire for one point, retried up to
+        AUTO_PAUSE_THRESHOLD times.  If every attempt fails the scan pauses
+        here (blocking on this point) until the user resumes, then retries the
+        same point from scratch.  Honors self._abort / self._paused.
+
+        Returns (vals, t_trigger).  Shared by the X-fast and Y-fast 2D loops.
+        """
+        vals: Dict[str, float] = {}
+        t_trigger = time.time() - t0
+        _first_settle_logged = False
+        while not self._abort:
+            _point_ok = False
+            for _pt_attempt in range(AUTO_PAUSE_THRESHOLD):
+                if self._abort: break
+
+                if max_lockin_settling > 0:
+                    if first_point and not _first_settle_logged:
+                        lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
+                        _first_settle_logged = True
+                    time.sleep(max_lockin_settling)
+
+                vals, t_trigger, _ok = self._do_acquire(
+                    devp, dev_sensors, trigger_devs, int_time,
+                    t0, running, cfg, zi_timeout_ms, lg)
+
+                if _ok:
+                    if _pt_attempt > 0:
+                        lg(f"  ✓ Point recovered on attempt "
+                           f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD}")
+                    _point_ok = True
+                    break
+                elif _pt_attempt < AUTO_PAUSE_THRESHOLD - 1:
+                    lg(f"⚠ {x_lbl}={x_read:.4g} attempt "
+                       f"{_pt_attempt + 1}/{AUTO_PAUSE_THRESHOLD} failed — retrying…")
+                else:
+                    lg(f"⚠ {x_lbl}={x_read:.4g} failed all "
+                       f"{AUTO_PAUSE_THRESHOLD} attempts — pausing")
+                    self._paused = True
+                    st(f"⚠ AUTO-PAUSED — fix the issue and press Resume")
+
+            if _point_ok or self._abort:
+                break   # success or abort — leave the while loop
+
+            # All attempts failed; block here until the user resumes
+            while self._paused and not self._abort:
+                time.sleep(0.05)
+            if not self._abort:
+                lg(f"  ↩ Resuming — retrying {x_lbl}={x_read:.4g}…")
+        return vals, t_trigger
+
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,
               log=None) -> float:
@@ -1591,6 +1690,12 @@ class ScanRunner:
                     integ_time_attr = s.get("integ_time_attr", ""),
                     y_axis          = s.get("y_axis", "Y1"),
                     plot_axis       = s.get("plot_axis", s.get("y_axis", "Y1")))
+
+            # BD calibration — 6 mV values at λ/2 tick positions 0,5,10,15,20,25
+            bd_cal = cfg.get("bd_calibration")
+            if bd_cal:
+                cal_arr = np.array(bd_cal, dtype=np.float64)
+                _ds("calibration", cal_arr, "λ/2 calibration (mV)", "mV", "calibration")
 
             _wsa(f, "_x_key", ax_key)
             f.attrs["_is_2d"]   = is_2d

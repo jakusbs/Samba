@@ -147,21 +147,25 @@ class ActuatorGroup(QGroupBox):
         self.dev_lbl.setStyleSheet(_ro_style + "font-size:10px;")
         g.addWidget(self.dev_lbl, 1, 1, 1, 4)
         self.attr_lbl = QLineEdit(); self.attr_lbl.setReadOnly(True)
-        self.attr_lbl.setFixedWidth(44)
+        self.attr_lbl.setMinimumWidth(60)
         self.attr_lbl.setStyleSheet(_ro_style + "font-size:10px;")
         g.addWidget(self.attr_lbl, 1, 5)
 
         # Row 2: Label + Unit (display-only — populated from Setup Defaults)
+        # Layout mirrors row 3 (Start/Stop): label spans cols 1-2, unit spans cols 4-5
         g.addWidget(QLabel("Label:"), 2, 0)
-        self.lbl = QLineEdit(lbl); self.lbl.setFixedWidth(40)
+        self.lbl = QLineEdit(lbl)
         self.lbl.setReadOnly(True)
+        self.lbl.setMinimumWidth(60)
         self.lbl.setStyleSheet(_ro_style)
-        g.addWidget(self.lbl, 2, 1)
-        g.addWidget(QLabel("Unit:"), 2, 2)
-        self.unit_edit = QLineEdit(unit); self.unit_edit.setFixedWidth(40)
+        g.addWidget(self.lbl, 2, 1, 1, 2)
+        g.addWidget(QLabel("Unit:"), 2, 3)
+        self.unit_edit = QLineEdit(unit)
         self.unit_edit.setReadOnly(True)
+        self.unit_edit.setMinimumWidth(50)
         self.unit_edit.setStyleSheet(_ro_style)
-        g.addWidget(self.unit_edit, 2, 3)
+        g.addWidget(self.unit_edit, 2, 4, 1, 2)
+        g.setColumnStretch(1, 2); g.setColumnStretch(4, 2)
 
         # Row 3: Start / Stop
         g.addWidget(QLabel("Start:"), 3, 0)
@@ -198,7 +202,7 @@ class ActuatorGroup(QGroupBox):
     # ── Update from setup defaults ────────────────────────────────────────────
     def set_defaults(self, dev: str, attr: str, lbl: str, unit: str):
         """Called by samba.py when Setup Defaults change."""
-        self.dev_lbl.setText(dev)
+        self.dev_lbl.setText(dev); self.dev_lbl.setToolTip(dev)
         self.attr_lbl.setText(attr)
         self.lbl.setText(lbl)
         self.unit_edit.setText(unit)
@@ -298,12 +302,42 @@ class TrajectoryPanel(QWidget):
         self.act2_grp = ActuatorGroup(
             "Y axis", "Y", "nm", 0, 50000, 51,
             step_prefix="Δy", enabled=False)
-        # Zigzag container inside act2_grp — only shown when both X and Y are on
+        # Zigzag + fast-axis container inside act2_grp — only shown when both
+        # X and Y are on (i.e. a real 2-D raster, where these settings apply)
         self.zigzag_w = QWidget()
-        zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(2)
-        self.zigzag_cb = QCheckBox("Zigzag (reverse direction on every Y line)")
+        zz_l = QVBoxLayout(self.zigzag_w); zz_l.setContentsMargins(0, 2, 0, 0); zz_l.setSpacing(3)
+        self.zigzag_cb = QCheckBox("Zigzag (reverse direction on every fast line)")
         self.zigzag_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         zz_l.addWidget(self.zigzag_cb)
+
+        # Fast (main) scanning axis — which axis is swept per line (inner loop).
+        # X (default): for each Y row, sweep all X.  Y: for each X column, sweep
+        # all Y.  Data is stored identically; only the physical traversal differs.
+        fa_row = QHBoxLayout(); fa_row.setSpacing(0)
+        fa_lbl = QLabel("Fast axis:"); fa_lbl.setStyleSheet("color:#a6adc8;font-size:11px;")
+        fa_row.addWidget(fa_lbl); fa_row.addSpacing(6)
+        self.fast_axis_bg = QButtonGroup(self); self.fast_axis_bg.setExclusive(True)
+        for _idx, _lab in enumerate(("X", "Y")):
+            b = QPushButton(_lab)
+            b.setCheckable(True); b.setChecked(_idx == 0)
+            b.setFixedHeight(24); b.setMinimumWidth(46)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if _idx == 0:
+                radius = ("border-top-left-radius:6px;border-bottom-left-radius:6px;"
+                          "border-top-right-radius:0;border-bottom-right-radius:0;")
+            else:
+                radius = ("border-top-left-radius:0;border-bottom-left-radius:0;"
+                          "border-top-right-radius:6px;border-bottom-right-radius:6px;")
+            b.setStyleSheet(
+                f"QPushButton{{background:#252538;border:1px solid #45475a;"
+                f"color:#6c7086;font-size:11px;font-weight:bold;padding:0 10px;{radius}}}"
+                f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+                f"QPushButton:checked{{background:#a6e3a1;color:#1e1e2e;border-color:#a6e3a1;}}")
+            self.fast_axis_bg.addButton(b, _idx)
+            fa_row.addWidget(b)
+        fa_row.addStretch()
+        zz_l.addLayout(fa_row)
+
         self.zigzag_w.setVisible(False)   # hidden until both axes on
         # Row 6 of act2_grp grid
         self.act2_grp.layout().addWidget(self.zigzag_w, 6, 0, 1, 4)
@@ -1015,14 +1049,19 @@ class TrajectoryPanel(QWidget):
         except Exception as e:
             self._rtv40_status.setText(f"⚠ {e}")
 
-    def populate_monitor_combo(self, registry: list):
+    def populate_monitor_combo(self, registry: list, preserve: bool = True):
         """Fill AC monitor, DC monitor, DC device, and AC device combos
-        from the device registry.  Safe to call multiple times."""
+        from the device registry.  Safe to call multiple times.
+
+        preserve=False is used on setup switch so load_monitor_settings
+        (called immediately after) exclusively controls the selection,
+        rather than carrying over the previous setup's device name.
+        """
         self._mon_registry = registry
 
         # ── AC + DC monitor dropdowns ─────────────────────────────────────────
         for dev_combo in (self._ac_mon_dev, self._dc_mon_dev):
-            prev = dev_combo.currentText()
+            prev = dev_combo.currentText() if preserve else ""
             dev_combo.blockSignals(True); dev_combo.clear()
             for dev in registry:
                 dev_combo.addItem(dev["name"], dev["tango_path"])
@@ -1511,6 +1550,8 @@ class TrajectoryPanel(QWidget):
             if self._ac_dev_combo.itemData(i) == field_dev:
                 self._ac_dev_combo.setCurrentIndex(i); break
         self.zigzag_cb.setChecked(cfg.get("zigzag", False))
+        _fa_id = 1 if cfg.get("fast_axis", "act1") == "act2" else 0
+        self.fast_axis_bg.button(_fa_id).setChecked(True)
         self.int_time.setValue(cfg.get("integration_time", 0.1))
         self.settle.setValue(  cfg.get("settle_time",      0.05))
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
@@ -1621,6 +1662,7 @@ class TrajectoryPanel(QWidget):
             "scan_x":    self.act1_grp.scan_cb.isChecked() if not is_field else False,
             "scan_y":    self.act2_grp.scan_cb.isChecked() if not is_field else False,
             "zigzag":    self.zigzag_cb.isChecked(),
+            "fast_axis": "act2" if self.fast_axis_bg.checkedId() == 1 else "act1",
         }
         p.update(self.act1_grp.get_partial("act1"))
         p.update(self.act2_grp.get_partial("act2"))

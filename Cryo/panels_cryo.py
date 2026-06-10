@@ -259,24 +259,23 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         set_ok(self.zi_status, "OK")
 
     def set_scan_running(self, running: bool):
-        """Disable/enable the Read buttons and guard refresh() during active scans.
+        """Track scan state. Hardware reads stay AVAILABLE during scans.
 
-        Concurrent hardware reads (ZI timeconstant, Keithley, AttoDRY) collide with
-        the scan runner's state() polling on the same TANGO device and cause
-        IMP_LIMIT CORBA errors.  Blocking the Read buttons prevents this.
+        Previously the Read buttons were disabled during a scan: with the old
+        single-threaded ZI server, a hardware read would block inside the
+        server while a poll was in progress, piling up the scan's state-poller
+        requests into IMP_LIMIT CORBA errors.  The v5 ZI/ZI2 servers serialize
+        all ziDAQ access behind a lock and make the filter reads non-blocking,
+        so a read now returns instantly and can no longer collide with the
+        state poller.  Keithley/AttoDRY are separate devices already polled
+        live by ReadbackWorker.  All reads run on background threads, so the
+        GUI never blocks.
         """
         self._scan_running = running
-        tip = "Cannot read during an active scan" if running else ""
-        for btn in (self._btn_zi_read, getattr(self, '_btn_ks_read', None)):
-            if btn is not None:
-                btn.setEnabled(not running)
-                btn.setToolTip(tip)
 
     # ── Refresh / readback (called by polling timer) ─────────────────────────
     def refresh(self):
-        """Read current values from Keithley + AttoDRY. Skipped during active scans."""
-        if getattr(self, '_scan_running', False):
-            return
+        """Read current values from Keithley + AttoDRY (safe during scans)."""
         self._read_lockin()
         self._read_keithley()
         self._read_attodry()

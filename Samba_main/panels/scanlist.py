@@ -4,11 +4,11 @@ ScanlistPanel — N-scan list with polarity control.
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QPushButton, QGroupBox, QProgressBar
+    QLabel, QLineEdit, QPushButton, QGroupBox
 )
 from PyQt6.QtCore import Qt
 
-from panels._widgets import NoScrollSpinBox, MokeMetadataGroup
+from panels._widgets import NoScrollSpinBox, NoScrollDoubleSpinBox, MokeMetadataGroup
 from panels.hardware_panel import HardwarePanel
 
 
@@ -18,7 +18,7 @@ class ScanlistPanel(QWidget):
         self._setup_getter = setup_getter
         root = QVBoxLayout(self); root.setContentsMargins(8, 6, 8, 6); root.setSpacing(6)
 
-        # ── Top row: active config + metadata side by side ────────────────────
+        # ── Top row: active config + timing + metadata side by side ─────────
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
         info_w = QWidget(); info_l = QVBoxLayout(info_w)
@@ -29,6 +29,16 @@ class ScanlistPanel(QWidget):
         info_l.addLayout(hl0)
         info_l.addStretch()
         top_row.addWidget(info_w)
+
+        # ── Timing group — kept in sync with Trajectory tab ──────────────────
+        tg = QGroupBox("Timing"); tl = QGridLayout(tg)
+        tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
+        def _dbl(lo, hi, dec, v):
+            w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
+        tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
+        tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
+        tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
+        top_row.addWidget(tg)
 
         self.meta = MokeMetadataGroup("Metadata")
         self.meta.changed.connect(self._update_auto_name)
@@ -59,10 +69,6 @@ class ScanlistPanel(QWidget):
         nl.addWidget(self.sl_name, 1, 1)
         sl_row.addWidget(ng)
         root.addLayout(sl_row)
-
-        pr = QHBoxLayout(); pr.addWidget(QLabel("Scans:"))
-        self.list_bar = QProgressBar(); self.list_bar.setFixedHeight(16)
-        pr.addWidget(self.list_bar, stretch=1); root.addLayout(pr)
 
         # Auto-update name when HW spins change too
         self.hw.amp_spin.valueChanged.connect(lambda _: self._update_auto_name())

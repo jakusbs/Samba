@@ -509,7 +509,7 @@ def _attr_combo(items: list) -> NoScrollComboBox:
 def _ro_field(text: str, width: int) -> QLineEdit:
     """Read-only display field — value auto-filled from registry."""
     e = QLineEdit(text)
-    e.setFixedWidth(width)
+    e.setMinimumWidth(width)
     e.setReadOnly(True)
     e.setStyleSheet(
         "background:#1e1e2e;color:#6c7086;border:1px solid #313244;"

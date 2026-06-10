@@ -1436,3 +1436,445 @@ Run with: `python test_runner.py -v` (no Qt, TANGO, or hardware needed).
 **Note:** Tests must patch `runner.fresh_proxy` (the module's own binding) rather than
 `hardware.fresh_proxy`, because `runner.py` uses `from hardware import fresh_proxy` which
 creates a local binding at import time.
+
+---
+
+## 24. Recent Changes (June 2026) — UI Polish & Metadata
+
+### Bug fixes (Samba_main + Cryo)
+
+- **Scanlist pausable**: `_toggle_pause` now uses `self._worker or self._sl_worker` so
+  the Pause button works during a scanlist run in both apps.
+- **Scanlist abort**: `_sl_worker` is cleared to `None` in a dedicated
+  `_on_sl_worker_finished` handler; `_abort_scanlist` is guarded by `_scan_running` to
+  prevent stale-reference no-ops.
+- **`_on_status` auto-pause detection**: now checks `_sl_worker` as fallback so the
+  Pause→Resume button label updates correctly during a scanlist.
+- **Samba_main only — setup-switch during scan**: `map2d.clear(); plot1d.clear()` are
+  now guarded by `if not self._scan_running`, preventing plot buffer destruction when
+  the user accidentally clicks Green↔IR during a measurement.
+- **Samba_main only — stale field-sweep monitor**: `populate_monitor_combo` gained a
+  `preserve: bool = True` parameter; called with `preserve=False` on config load to
+  prevent a stale device/attribute carrying over after setup switch.
+
+### New features (Samba_main + Cryo)
+
+**Bidirectional metadata sync** — Trajectory and Scanlist tabs share a
+`MokeMetadataGroup`; changes in either tab immediately update the other.
+A `_meta_syncing` flag prevents feedback loops.
+
+**Bidirectional timing sync** — The Timing group (Int / Settle / Timeout) on the
+Scanlist tab stays in sync with the Trajectory tab via a `_timing_syncing` flag.
+
+**Timing group moved into top row** — The Timing group (`QGroupBox`) now sits inline
+in `top_row` between the "Active config" info widget and the Metadata group, saving a
+row of vertical space.
+
+**BD-calibration tab** — New tab between Scanlist and Data Browser:
+- 6 editable mV spinboxes at λ/2 plate tick positions 0, 5, 10, 15, 20, 25
+- Save / Load buttons; values persisted per-setup in the setup JSON
+  (`bd_calibration`, `bd_calibration_date` keys)
+- First time the tab is shown per setup per session, a dialog offers to reload the
+  last saved calibration (`maybe_prompt`)
+- On every scan the 6 mV values are injected into `cfg["bd_calibration"]` and written
+  to HDF5 as `/data/calibration` (float64 array, 6 elements)
+- Implementation lives in `core/bd_calibration.py`; `Samba_main/panels/bd_calibration.py`
+  is a thin re-export wrapper
+
+**Post-scan completion popups removed** — The "Scan complete" and "Scanlist complete"
+`QMessageBox.information` dialogs replaced with color-coded log lines
+(`✓ Scan complete — saved <path>`). The "Abort and quit?" close confirmation is
+unchanged.
+
+**MokeMetadataGroup additions** (both apps, `Samba_main/panels/_widgets.py` and
+`Cryo/panels.py`):
+- **Device ID field** (`meta_device`, key `"device_id"`) added to the right of the
+  Sample field on the same row
+- **R4W / R2W spinboxes** (keys `"r_4wire_kohm"`, `"r_2wire_kohm"`, range 0–10 000 kΩ,
+  2 dp) placed in a new row below Sample/Device, above Notes
+- `build_scan_name()` inserts device_id between sample and amplitude when non-empty
+- All new fields emit `changed`, are round-tripped through `get_values`/`load_values`,
+  and default gracefully on old configs (empty string / 0.0)
+
+### Core engine additions (`core/scan/`)
+
+- `ScanRunner.is_paused()` added (`runner.py`)
+- `ScanlistWorker` gained `_paused` flag and `pause()`/`resume()`/`is_paused()` proxy
+  methods delegating to `_runner` (`workers.py`)
+- Field-flip settle loop in `ScanlistWorker._run_list` now respects `_paused`
+- `_open_hdf5` writes BD calibration array to `/data/calibration` when
+  `cfg["bd_calibration"]` is present
+- `_move()` coerces `numpy.float64` targets to Python `float` before `safe_write` to
+  avoid pytango type dispatch errors
+
+### Cleanup
+
+- `_running_scan_setup: str` instance variable removed from both `MainWindow` and
+  `CryoMainWindow` — it was set but never read (the plot-buffer guard uses
+  `_scan_running` instead)
+- `QProgressBar` import and related dead CSS rules (`QProgressBar{...}` / `::chunk`)
+  removed from both apps and `Samba_main/panels/scanlist.py`, `Cryo/panels.py`
+- Orphaned `_, n_x, n_y = self._scan_dims(...)` locals removed (were computed but
+  never used after the progress-bar removal)
+
+---
+
+## 25. Recent Changes (June 2026) — Bottom Status Bar
+
+### Always-visible scan status bar
+
+A `QStatusBar` strip sits at the very bottom of both `MainWindow` and `CryoMainWindow`,
+visible at all times. It displays 7 fields in a single row:
+
+```
+Scan: 1/4  │  Start: 14:32:01  │  Elapsed: 0:42  │  Run left: 3:18  │  Scan left: 0:51  │  Dead: 12%  │  Done: 18%
+```
+
+**Implementation** (`samba.py` / `samba_cryo.py`):
+
+- `_build_status_bar()` — creates the bar, three inner helper functions:
+  - `_mk_field()` — value label (`color:#cdd6f4`, 12 px)
+  - `_mk_caption(text)` — grey descriptor label (`color:#a6adc8`, 12 px)
+  - `_mk_sep()` — `│` separator (`color:#45475a`, 12 px)
+- `_refresh_status_bar()` — called from `_on_progress` and the 1 Hz `QTimer`; computes
+  and writes all 7 fields:
+  - **Scan** — `{_run_scans_done + 1} / {_run_scans_total}`
+  - **Start** — wall-clock time of `_run_start_time` (HH:MM:SS)
+  - **Elapsed** — `now - _run_start_time`
+  - **Run left** — whole-run proportional estimate:
+    `run_elapsed × (1 − frac) / frac` where `frac = _run_scans_done_frac + done/total * (1/_run_scans_total)`
+  - **Scan left** — warmup-corrected per-scan estimate: measured from point 2 onward
+    (`_scan_first_pt_time`); `(total − done) × rate_per_pt` where rate is
+    `(now − _scan_first_pt_time) / (done − 1)`
+  - **Dead%** — `(scan_elapsed − done × int_time) / scan_elapsed × 100`
+  - **Done%** — `((_run_scans_done + done/total) / _run_scans_total) × 100`
+- `_status_bar_run_start()` — called before the first `worker.start()`; initialises
+  `_run_start_time`, `_run_scans_done = 0`, `_bar_int_time` from config
+- `_status_bar_scan_done()` — increments `_run_scans_done`; called after each completed
+  direction/scan within a multi-scan run
+- `_status_bar_run_finish()` — called in `_on_sl_worker_finished` / run-end paths;
+  resets all fields to `—`
+- 1 Hz `QTimer` (`_sb_timer`) fires `_refresh_status_bar()` between `progress` signals
+  so the Elapsed and Run/Scan-left counters tick smoothly
+
+**`_run_scans_total` computation:**
+
+| Context | Value |
+|---------|-------|
+| Single scan (Samba_main) | `1` |
+| Scanlist (Samba_main) | `sl["n_scans"] × len(sl_worker.cfg_list)` |
+| Single scan (Cryo, one direction) | `1` |
+| Single scan (Cryo, trace+retrace) | `1 + len(_dir_queue)` (computed after queue assigned) |
+| Scanlist (Cryo) | `sl["n_scans"] × len(cfg_list)` |
+
+**Replaced UI elements:**
+
+- `self.pbar` (`QProgressBar` in the action bar) removed from both apps — the status
+  bar covers elapsed/done information more completely
+- `self.list_bar` (`QProgressBar` in `ScanlistPanel`) removed — scanlist progress
+  visible through the status bar's `Scan c/N` and `Done%` fields
+- `status_lbl` (text label below the plotting area) is kept for per-point log messages
+
+---
+
+## 26. Recent Changes (June 2026) — 2D Scan Traversal (Samba_main)
+
+### Zigzag finally wired into the engine
+
+The `zigzag` checkbox in `trajectory.py` had always saved `cfg["zigzag"]`, but
+`core/scan/runner.py` never read it — 2D scans ran a plain forward raster with a
+full fly-back between rows. The standard 2D loop now reverses the **physical** X
+traversal on every odd Y row when `cfg["zigzag"]` is set (`SPATIAL_XY` only):
+
+```python
+if cfg.get("zigzag") and hdf_scan == "SPATIAL_XY" and iy % 2 == 1:
+    x_seq  = x_plan[::-1]
+    ix_seq = ix_seq[::-1]
+```
+
+The spatial index `ix` still maps to the correct data column, so the stored map
+stays in ascending-X order regardless of sweep direction. The `x_seq`/`ix_seq`
+zip pair was already set up for exactly this — only the reversal was missing.
+
+### Fast (main) scanning axis selector
+
+Samba_main 2D scans can now sweep **either** axis as the fast (inner) loop:
+
+- **X-fast** (default): for each Y row, sweep all X — the historic behavior.
+- **Y-fast**: for each X column, sweep all Y.
+
+Data is stored identically as `[iy, ix]`, so the saved HDF5 map and the live
+2D plot orientation are **the same** in both modes — only the physical traversal
+order changes. This matters for drift/hysteresis: the user picks which axis gets
+the continuous fine sweep.
+
+**UI** (`Samba_main/panels/trajectory.py`): a "Fast axis: [X][Y]" pill pair
+(green `#a6e3a1`, mutually exclusive `QButtonGroup`) lives in the same
+`zigzag_w` container as the zigzag checkbox, shown only when both axes are on.
+Persisted via `cfg["fast_axis"]` (`"act1"` = X / `"act2"` = Y) in
+`get_config_partial()` / `load_config()`; default added to `make_default_config`
+(`config.py`). Old configs default gracefully to `"act1"` (no migration needed).
+
+**Engine** (`core/scan/runner.py`): a dedicated branch
+`elif hdf_scan == "SPATIAL_XY" and cfg.get("fast_axis") == "act2":` implements
+the X-outer / Y-inner traversal. It is kept **separate** from the battle-tested
+X-fast loop (which still carries all the FIELD/TIME/RTV40/adaptive-settle
+special-cases) to avoid disturbing it; the two loops share the new
+`_acquire_point_retry()` helper.
+
+### `_acquire_point_retry()` extracted
+
+The per-point lock-in-settle + acquire + retry/auto-pause block (the
+`while not self._abort:` loop) was extracted from the standard loop into
+`ScanRunner._acquire_point_retry(...) -> (vals, t_trigger)`. Behavior is
+identical (verified by the existing retry tests + `TestZigzag2D`); the
+extraction lets the X-fast and Y-fast loops reuse one copy.
+
+### Zigzag generalization for Y-fast
+
+Zigzag in the Y-fast branch reverses the **Y** sweep on odd X columns — the
+natural analog of reversing X on odd Y rows. `zigzag_cb` label updated to
+"reverse direction on every fast line" to reflect that it follows the fast axis.
+
+### Cryo untouched
+
+Cryo's interleaved trace/retrace (`_interleaved_2d` / `_interleave_axis`) is a
+separate engine path checked **first**, and Cryo never sets `fast_axis`. The
+Cryo `TrajectoryPanel` is a different class with no fast-axis pills. All Cryo
+behavior is unchanged.
+
+### Tests
+
+`test_runner.py` gains `TestZigzag2D` (4 tests) driving `run()` over a 3×2 grid
+and capturing the point-callback order:
+- X-fast zigzag reverses odd rows (`[2,1,0]`), even rows forward (`[0,1,2]`)
+- X-fast without zigzag keeps every row forward
+- Y-fast groups by column, sweeps Y inside each (`[(0,0),(1,0),(0,1),…]`), and
+  writes every grid cell exactly once
+- Y-fast + zigzag reverses the Y sweep on odd columns
+
+Total suite: 18 tests, all passing (`python test_runner.py -v`).
+
+---
+
+## 27. Recent Changes (June 2026) — Plotting & UI Polish
+
+### Live 1D legend shows from scan start (no manual refresh)
+
+**File:** `core/plot_widgets.py` — `Live1DWidget.apply_config()`
+
+The legend was created inside an `if visible:` block where `visible` required
+`len(line.get_xdata()) > 0`. At scan start the lines are created empty
+(`ax.plot([], [])`) with no data yet, so the legend was skipped — and
+`_throttled_draw()` never (re)creates a legend. The user had to trigger a
+config re-apply (the "refresh") *after* data existed to see it.
+
+**Fix:** split the per-axis line list into `labelled` (any non-`_` label) and
+`with_data` (has points). Y-limits still use `with_data`; the legend is now
+drawn whenever `labelled` is non-empty — so it appears immediately at scan
+start, before the first point. Shared module → fixes both Samba_main and Cryo.
+
+### Screen-aware window sizing (both apps)
+
+**Files:** `Samba_main/samba.py`, `Cryo/samba_cryo.py` — `_restore_geometry()`
+
+The main window used a hard `setMinimumSize(1360, 920)` and opened with a plain
+`show()`. On smaller laptop screens (e.g. 1366×768) the 920 px minimum height
+exceeded the usable area, so the bottom status/action bar was clipped — and the
+minimum prevented shrinking to fit.
+
+**Fix:**
+- Minimum lowered to `1180 × 640` (fits any modern laptop).
+- `_restore_geometry()` now: restores saved geometry if present, else opens at
+  the preferred `1360 × 920`; then **clamps** the size to the usable screen
+  (`availableGeometry()` minus a small decoration margin) and **pulls the window
+  back on-screen** if a saved position lands off the display (covers
+  resolution / monitor changes). Falls through gracefully if no screen is
+  reported.
+
+### Data browser — switch channels on a 2D map (no collapse to 1D)
+
+**File:** `core/data_browser.py` — `DataBrowserPanel`
+
+Loading a 2D scan auto-plotted a 2D colour map, but the **Plot** button always
+called `read_1d` + `plot_1d`, so changing the Y channel collapsed the map into a
+1D line — there was no way to view a different channel *as a map*.
+
+**Fix:** added a **"2D map"** checkbox next to the X/Y selectors:
+- Auto-enabled and checked for non-DC scans with a real Y axis (`n_y > 1`);
+  disabled for 1D / DC files.
+- When on, the **Y combo selects which channel** is shown and `_plot_current()`
+  renders `read_2d(sensor_key=y_key)` → `plot_2d`; uncheck for a 1D line/slice.
+- Column selectors and the toggle now **re-plot live** via `_on_combo_changed`
+  (guarded by `_populating_combos` so repopulating the combos in `_show_file`
+  doesn't trigger spurious redraws).
+- `_show_file` resolves the mode (DC/1D → line, 2D → map) and calls the unified
+  `_plot_current()` instead of an inline auto-plot block.
+- A `ndim == 2` guard prevents `imshow` from choking if a 1D column is picked
+  while in map mode.
+
+### Live-plot polish — view toggles (matplotlib retained)
+
+Task 6 was scoped to keep matplotlib (right fit for scientific data + the
+zoom/pan/save toolbar + HDF5/PyMca ecosystem) and add a few safe, user-driven
+view controls. All changes are self-contained in the plot widgets — no
+`samba.py` wiring.
+
+**`core/plot_widgets.py`:**
+- `Live1DWidget` — **"Auto-scale"** checkbox (default on) in the toolbar row.
+  When unchecked, `_throttled_draw()` skips the per-frame x/y limit recompute,
+  so a manual zoom/pan **survives live updates** instead of being reset every
+  80 ms. Re-checking marks the widget dirty so it rescales immediately.
+- `Live2DWidget` — **"Auto color"** (default on; gates the per-frame `clim`
+  recompute) and **"Equal aspect"** (X/Y at the same scale — true proportions
+  for spatial maps) toggles. Aspect is stored in `self._aspect` and applied in
+  `_redraw()` and live via `_on_aspect_toggled()`.
+
+**`core/data_browser.py`:**
+- `BrowserPlotWidget` — **"Equal aspect"** toggle for past 2D maps. Tracks
+  `self._is_2d` (set in `plot_2d`, cleared in `clear`) so toggling only affects
+  colour maps, never 1D line plots; `plot_2d` honours `self._aspect`.
+
+Shared modules → both Samba_main and Cryo get all of the above.
+
+---
+
+## 28. Recent Changes (June 2026) — Hardware Metadata, Data Browser & Layout
+
+### Hardware metadata snapshot expansion
+
+`_read_hw_snapshot()` (both apps) now captures the full hardware window at scan start:
+- **Samba_main:** adds Keithley I-out readback (`hw_keithley_current_mA`) and magnet coil
+  current (`hw_magnet_current_A`, skipped for FIELD scans where it is swept).
+- **Cryo:** adds Keithley I-out, VTI temperature (`hw_vti_temp_K`) and magnet temperature
+  (`hw_magnet_temp_K`) — the AttoDRY readbacks shown in the panel.
+- New keys flow through the `runner.py` HDF5 metadata allowlist, the data-browser metadata
+  preview (`_HW_DISPLAY` in `core/data_browser.py`) and the lab-notebook columns
+  (`core/lab_notebook.py`). Recorded regardless of whether the device is in the measured list.
+
+### Scanlist runs now save metadata + lab-notebook entries (bug fix)
+
+Single scans called `_read_hw_snapshot()` and appended a notebook row on finish, but the
+**scanlist** start paths did neither — so scanlist HDF5 files lacked `hw_*` metadata and 2D
+map scans run via scanlist produced no CSV rows at all.
+- Fix injects the hw snapshot into the scanlist config(s) before constructing
+  `ScanlistWorker`, and adds a new `_on_sl_scan_done(idx, fn)` handler that appends one
+  lab-notebook entry per finished scanlist file.
+- Cryo's trace/retrace case indexes `cfg_list[idx % len(cfg_list)]` to log the matching
+  per-direction config.
+
+### Live 2D display-sensor switch (Samba_main)
+
+- `_on_display_changed` now updates `_current_scan_cfg["display_sensor"]` so newly acquired
+  points feed the newly-selected sensor (previously new points kept filling the original
+  frozen sensor).
+- `RightPanel.set_display` blocks signals so a programmatic restore (config load / setup
+  switch) can't redirect the live map — only genuine user combo changes do.
+- Cryo already read the display sensor live per-point, so it was unaffected.
+
+### Data browser
+
+- **Remember last detector:** tracks the last user-selected Y channel and defaults to it
+  when opening another file that has it (falls back to first sensor otherwise).
+- **Colormap picker:** a "Cmap:" combo (populated from `config.COLORMAPS`) sits next to the
+  X/Y/2D-map controls; selecting one re-plots the current 2D map live via
+  `_on_combo_changed` and is passed to `BrowserPlotWidget.plot_2d`.
+
+### 2D plotting layout
+
+- More colormaps in both `config.py` files (diverging set first for signed MOKE data, then
+  sequential, then classic).
+- `Live2DWidget` and `BrowserPlotWidget` switched to `constrained_layout` (aspect=auto, no
+  `tight_layout`) so the map fills the window and no longer collapses to a narrow strip on
+  resize; `clear()` also removes the stale colorbar.
+- **Note (correction to §27):** the "Equal aspect" toggle added in §27 was removed here —
+  `constrained_layout` supersedes it.
+
+### Internal widget layout
+
+- `ActuatorGroup` (both apps): Label/Unit/Attr fields changed from `setFixedWidth` to
+  `setMinimumWidth` + column stretch so they expand and show full text; device-path tooltip
+  added.
+- `hardware_panel.py` / Cryo `panels.py`: range combo `setFixedWidth(70)` → `setMinimumWidth(84)`,
+  Set button `30` → `44` (matches `keithley_mixin.py`).
+- `setup_defaults.py` / `defaults_panel.py`: read-only label/unit fields use `setMinimumWidth`.
+- Vertical splitter initial ratio `600/300` → `500/400` (and 0.55 → 0.50 resize ratio) in
+  both apps, giving the trajectory / scanlist panel adequate default height.
+
+---
+
+## 29. Recent Changes (June 2026) — ZI/ZI2 Lock-in Server v5 Migration (thread-safe)
+
+All four MFLI lock-in device servers — Samba_main **ZI** (dev4855, Green) + **ZI2**
+(dev30933, IR) and **Cryo ZI1/ZI2** — were migrated from the old `PyTango.Device_4Impl`
+(v4) to the modern `tango.server.Device` (v5) and made fully thread-safe. TANGO attribute
+names (`x1`–`y4`, `settlingtime`, `integrationtime`, `Start`, …) are **unchanged**, so the
+Samba client needs no changes. This supersedes the threading model described in §6 (the
+poll-and-average acquisition logic there is otherwise still accurate).
+
+### Root cause (the bug this fixes)
+
+The class-level `ThreadZI.lock` was **defined but never used** — every `ziDAQServer`
+(`daq.*`) call was unguarded. `ziDAQServer` is not thread-safe: concurrent access between
+the acquisition thread's `poll()` and an attribute read (`settlingtime` / `timeconstant` /
+`filterorder`, e.g. from Samba's HW-panel readback or Jive) corrupts the connection. That
+single defect caused **both** reported symptoms:
+- **Intermittent server crashes** — which is why Samba's client-side reads were disabled
+  during scans in the first place.
+- **Idle-server zero outputs** — once reads were disabled there was no API activity between
+  `Start()` calls, so LabOne paused sample delivery (see below).
+
+### v4 → v5 server changes (`cbe971e`, `62a1b7a`)
+
+Each v5 server adds:
+- `daq = None` init + a `_require_daq()` guard
+- a real `self._daq_lock` serializing **all** `daq.*` paths
+- `always_executed_hook` → `FAULT` state when disconnected
+- `delete_device` cleanup
+- a `Reconnect` command
+- an `AllowVersionMismatch` property + `_connect_daq()` helper
+- `_refresh_cached_settings()` warms the tc/order/settling caches at init and on `Reconnect`
+
+### Idle-server zero-output fix (`bac5422`)
+
+LabOne pauses sample delivery when the ziPython API connection has been idle. Without Jive
+polling, the first `daq.poll()` after an idle period returns an **empty dict**; with short
+integration times (< ~200 ms) the server doesn't catch up, all demod paths are missing, the
+`KeyError` fallback fires, and outputs silently become `0`.
+- **Fix:** a single `daq.getDouble('/<device>/demods/0/rate')` immediately **before** the
+  flush poll in all six Thread files wakes the data server and guarantees streaming is active
+  before flush+collect.
+- A `warn_stream` now fires when the collect window returns no data at all, so the problem is
+  visible in TANGO logs instead of producing silent zeros.
+
+### Non-blocking filter reads (`b39cf81`)
+
+`timeconstant` / `filterorder` / `settlingtime` are read-only filter-info attributes that are
+**constant during a scan**, so the cached value is already correct.
+- The three getters now use a **non-blocking** `acquire(blocking=False)`: refresh from hardware
+  when the lock is free (idle / between points), otherwise return the last cached value
+  immediately. A read during an active acquisition **never blocks**.
+- **Writes** (`Amplitude` / frequency / samplingrate / phase) keep the **blocking** lock — a
+  write must reach the hardware. `_settling_time()` (used by `integrationtime.write`
+  validation) also stays blocking, as that path runs between scans.
+
+### HW-panel reads during scans re-enabled (`28b7c57`)
+
+The hardware panel used to disable its ZI/Keithley **Read** buttons and skip `refresh()`
+during a scan — a workaround for the single-threaded v4 server (a read would block inside the
+server while a poll was running, piling the scan's state-poller requests into `IMP_LIMIT`
+CORBA errors). The v5 servers remove that root cause (lock-serialized + non-blocking filter
+reads), so:
+- `set_scan_running()` now just tracks the flag (no longer disables the buttons)
+- `refresh()` no longer early-returns during a scan
+- The hardware window stays **live and readable mid-measurement**
+- Applied to both `HardwarePanel` (Samba_main) and `CryoHardwarePanel` (Cryo); Cryo's
+  Keithley/AttoDRY are separate devices already polled live by `ReadbackWorker`
+
+### Installers
+
+- The `install_ZI_DAQ.sh` / `install_ZI2_DAQ.sh` sed patches were updated from the old
+  `from Thread… import*` pattern (which no longer matched the v5 explicit import) to the
+  robust `^from Thread… import Thread…$` → relative-import form.
+- `zhinst` pinned to `>=24,<26` across all four install scripts.
+- Packaged `ZI_DAQ/` / `ZI2_DAQ/` copies regenerated to match (relative import).
