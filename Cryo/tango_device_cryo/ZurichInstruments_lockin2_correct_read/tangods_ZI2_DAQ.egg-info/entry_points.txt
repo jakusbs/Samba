@@ -1,2 +1,0 @@
-[console_scripts]
-ZI2_DAQ = ZI2_DAQ:main

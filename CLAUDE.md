@@ -45,17 +45,6 @@ Samba/
 │   │   ├── config_list.py   # Config list sidebar
 │   │   ├── scanlist.py      # Scanlist panel
 │   │   └── _widgets.py      # NoScroll widgets, MokeMetadataGroup
-│   └── tango_devices/       # Tango device server source code
-│       ├── ZurichInstruments_lockin/
-│       │   ├── ZI.py / ZI2.py           # ZI MFLI device servers
-│       │   ├── ThreadZI_DAQ.py / ThreadZI2_DAQ.py  # poll()+numpy threads
-│       │   └── install_ZI_DAQ.sh / install_ZI2_DAQ.sh
-│       ├── RTV40/
-│       │   ├── RTV40_Pulser.py          # Kentech RTV40/RTV30 pulse generator
-│       │   ├── install_RTV40.sh         # pip-installable package installer
-│       │   └── RTV_30_manual.pdf        # Hardware manual
-│       └── SetupLock/
-│           └── SetupLock.py              # Setup lock Tango device server
 │
 ├── Cryo/                    # Cryo setup (separate entry point)
 │   ├── samba_cryo.py        # CryoMainWindow — single "Cryo" setup
@@ -276,7 +265,7 @@ Entirely delegated to the PyHysteresis Beckhoff device:
 
 ## 6. ZI / ZI2 Tango Device Servers
 
-**Files:** `Samba_main/tango_devices/ZurichInstruments_lockin/ZI.py`, `ZI2.py`, `ThreadZI_DAQ.py`, `ThreadZI2_DAQ.py`
+**Files:** TANGO_Devices repo, `tango_servers_new/ZurichInstruments_lockin_correct_read/ZI.py` (resp. `..._lockin2_correct_read/ZI2.py`), `ThreadZI_DAQ.py` / `ThreadZI2_DAQ.py` — all device server sources live in the separate TANGO_Devices repository (the copies formerly in `Samba_main/tango_devices/` and `Cryo/tango_device_cryo/` were removed)
 
 ### Purpose
 
@@ -363,7 +352,7 @@ The scan engine's two-phase polling (§5) relies on this: Phase A waits for ON�
 
 ## 7. Setup Lock
 
-**Server:** `Samba_main/tango_devices/SetupLock/SetupLock.py`
+**Server:** TANGO_Devices repo, `tango_servers_new/SetupLock/SetupLock.py`
 **Client:** `Samba_main/setup_lock.py`, `Cryo/setup_lock.py`
 **TANGO path:** `hpp-N42/samba/lock`
 
