@@ -150,6 +150,10 @@ class ScanRunner:
         self.setup = setup
         self._abort  = False
         self._paused = False
+        # Set by run(); used by _write_point for failure reporting
+        self._lg = lambda *a: None
+        self._st = lambda *a: None
+        self._write_fail_streak = 0
 
     def abort(self):     self._abort  = True
     def pause(self):     self._paused = True
@@ -170,6 +174,8 @@ class ScanRunner:
         lg = cbs.get('log',      lambda *a: None)
         pt = cbs.get('point',    lambda *a: None)
         pg = cbs.get('progress', lambda *a: None)
+        self._lg, self._st = lg, st
+        self._write_fail_streak = 0
 
         scan_type = cfg.get("scan_type", "SPATIAL")
         scan_x    = cfg.get("scan_x",   True)
@@ -203,6 +209,20 @@ class ScanRunner:
         mag_cur_attr = setup.get("magnet_current_attr", "current_polar")
         mag_fld_attr = setup.get("magnet_field_attr",   "field_polar_corr")
 
+        # Actuator/magnet connections must be real: get_proxy() silently caches
+        # a SimProxy on the first connection failure, and a scan "moving" a
+        # simulated stage produces a complete, plausible-looking file of fake
+        # data.  Connect fresh and refuse to start if real hardware is
+        # configured but unreachable.
+        def _actuator(path, role):
+            p, err = fresh_proxy(path)
+            if err:
+                if TANGO_AVAILABLE:
+                    st(f"✗ {role} device '{path}' unreachable — scan not started: {err}")
+                    return None
+                lg(f"⚠ {role} '{path}': using sim — {err}")
+            return p
+
         # ── Build scan axes ───────────────────────────────────────────────────
         if scan_type == "FIELD":
             segs = cfg.get("field_segments")
@@ -217,7 +237,8 @@ class ScanRunner:
             x_unit = cfg.get("field_x_unit",  "T")
             act1_p, act2_p = None, None
             _field_dev = cfg.get("field_device", "") or setup.get("magnet_device", "")
-            mag_p = get_proxy(_field_dev)
+            mag_p = _actuator(_field_dev, "Magnet")
+            if mag_p is None: return None
             # Per-config current/write attr override (falls back to setup)
             mag_cur_attr = (cfg.get("field_current_attr", "")
                             or setup.get("magnet_current_attr", "current_polar"))
@@ -228,8 +249,9 @@ class ScanRunner:
             x_plan = np.linspace(cfg["act1_start"], cfg["act1_stop"], int(cfg["act1_npts"]))
             y_plan = np.linspace(cfg["act2_start"], cfg["act2_stop"], int(cfg["act2_npts"]))
             x_lbl, x_unit = cfg["act1_label"], cfg["act1_unit"]
-            act1_p = get_proxy(cfg["act1_device"])
-            act2_p = get_proxy(cfg["act2_device"])
+            act1_p = _actuator(cfg["act1_device"], "Actuator 1")
+            act2_p = _actuator(cfg["act2_device"], "Actuator 2")
+            if act1_p is None or act2_p is None: return None
             mag_p  = None
             hdf_scan = "SPATIAL_XY"
             fast_attr = cfg.get("act1_attr", "x")
@@ -237,7 +259,8 @@ class ScanRunner:
             x_plan = np.linspace(cfg["act2_start"], cfg["act2_stop"], int(cfg["act2_npts"]))
             y_plan = np.array([0.0])
             x_lbl, x_unit = cfg["act2_label"], cfg["act2_unit"]
-            act1_p = get_proxy(cfg["act2_device"])
+            act1_p = _actuator(cfg["act2_device"], "Actuator 2")
+            if act1_p is None: return None
             act2_p, mag_p = None, None
             hdf_scan = "SPATIAL_Y"
             fast_attr = cfg.get("act2_attr", "y")
@@ -254,7 +277,8 @@ class ScanRunner:
             x_plan = np.linspace(cfg["act1_start"], cfg["act1_stop"], int(cfg["act1_npts"]))
             y_plan = np.array([0.0])
             x_lbl, x_unit = cfg["act1_label"], cfg["act1_unit"]
-            act1_p = get_proxy(cfg["act1_device"])
+            act1_p = _actuator(cfg["act1_device"], "Actuator 1")
+            if act1_p is None: return None
             act2_p, mag_p = None, None
             hdf_scan = "SPATIAL_X"
             fast_attr = cfg.get("act1_attr", "x")
@@ -469,10 +493,12 @@ class ScanRunner:
                             if self._abort: break
                         x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
                         if settle > 0: time.sleep(settle)
-                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
-                        vals, t_elapsed = self._trigger_poll_read(
-                            devp, dev_sensors, trigger_devs, int_time,
-                            t0, _RUNNING, move_t, lg)
+                        vals, t_trigger = self._acquire_point_retry(
+                            devp, dev_sensors, trigger_devs, int_time, t0,
+                            _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
+                            count == 0, x_lbl, x_read, lg, st)
+                        t_elapsed = t_trigger + int_time / 2.0
+                        vals[X_TIME] = t_elapsed
                         x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
                         for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
                         self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
@@ -489,10 +515,12 @@ class ScanRunner:
                             if self._abort: break
                         x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg)
                         if settle > 0: time.sleep(settle)
-                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
-                        vals, t_elapsed = self._trigger_poll_read(
-                            devp, dev_sensors, trigger_devs, int_time,
-                            t0, _RUNNING, move_t, lg)
+                        vals, t_trigger = self._acquire_point_retry(
+                            devp, dev_sensors, trigger_devs, int_time, t0,
+                            _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
+                            False, x_lbl, x_read, lg, st)
+                        t_elapsed = t_trigger + int_time / 2.0
+                        vals[X_TIME] = t_elapsed
                         if hfile2 is not None:
                             self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
                         count_r += 1
@@ -523,10 +551,12 @@ class ScanRunner:
                             if self._abort: break
                         self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
                         if settle > 0: time.sleep(settle)
-                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
-                        vals, t_elapsed = self._trigger_poll_read(
-                            devp, dev_sensors, trigger_devs, int_time,
-                            t0, _RUNNING, move_t, lg)
+                        vals, t_trigger = self._acquire_point_retry(
+                            devp, dev_sensors, trigger_devs, int_time, t0,
+                            _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
+                            count == 0, cfg["act2_label"], y_pos, lg, st)
+                        t_elapsed = t_trigger + int_time / 2.0
+                        vals[X_TIME] = t_elapsed
                         x_actual[iy, ix] = x_read; t_actual[iy, ix] = t_elapsed
                         for s in active: data[s["label"]][iy, ix] = vals.get(s["label"], np.nan)
                         self._write_point(hfile, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
@@ -543,10 +573,12 @@ class ScanRunner:
                             if self._abort: break
                         self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg)
                         if settle > 0: time.sleep(settle)
-                        if max_lockin_settling > 0: time.sleep(max_lockin_settling)
-                        vals, t_elapsed = self._trigger_poll_read(
-                            devp, dev_sensors, trigger_devs, int_time,
-                            t0, _RUNNING, move_t, lg)
+                        vals, t_trigger = self._acquire_point_retry(
+                            devp, dev_sensors, trigger_devs, int_time, t0,
+                            _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
+                            False, cfg["act2_label"], y_pos, lg, st)
+                        t_elapsed = t_trigger + int_time / 2.0
+                        vals[X_TIME] = t_elapsed
                         if hfile2 is not None:
                             self._write_point(hfile2, iy, ix, x_read, t_elapsed, vals, active, hdf_scan)
                         count_r += 1
@@ -1108,6 +1140,39 @@ class ScanRunner:
                 lg(f"⚠ HDF5 close failed: {fe}")
         return result_fn
 
+    # ── Trigger failure recovery ──────────────────────────────────────────────
+    def _recover_trigger(self, devp, dev_path, tcmd, exc, use_async,
+                         zi_timeout_ms, trigger_failed, lg):
+        """Handle one failed trigger: refresh the proxy and retry once.
+
+        Updates the consecutive-failure counter; once it reaches
+        AUTO_PAUSE_THRESHOLD the device is queued for permanent removal via
+        trigger_failed (modified in place).
+        """
+        fails = self._trigger_consec_fails.get(dev_path, 0) + 1
+        self._trigger_consec_fails[dev_path] = fails
+        lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
+           f"{type(exc).__name__}")
+        new_fp, fp_err = fresh_proxy(dev_path)
+        if not fp_err:
+            devp[dev_path] = new_fp
+            if hasattr(new_fp, 'set_timeout_millis'):
+                try: new_fp.set_timeout_millis(zi_timeout_ms)
+                except Exception: pass
+            try:
+                if use_async:
+                    devp[dev_path].command_inout_asynch(tcmd)
+                else:
+                    devp[dev_path].command_inout(tcmd)
+                self._trigger_consec_fails[dev_path] = 0
+                lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
+                return
+            except Exception as e2:
+                lg(f"  ✗ {dev_path}: still failing after refresh: "
+                   f"{type(e2).__name__}")
+        if fails >= AUTO_PAUSE_THRESHOLD:
+            trigger_failed.append(dev_path)
+
     # ── Single-point acquire: trigger → Phase A+B → guard → read ────────────
     def _do_acquire(self, devp, dev_sensors, trigger_devs,
                     int_time, t0, _RUNNING, cfg, _zi_timeout_ms, lg):
@@ -1129,27 +1194,8 @@ class ScanRunner:
                 except AttributeError:
                     use_async = False; break
                 except Exception as e:
-                    fails = self._trigger_consec_fails.get(dev_path, 0) + 1
-                    self._trigger_consec_fails[dev_path] = fails
-                    lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
-                       f"{type(e).__name__}")
-                    _new_fp, _fp_err = fresh_proxy(dev_path)
-                    if not _fp_err:
-                        devp[dev_path] = _new_fp
-                        if hasattr(_new_fp, 'set_timeout_millis'):
-                            try: _new_fp.set_timeout_millis(_zi_timeout_ms)
-                            except Exception: pass
-                        try:
-                            devp[dev_path].command_inout_asynch(tcmd)
-                            self._trigger_consec_fails[dev_path] = 0
-                            lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
-                        except Exception as e2:
-                            lg(f"  ✗ {dev_path}: still failing after refresh: "
-                               f"{type(e2).__name__}")
-                            if fails >= AUTO_PAUSE_THRESHOLD:
-                                trigger_failed.append(dev_path)
-                    elif fails >= AUTO_PAUSE_THRESHOLD:
-                        trigger_failed.append(dev_path)
+                    self._recover_trigger(devp, dev_path, tcmd, e, True,
+                                          _zi_timeout_ms, trigger_failed, lg)
             t_trigger = time.time() - t0
 
             if not use_async:
@@ -1159,27 +1205,8 @@ class ScanRunner:
                         devp[dev_path].command_inout(tcmd)
                         self._trigger_consec_fails[dev_path] = 0
                     except Exception as e:
-                        fails = self._trigger_consec_fails.get(dev_path, 0) + 1
-                        self._trigger_consec_fails[dev_path] = fails
-                        lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
-                           f"{type(e).__name__}")
-                        _new_fp, _fp_err = fresh_proxy(dev_path)
-                        if not _fp_err:
-                            devp[dev_path] = _new_fp
-                            if hasattr(_new_fp, 'set_timeout_millis'):
-                                try: _new_fp.set_timeout_millis(_zi_timeout_ms)
-                                except Exception: pass
-                            try:
-                                devp[dev_path].command_inout(tcmd)
-                                self._trigger_consec_fails[dev_path] = 0
-                                lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
-                            except Exception as e2:
-                                lg(f"  ✗ {dev_path}: still failing after refresh: "
-                                   f"{type(e2).__name__}")
-                                if fails >= AUTO_PAUSE_THRESHOLD:
-                                    trigger_failed.append(dev_path)
-                        elif fails >= AUTO_PAUSE_THRESHOLD:
-                            trigger_failed.append(dev_path)
+                        self._recover_trigger(devp, dev_path, tcmd, e, False,
+                                              _zi_timeout_ms, trigger_failed, lg)
                 t_trigger = time.time() - t0
 
         for dp in trigger_failed:
@@ -1271,164 +1298,6 @@ class ScanRunner:
                         time.sleep(RETRY_DELAY)
 
         return vals, t_trigger, ok
-
-    # ── Shared trigger → poll → read sequence ────────────────────────────────
-    def _trigger_poll_read(self, devp, dev_sensors, trigger_devs,
-                           int_time, t0, _RUNNING, move_timeout, lg):
-        """Fire async triggers, wait for completion (Phase A + B), read sensors.
-
-        trigger_devs is modified in-place: devices whose trigger command fails
-        are permanently removed so they don't block future points.
-        Returns (vals_dict, t_elapsed_s).
-        """
-        _zi_timeout_ms = max(15_000, int((int_time + 7.5) * 1000))
-        trigger_failed = []
-        if trigger_devs:
-            use_async = True
-            for dev_path, tcmd in list(trigger_devs.items()):
-                try:
-                    devp[dev_path].command_inout_asynch(tcmd)
-                    self._trigger_consec_fails[dev_path] = 0
-                except AttributeError:
-                    use_async = False; break
-                except Exception as e:
-                    fails = self._trigger_consec_fails.get(dev_path, 0) + 1
-                    self._trigger_consec_fails[dev_path] = fails
-                    lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
-                       f"{type(e).__name__}")
-                    _new_fp, _fp_err = fresh_proxy(dev_path)
-                    if not _fp_err:
-                        devp[dev_path] = _new_fp
-                        if hasattr(_new_fp, 'set_timeout_millis'):
-                            try: _new_fp.set_timeout_millis(_zi_timeout_ms)
-                            except Exception: pass
-                        try:
-                            devp[dev_path].command_inout_asynch(tcmd)
-                            self._trigger_consec_fails[dev_path] = 0
-                            lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
-                        except Exception as e2:
-                            lg(f"  ✗ {dev_path}: still failing after refresh: "
-                               f"{type(e2).__name__}")
-                            if fails >= AUTO_PAUSE_THRESHOLD:
-                                trigger_failed.append(dev_path)
-                    elif fails >= AUTO_PAUSE_THRESHOLD:
-                        trigger_failed.append(dev_path)
-            t_trigger = time.time() - t0
-
-            if not use_async:
-                for dev_path, tcmd in list(trigger_devs.items()):
-                    if dev_path in trigger_failed: continue
-                    try:
-                        devp[dev_path].command_inout(tcmd)
-                        self._trigger_consec_fails[dev_path] = 0
-                    except Exception as e:
-                        fails = self._trigger_consec_fails.get(dev_path, 0) + 1
-                        self._trigger_consec_fails[dev_path] = fails
-                        lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
-                           f"{type(e).__name__}")
-                        _new_fp, _fp_err = fresh_proxy(dev_path)
-                        if not _fp_err:
-                            devp[dev_path] = _new_fp
-                            if hasattr(_new_fp, 'set_timeout_millis'):
-                                try: _new_fp.set_timeout_millis(_zi_timeout_ms)
-                                except Exception: pass
-                            try:
-                                devp[dev_path].command_inout(tcmd)
-                                self._trigger_consec_fails[dev_path] = 0
-                                lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
-                            except Exception as e2:
-                                lg(f"  ✗ {dev_path}: still failing after refresh: "
-                                   f"{type(e2).__name__}")
-                                if fails >= AUTO_PAUSE_THRESHOLD:
-                                    trigger_failed.append(dev_path)
-                        elif fails >= AUTO_PAUSE_THRESHOLD:
-                            trigger_failed.append(dev_path)
-                t_trigger = time.time() - t0
-        else:
-            t_trigger = time.time() - t0
-
-        for dp in trigger_failed:
-            lg(f"  → Permanently removing {dp} from triggered devices "
-               f"after {AUTO_PAUSE_THRESHOLD} consecutive failures")
-            trigger_devs.pop(dp, None)
-
-        if trigger_devs:
-            triggered = set(trigger_devs.keys()) - set(trigger_failed)
-
-            # Phase A — wait for entry into RUNNING
-            not_yet_running = set(triggered)
-            t_start = time.time()
-            while not_yet_running and (time.time() - t_start
-                                       < TRIGGER_START_GUARD_MS / 1000.0):
-                if self._abort: break
-                confirmed = set()
-                for dp in not_yet_running:
-                    try:
-                        if devp[dp].state() in _RUNNING: confirmed.add(dp)
-                    except Exception: confirmed.add(dp)
-                not_yet_running -= confirmed
-                if not_yet_running: time.sleep(0.002)
-
-            # Phase B — wait for exit from RUNNING
-            remaining = set(triggered)
-            t_wait = time.time()
-            _fails = {dp: 0 for dp in remaining}
-            while remaining and (time.time() - t_wait < move_timeout):
-                if self._abort: break
-                done = set()
-                for dp in remaining:
-                    try:
-                        ds = devp[dp].state()
-                        _fails[dp] = 0
-                        if ds not in _RUNNING: done.add(dp)
-                    except Exception as e:
-                        _fails[dp] += 1
-                        if _fails[dp] >= 5:
-                            lg(f"⚠ State poll failed {_fails[dp]}× for {dp}: "
-                               f"{type(e).__name__} — giving up")
-                            done.add(dp)
-                        else:
-                            time.sleep(0.05)
-                remaining -= done
-                if remaining: time.sleep(0.01)
-            if remaining:
-                lg(f"⚠ Timeout waiting for: " + ", ".join(remaining))
-        else:
-            time.sleep(int_time)
-
-        time.sleep(READOUT_GUARD_MS / 1000.0)
-
-        # Batch read per device
-        vals: Dict[str, float] = {}
-        for dev_path, sensors_on_dev in dev_sensors.items():
-            unique_attrs = list(dict.fromkeys(s["attribute"] for s in sensors_on_dev))
-            for attempt in range(MAX_RETRIES + 1):
-                try:
-                    if len(unique_attrs) == 1:
-                        av  = devp[dev_path].read_attribute(unique_attrs[0])
-                        raw = av.value
-                        attr_to_val = {unique_attrs[0]:
-                            float(raw[0]) if hasattr(raw, "__len__") else float(raw)}
-                    else:
-                        attr_vals = devp[dev_path].read_attributes(unique_attrs)
-                        attr_to_val = {}
-                        for av, attr in zip(attr_vals, unique_attrs):
-                            raw = av.value
-                            attr_to_val[attr] = (
-                                float(raw[0]) if hasattr(raw, "__len__") else float(raw))
-                    for s in sensors_on_dev:
-                        vals[s["label"]] = attr_to_val[s["attribute"]]
-                    break
-                except Exception as e:
-                    if attempt == MAX_RETRIES:
-                        lg(f"⚠ Read {dev_path} {unique_attrs}: {e}")
-                        for s in sensors_on_dev: vals[s["label"]] = np.nan
-                    else:
-                        time.sleep(RETRY_DELAY)
-
-        t_elapsed = t_trigger + int_time / 2.0
-        vals[X_TIME] = t_elapsed
-        return vals, t_elapsed
 
     # ── Per-point acquire with retry + auto-pause ─────────────────────────────
     def _acquire_point_retry(self, devp, dev_sensors, trigger_devs, int_time,
@@ -1740,9 +1609,20 @@ class ScanRunner:
 
             prev = int(f["metadata"].attrs.get("points_acquired", 0))
             f["metadata"].attrs["points_acquired"] = prev + 1
+            self._write_fail_streak = 0
 
-        except Exception:
-            pass
+        except Exception as e:
+            # A failing point write means data loss (disk full, broken file
+            # handle) — never let the scan run on silently.
+            self._write_fail_streak += 1
+            if self._write_fail_streak == 1:
+                self._lg(f"⚠ HDF5 point write failed: {e}")
+            if self._write_fail_streak >= AUTO_PAUSE_THRESHOLD:
+                self._lg(f"⚠ {self._write_fail_streak} consecutive HDF5 write "
+                         f"failures — pausing scan")
+                self._st("⚠ AUTO-PAUSED — HDF5 writes failing (disk full?) — "
+                         "fix the issue and press Resume")
+                self._paused = True
 
     # ── Incremental HDF5: finalize ────────────────────────────────────────────
     def _finalize_hdf5(self, f, count, total, x_actual, t_actual,

@@ -534,5 +534,144 @@ class TestZigzag2D(unittest.TestCase):
         self.assertEqual(col2, [0, 1])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Actuator connection guard (no scan against a simulated stage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestActuatorGuard(unittest.TestCase):
+    """With TANGO available, an unreachable actuator must abort the scan
+    before any data is taken — a SimProxy stand-in would silently produce a
+    plausible-looking file of fake data."""
+
+    def _run_1d(self, fresh):
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = fresh
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        points = []
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "SPATIAL", "scan_x": True, "scan_y": False,
+                    "name": "t", "act1_start": 0.0, "act1_stop": 1.0,
+                    "act1_npts": 2, "act1_label": "X", "act1_unit": "nm",
+                    "act1_device": "dev://stage", "act1_attr": "x",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                fn = r.run({"point": lambda ix, iy, x, v: points.append(ix)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return fn, points
+
+    def test_unreachable_actuator_aborts_scan(self):
+        proxy = InstantProxy()
+        fn, points = self._run_1d(lambda p: (proxy, "connection refused"))
+        self.assertIsNone(fn, "Scan must not start against a sim actuator")
+        self.assertEqual(points, [], "No points must be acquired")
+
+    def test_reachable_actuator_runs(self):
+        proxy = InstantProxy(read_val=1.0)
+        fn, points = self._run_1d(lambda p: (proxy, None))
+        self.assertEqual(len(points), 2, "Healthy connection must scan normally")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Interleaved trace/retrace traversal (Cryo 2D path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestInterleaved2D(unittest.TestCase):
+    """Interleaved 2D now routes through _acquire_point_retry — verify the
+    traversal order and full grid coverage survived the rewiring."""
+
+    def _run_grid(self):
+        import tempfile
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda path: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        trace, retrace = [], []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "SPATIAL", "scan_x": True, "scan_y": True,
+                    "_interleaved_2d": True, "_interleave_axis": "x", "name": "t",
+                    "act1_start": 0.0, "act1_stop": 2.0, "act1_npts": 3,
+                    "act2_start": 0.0, "act2_stop": 1.0, "act2_npts": 2,
+                    "act1_label": "X", "act1_unit": "nm", "act2_label": "Y",
+                    "act1_device": "dev://stage", "act2_device": "dev://stage",
+                    "act1_attr": "x", "act2_attr": "y",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                r.run({"point":         lambda ix, iy, x, v: trace.append((iy, ix)),
+                       "point_retrace": lambda ix, iy, x, v: retrace.append((iy, ix))})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return trace, retrace
+
+    def test_trace_and_retrace_cover_grid(self):
+        trace, retrace = self._run_grid()
+        full = {(iy, ix) for iy in range(2) for ix in range(3)}
+        self.assertEqual(set(trace),   full, "Trace must visit every cell")
+        self.assertEqual(set(retrace), full, "Retrace must visit every cell")
+
+    def test_retrace_sweeps_reversed(self):
+        trace, retrace = self._run_grid()
+        self.assertEqual([ix for (iy, ix) in trace if iy == 0],   [0, 1, 2])
+        self.assertEqual([ix for (iy, ix) in retrace if iy == 0], [2, 1, 0],
+                         "Retrace must sweep X in reverse")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. HDF5 write-failure detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestWritePointFailure(unittest.TestCase):
+    """_write_point used to swallow every exception; now it logs the first
+    failure and auto-pauses after AUTO_PAUSE_THRESHOLD consecutive ones."""
+
+    def _broken_file(self):
+        f = MagicMock()
+        f.attrs.__getitem__.side_effect = RuntimeError("disk full")
+        return f
+
+    def _runner_with_logs(self):
+        r = _make_runner()
+        r._write_fail_streak = 0
+        r._log_lines = []
+        r._lg = r._log_lines.append
+        r._st = lambda *a: None
+        return r
+
+    def test_first_failure_is_logged(self):
+        r = self._runner_with_logs()
+        r._write_point(self._broken_file(), 0, 0, 0.0, 0.0, {}, [], "SPATIAL_X")
+        self.assertTrue(any("write failed" in m for m in r._log_lines))
+        self.assertFalse(r._paused)
+
+    def test_consecutive_failures_pause(self):
+        r = self._runner_with_logs()
+        for _ in range(AUTO_PAUSE_THRESHOLD):
+            r._write_point(self._broken_file(), 0, 0, 0.0, 0.0, {}, [], "SPATIAL_X")
+        self.assertTrue(r._paused, "Persistent write failure must pause the scan")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

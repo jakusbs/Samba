@@ -10,7 +10,8 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import X_TIME
-from hardware import get_proxy, safe_read, safe_write, demagnetize_magnet
+from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
+                      safe_write, demagnetize_magnet, TANGO_AVAILABLE)
 from core.scan.runner import ScanRunner
 
 
@@ -105,8 +106,91 @@ class ScanlistWorker(QThread):
         except Exception:
             self.error_msg.emit(traceback.format_exc())
 
+    # ── Field flip (polarity reversal between cycles) ─────────────────────────
+    def _flip_field(self, mag_p, mag_cur, mag_fld):
+        """Reverse the magnet current and wait for the field to settle.
+
+        Read/write failures are retried 3×; if still failing the scanlist
+        auto-pauses on the spot — running the next cycle at the wrong
+        polarity would corrupt the pos/neg analysis grouping.  On Resume
+        the flip is retried from scratch.
+        """
+        while not self._abort:
+            cur_val = err = None
+            for _ in range(3):
+                cur_val, err = safe_read(mag_p, mag_cur)
+                if cur_val is not None:
+                    break
+                time.sleep(1.0)
+            if cur_val is None:
+                self._pause_on_flip_error(f"field flip read failed: {err}")
+                continue
+            if abs(cur_val) <= 1e-6:
+                return   # nothing to flip
+            for _ in range(3):
+                err = safe_write(mag_p, mag_cur, -cur_val)
+                if not err:
+                    break
+                time.sleep(1.0)
+            if err:
+                self._pause_on_flip_error(f"field flip write failed: {err}")
+                continue
+            self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {-cur_val:.4f} A")
+            self._wait_field_settled(mag_p, mag_fld)
+            return
+
+    def _pause_on_flip_error(self, msg: str):
+        self.log_msg.emit(f"⚠ {msg} — pausing scanlist")
+        self.status_msg.emit("⚠ AUTO-PAUSED — field flip failed; "
+                             "fix the magnet and press Resume")
+        self.pause()
+        while self.is_paused() and not self._abort:
+            time.sleep(0.1)
+        if not self._abort:
+            self.log_msg.emit("  ↩ Resuming — retrying field flip…")
+
+    def _wait_field_settled(self, mag_p, mag_fld):
+        """Wait until the field stops changing (rate-of-change settles to ~0).
+
+        No target value is assumed — just wait for |Δfield/0.5s| to drop
+        below field_settle_rate (default 2 mT equivalent).
+        """
+        rate_thr = self.setup.get("field_settle_rate",    2.0)
+        timeout  = self.setup.get("field_settle_timeout", 300.0)
+        t_flip   = time.time()
+        last_log = t_flip
+        prev_fv, _ = safe_read(mag_p, mag_fld)
+        self.log_msg.emit(f"  Settling field (threshold {rate_thr} /0.5s)…")
+        time.sleep(0.5)
+        while not self._abort:
+            while self._paused and not self._abort:
+                time.sleep(0.1)
+            elapsed = time.time() - t_flip
+            if elapsed > timeout:
+                self.log_msg.emit(f"⚠ Field settle timeout after {timeout:.0f} s")
+                return
+            fv, ferr = safe_read(mag_p, mag_fld)
+            if ferr or fv is None or prev_fv is None:
+                time.sleep(0.5); prev_fv = fv; continue
+            rate = abs(fv - prev_fv)   # change over last 0.5 s
+            if time.time() - last_log >= 10.0:
+                self.log_msg.emit(f"  Waiting for field: {fv:+.4f}  "
+                                  f"(Δ={rate:.4f}/0.5s, {elapsed:.0f} s)")
+                last_log = time.time()
+            if rate <= rate_thr:
+                self.log_msg.emit(f"Field settled: {fv:+.4f}  "
+                                  f"(Δ={rate:.4f}/0.5s, {elapsed:.1f} s)")
+                return
+            prev_fv = fv
+            time.sleep(0.5)
+
     def _run_list(self):
-        relay_p = get_proxy(self.setup.get("relay_device", ""))
+        # Polarity devices must be real connections: a cached SimProxy would
+        # silently accept the relay/field flips and the whole scanlist would
+        # be recorded with wrong polarity bookkeeping.  fresh_proxy bypasses
+        # the cache; the guard below refuses to start if a flip is enabled
+        # but its device is unreachable.
+        relay_p, relay_err = fresh_proxy(self.setup.get("relay_device", ""))
 
         # Field flip device selection:
         # - samba_main: magnet_device (Beckhoff), write current (A), read field (T)
@@ -120,7 +204,22 @@ class ScanlistWorker(QThread):
             _mag_dev = self.setup.get("attodry_device", "")
             mag_cur  = self.setup.get("attodry_attr_field_set", "MagneticField")
             mag_fld  = self.setup.get("attodry_attr_field_rb",  "MagneticField")
-        mag_p = get_proxy(_mag_dev)
+        mag_p, mag_err = fresh_proxy(_mag_dev)
+
+        if TANGO_AVAILABLE:
+            problems = []
+            if self.relay_flip and is_sim_proxy(relay_p):
+                problems.append(f"relay '{self.setup.get('relay_device', '')}'"
+                                f" — {relay_err}")
+            if self.field_flip and is_sim_proxy(mag_p):
+                problems.append(f"magnet '{_mag_dev}' — {mag_err}")
+            if problems:
+                msg = ("Scanlist not started — polarity device(s) unreachable:\n  "
+                       + "\n  ".join(problems))
+                self.log_msg.emit(f"✗ {msg}")
+                self.error_msg.emit(msg)
+                self.scan_aborted.emit()
+                return
 
         relay_attr = self.setup.get("relay_attr", "switchvar")
         try:
@@ -150,54 +249,23 @@ class ScanlistWorker(QThread):
             # Skip the flip on cycle 0; flipping starts from cycle 1 onward.
             # Flip happens once per cycle, BEFORE trace AND retrace.
             if self.field_flip and i > 0:
-                cur_val, cur_err = safe_read(mag_p, mag_cur)
-                if cur_err:
-                    self.log_msg.emit(f"⚠ field flip read: {cur_err}")
-                elif cur_val is not None and abs(cur_val) > 1e-6:
-                    neg_val = -cur_val
-                    err = safe_write(mag_p, mag_cur, neg_val)
-                    if err:
-                        self.log_msg.emit(f"⚠ field flip write: {err}")
-                    else:
-                        self.log_msg.emit(f"Field flipped: {cur_val:.4f} A → {neg_val:.4f} A")
-                        # Wait until field stops changing (rate-of-change settles to ~0).
-                        # We don't assume a target value — just wait for |Δfield/0.5s|
-                        # to drop below field_settle_rate (default 1 mT equivalent).
-                        rate_thr = self.setup.get("field_settle_rate",    2.0)
-                        timeout  = self.setup.get("field_settle_timeout", 300.0)
-                        t_flip   = time.time()
-                        last_log = t_flip
-                        prev_fv, _ = safe_read(mag_p, mag_fld)
-                        self.log_msg.emit(
-                            f"  Settling field (threshold {rate_thr} /0.5s)…")
-                        time.sleep(0.5)
-                        while not self._abort:
-                            while self._paused and not self._abort:
-                                time.sleep(0.1)
-                            elapsed = time.time() - t_flip
-                            if elapsed > timeout:
-                                self.log_msg.emit(
-                                    f"⚠ Field settle timeout after {timeout:.0f} s")
-                                break
-                            fv, ferr = safe_read(mag_p, mag_fld)
-                            if ferr or fv is None or prev_fv is None:
-                                time.sleep(0.5); prev_fv = fv; continue
-                            rate = abs(fv - prev_fv)   # change over last 0.5 s
-                            if time.time() - last_log >= 10.0:
-                                self.log_msg.emit(
-                                    f"  Waiting for field: {fv:+.4f}  "
-                                    f"(Δ={rate:.4f}/0.5s, {elapsed:.0f} s)")
-                                last_log = time.time()
-                            if rate <= rate_thr:
-                                self.log_msg.emit(
-                                    f"Field settled: {fv:+.4f}  "
-                                    f"(Δ={rate:.4f}/0.5s, {elapsed:.1f} s)")
-                                break
-                            prev_fv = fv
-                            time.sleep(0.5)
+                self._flip_field(mag_p, mag_cur, mag_fld)
+                if self._abort: break
 
-            v, _ = safe_read(mag_p, mag_fld)
-            field_T = v if v is not None else 0.0
+            # Field value recorded into the scanlist txt — the analysis
+            # pipeline derives polarity from sign(field_T), so a 0.0
+            # fallback would silently corrupt the pos/neg grouping.
+            # Record NaN instead so a failed readback is visible downstream.
+            field_T, verr = float('nan'), None
+            for _ in range(3):
+                v, verr = safe_read(mag_p, mag_fld)
+                if v is not None:
+                    field_T = v; break
+                time.sleep(1.0)
+            if field_T != field_T:   # NaN check
+                self.log_msg.emit(
+                    f"⚠ Field readback failed ({verr}) — recording NaN field "
+                    f"for cycle {i+1} (check polarity grouping in analysis)")
 
             # ── Run all directions in this cycle (trace, then retrace if present) ──
             for sc_template in self.cfg_list:

@@ -5,7 +5,6 @@ safe read/write helpers with optional timeout, and demagnetization utility.
 """
 import logging
 import threading
-import concurrent.futures
 import numpy as np
 from typing import Dict, Optional, Tuple
 
@@ -15,11 +14,34 @@ log = logging.getLogger(__name__)
 # Scan workers and readback threads can override on individual calls.
 DEFAULT_IO_TIMEOUT: Optional[float] = 10.0
 
-# Shared executor for timeout-wrapped device I/O.  A small fixed pool is
-# enough because each call blocks at most DEFAULT_IO_TIMEOUT seconds.
-_io_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=8, thread_name_prefix="hw_io"
-)
+
+def _call_with_timeout(fn, timeout: float):
+    """Run fn() on a fresh daemon thread, waiting at most *timeout* seconds.
+
+    One thread per call (instead of a shared pool): a call that hangs inside
+    a dead device's socket leaks exactly one daemon thread but can never
+    starve other hardware I/O.  With a fixed pool, a timed-out future leaves
+    its worker thread blocked forever, and a handful of hung calls would
+    queue every subsequent safe_read/safe_write in the application behind
+    them.  Thread startup (~0.1 ms) is negligible against network I/O.
+    """
+    out: Dict = {}
+    done = threading.Event()
+
+    def _wrap():
+        try:
+            out['v'] = fn()
+        except Exception as e:
+            out['e'] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=_wrap, daemon=True, name="hw_io").start()
+    if not done.wait(timeout):
+        raise TimeoutError
+    if 'e' in out:
+        raise out['e']
+    return out.get('v')
 
 try:
     import tango
@@ -175,10 +197,9 @@ def safe_write(proxy, attr: str, val,
             return str(e)
 
     try:
-        fut = _io_executor.submit(_do)
-        fut.result(timeout=timeout)
+        _call_with_timeout(_do, timeout)
         return None
-    except concurrent.futures.TimeoutError:
+    except TimeoutError:
         return f"timeout after {timeout}s writing '{attr}'"
     except Exception as e:
         return str(e)
@@ -203,9 +224,8 @@ def safe_read(proxy, attr: str,
             return None, str(e)
 
     try:
-        fut = _io_executor.submit(_do)
-        return fut.result(timeout=timeout), None
-    except concurrent.futures.TimeoutError:
+        return _call_with_timeout(_do, timeout), None
+    except TimeoutError:
         return None, f"timeout after {timeout}s reading '{attr}'"
     except Exception as e:
         return None, str(e)
@@ -224,9 +244,8 @@ def safe_read_str(proxy, attr: str,
             return None, str(e)
 
     try:
-        fut = _io_executor.submit(_do)
-        return fut.result(timeout=timeout), None
-    except concurrent.futures.TimeoutError:
+        return _call_with_timeout(_do, timeout), None
+    except TimeoutError:
         return None, f"timeout after {timeout}s reading '{attr}'"
     except Exception as e:
         return None, str(e)
