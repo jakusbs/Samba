@@ -1736,3 +1736,145 @@ view controls. All changes are self-contained in the plot widgets — no
   colour maps, never 1D line plots; `plot_2d` honours `self._aspect`.
 
 Shared modules → both Samba_main and Cryo get all of the above.
+
+---
+
+## 28. Recent Changes (June 2026) — Hardware Metadata, Data Browser & Layout
+
+### Hardware metadata snapshot expansion
+
+`_read_hw_snapshot()` (both apps) now captures the full hardware window at scan start:
+- **Samba_main:** adds Keithley I-out readback (`hw_keithley_current_mA`) and magnet coil
+  current (`hw_magnet_current_A`, skipped for FIELD scans where it is swept).
+- **Cryo:** adds Keithley I-out, VTI temperature (`hw_vti_temp_K`) and magnet temperature
+  (`hw_magnet_temp_K`) — the AttoDRY readbacks shown in the panel.
+- New keys flow through the `runner.py` HDF5 metadata allowlist, the data-browser metadata
+  preview (`_HW_DISPLAY` in `core/data_browser.py`) and the lab-notebook columns
+  (`core/lab_notebook.py`). Recorded regardless of whether the device is in the measured list.
+
+### Scanlist runs now save metadata + lab-notebook entries (bug fix)
+
+Single scans called `_read_hw_snapshot()` and appended a notebook row on finish, but the
+**scanlist** start paths did neither — so scanlist HDF5 files lacked `hw_*` metadata and 2D
+map scans run via scanlist produced no CSV rows at all.
+- Fix injects the hw snapshot into the scanlist config(s) before constructing
+  `ScanlistWorker`, and adds a new `_on_sl_scan_done(idx, fn)` handler that appends one
+  lab-notebook entry per finished scanlist file.
+- Cryo's trace/retrace case indexes `cfg_list[idx % len(cfg_list)]` to log the matching
+  per-direction config.
+
+### Live 2D display-sensor switch (Samba_main)
+
+- `_on_display_changed` now updates `_current_scan_cfg["display_sensor"]` so newly acquired
+  points feed the newly-selected sensor (previously new points kept filling the original
+  frozen sensor).
+- `RightPanel.set_display` blocks signals so a programmatic restore (config load / setup
+  switch) can't redirect the live map — only genuine user combo changes do.
+- Cryo already read the display sensor live per-point, so it was unaffected.
+
+### Data browser
+
+- **Remember last detector:** tracks the last user-selected Y channel and defaults to it
+  when opening another file that has it (falls back to first sensor otherwise).
+- **Colormap picker:** a "Cmap:" combo (populated from `config.COLORMAPS`) sits next to the
+  X/Y/2D-map controls; selecting one re-plots the current 2D map live via
+  `_on_combo_changed` and is passed to `BrowserPlotWidget.plot_2d`.
+
+### 2D plotting layout
+
+- More colormaps in both `config.py` files (diverging set first for signed MOKE data, then
+  sequential, then classic).
+- `Live2DWidget` and `BrowserPlotWidget` switched to `constrained_layout` (aspect=auto, no
+  `tight_layout`) so the map fills the window and no longer collapses to a narrow strip on
+  resize; `clear()` also removes the stale colorbar.
+- **Note (correction to §27):** the "Equal aspect" toggle added in §27 was removed here —
+  `constrained_layout` supersedes it.
+
+### Internal widget layout
+
+- `ActuatorGroup` (both apps): Label/Unit/Attr fields changed from `setFixedWidth` to
+  `setMinimumWidth` + column stretch so they expand and show full text; device-path tooltip
+  added.
+- `hardware_panel.py` / Cryo `panels.py`: range combo `setFixedWidth(70)` → `setMinimumWidth(84)`,
+  Set button `30` → `44` (matches `keithley_mixin.py`).
+- `setup_defaults.py` / `defaults_panel.py`: read-only label/unit fields use `setMinimumWidth`.
+- Vertical splitter initial ratio `600/300` → `500/400` (and 0.55 → 0.50 resize ratio) in
+  both apps, giving the trajectory / scanlist panel adequate default height.
+
+---
+
+## 29. Recent Changes (June 2026) — ZI/ZI2 Lock-in Server v5 Migration (thread-safe)
+
+All four MFLI lock-in device servers — Samba_main **ZI** (dev4855, Green) + **ZI2**
+(dev30933, IR) and **Cryo ZI1/ZI2** — were migrated from the old `PyTango.Device_4Impl`
+(v4) to the modern `tango.server.Device` (v5) and made fully thread-safe. TANGO attribute
+names (`x1`–`y4`, `settlingtime`, `integrationtime`, `Start`, …) are **unchanged**, so the
+Samba client needs no changes. This supersedes the threading model described in §6 (the
+poll-and-average acquisition logic there is otherwise still accurate).
+
+### Root cause (the bug this fixes)
+
+The class-level `ThreadZI.lock` was **defined but never used** — every `ziDAQServer`
+(`daq.*`) call was unguarded. `ziDAQServer` is not thread-safe: concurrent access between
+the acquisition thread's `poll()` and an attribute read (`settlingtime` / `timeconstant` /
+`filterorder`, e.g. from Samba's HW-panel readback or Jive) corrupts the connection. That
+single defect caused **both** reported symptoms:
+- **Intermittent server crashes** — which is why Samba's client-side reads were disabled
+  during scans in the first place.
+- **Idle-server zero outputs** — once reads were disabled there was no API activity between
+  `Start()` calls, so LabOne paused sample delivery (see below).
+
+### v4 → v5 server changes (`cbe971e`, `62a1b7a`)
+
+Each v5 server adds:
+- `daq = None` init + a `_require_daq()` guard
+- a real `self._daq_lock` serializing **all** `daq.*` paths
+- `always_executed_hook` → `FAULT` state when disconnected
+- `delete_device` cleanup
+- a `Reconnect` command
+- an `AllowVersionMismatch` property + `_connect_daq()` helper
+- `_refresh_cached_settings()` warms the tc/order/settling caches at init and on `Reconnect`
+
+### Idle-server zero-output fix (`bac5422`)
+
+LabOne pauses sample delivery when the ziPython API connection has been idle. Without Jive
+polling, the first `daq.poll()` after an idle period returns an **empty dict**; with short
+integration times (< ~200 ms) the server doesn't catch up, all demod paths are missing, the
+`KeyError` fallback fires, and outputs silently become `0`.
+- **Fix:** a single `daq.getDouble('/<device>/demods/0/rate')` immediately **before** the
+  flush poll in all six Thread files wakes the data server and guarantees streaming is active
+  before flush+collect.
+- A `warn_stream` now fires when the collect window returns no data at all, so the problem is
+  visible in TANGO logs instead of producing silent zeros.
+
+### Non-blocking filter reads (`b39cf81`)
+
+`timeconstant` / `filterorder` / `settlingtime` are read-only filter-info attributes that are
+**constant during a scan**, so the cached value is already correct.
+- The three getters now use a **non-blocking** `acquire(blocking=False)`: refresh from hardware
+  when the lock is free (idle / between points), otherwise return the last cached value
+  immediately. A read during an active acquisition **never blocks**.
+- **Writes** (`Amplitude` / frequency / samplingrate / phase) keep the **blocking** lock — a
+  write must reach the hardware. `_settling_time()` (used by `integrationtime.write`
+  validation) also stays blocking, as that path runs between scans.
+
+### HW-panel reads during scans re-enabled (`28b7c57`)
+
+The hardware panel used to disable its ZI/Keithley **Read** buttons and skip `refresh()`
+during a scan — a workaround for the single-threaded v4 server (a read would block inside the
+server while a poll was running, piling the scan's state-poller requests into `IMP_LIMIT`
+CORBA errors). The v5 servers remove that root cause (lock-serialized + non-blocking filter
+reads), so:
+- `set_scan_running()` now just tracks the flag (no longer disables the buttons)
+- `refresh()` no longer early-returns during a scan
+- The hardware window stays **live and readable mid-measurement**
+- Applied to both `HardwarePanel` (Samba_main) and `CryoHardwarePanel` (Cryo); Cryo's
+  Keithley/AttoDRY are separate devices already polled live by `ReadbackWorker`
+
+### Installers
+
+- The `install_ZI_DAQ.sh` / `install_ZI2_DAQ.sh` sed patches were updated from the old
+  `from Thread… import*` pattern (which no longer matched the v5 explicit import) to the
+  robust `^from Thread… import Thread…$` → relative-import form.
+- `zhinst` pinned to `>=24,<26` across all four install scripts.
+- Packaged `ZI_DAQ/` / `ZI2_DAQ/` copies regenerated to match (relative import).
