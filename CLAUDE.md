@@ -232,6 +232,13 @@ If no trigger devices exist, the engine falls back to `time.sleep(int_time)` ins
 ### FIELD scan specifics
 
 - Magnet current written per point: `safe_write(mag_proxy, mag_cur_attr, x_pos)`
+- **Ramp wait:** after the settle sleep, the engine polls the magnet device and
+  waits while it reports state `MOVING` (the AttoDRY holds MOVING until the
+  written field/temperature setpoint is within tolerance), up to
+  `field_settle_timeout` (setup key, default 300 s). `settle_time` is applied
+  once more after arrival. Devices without MOVING feedback (Beckhoff magnet)
+  cost exactly one `state()` call per point. Temperature sweeps use the same
+  path and therefore also wait for arrival.
 - Field readback: `safe_read(mag_proxy, mag_fld_attr)` with fallback estimate `0.15 × current`
 - Segmented ranges: `field_segments = [[start, stop, npts], ...]` concatenated via `np.concatenate([linspace(...)])`
 - Auto-demagnetize after scan completes (unless `demagnetize_after_scan == False` for superconducting magnets)

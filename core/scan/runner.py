@@ -247,6 +247,11 @@ class ScanRunner:
             # field readback fails mid-scan.  Override per setup if the
             # magnet calibration differs.
             field_per_amp = float(setup.get("field_per_amp_estimate", 0.15))
+            # Devices with motion feedback (the AttoDRY superconducting
+            # magnet — also the actuator for temperature sweeps) hold state
+            # MOVING while ramping to the setpoint; wait up to this long per
+            # point.  Same setup key as the scanlist field-flip settle.
+            field_move_timeout = float(setup.get("field_settle_timeout", 300.0))
             hdf_scan = "FIELD"
             fast_attr = None
         elif scan_type == "SPATIAL" and scan_x and scan_y:
@@ -708,6 +713,12 @@ class ScanRunner:
                         if _mag_err:
                             lg(f"⚠ Magnet write failed at {x_pos:.4g} A: {_mag_err}")
                         time.sleep(max(cfg["settle_time"], 0.05))
+                        if self._wait_not_moving(mag_p, field_move_timeout, lg, st):
+                            # The device was ramping (superconducting magnet /
+                            # temperature sweep) — apply the settle once more
+                            # now that the setpoint has actually been reached.
+                            if cfg["settle_time"] > 0:
+                                time.sleep(cfg["settle_time"])
                         v, _ = safe_read(mag_p, mag_fld_attr)
                         x_read = v if v is not None else x_pos * field_per_amp
                     elif hdf_scan == "TIME":
@@ -1358,6 +1369,50 @@ class ScanRunner:
             if not self._abort:
                 lg(f"  ↩ Resuming — retrying {x_lbl}={x_read:.4g}…")
         return vals, t_trigger
+
+    # ── Setpoint ramp wait (devices with MOVING feedback) ─────────────────────
+    def _wait_not_moving(self, proxy, timeout: float, lg, st) -> bool:
+        """Wait while the device reports state MOVING.
+
+        The AttoDRY holds MOVING until the written field/temperature setpoint
+        is within tolerance (its AttoDRYCheck thread), so FIELD and
+        temperature sweeps block here until the superconducting magnet has
+        actually arrived.  Devices without motion feedback (the Beckhoff
+        magnet is always ON) cost exactly one state() call.
+
+        Returns True if any waiting happened.  Honors abort and pause; logs
+        a warning and proceeds on timeout so a stuck device cannot hang the
+        scan forever.
+        """
+        if not TANGO_AVAILABLE:
+            return False
+        try:
+            if proxy.state() != tango.DevState.MOVING:
+                return False
+        except Exception:
+            return False
+
+        t_wait = time.time()
+        lg(f"── Setpoint ramp: device MOVING — waiting "
+           f"(timeout {timeout:.0f} s) ──")
+        while not self._abort:
+            while self._paused and not self._abort:
+                time.sleep(0.1)
+            try:
+                if proxy.state() != tango.DevState.MOVING:
+                    return True
+            except Exception as e:
+                lg(f"⚠ State poll during ramp failed: {type(e).__name__} "
+                   f"— continuing with point")
+                return True
+            elapsed = time.time() - t_wait
+            if elapsed > timeout:
+                lg(f"⚠ Device still MOVING after {timeout:.0f} s "
+                   f"— continuing with point")
+                return True
+            st(f"Ramping to setpoint… {elapsed:.0f} s")
+            time.sleep(0.5)
+        return True
 
     # ── Stage movement ────────────────────────────────────────────────────────
     def _move(self, proxy, attr: str, target: float, timeout: float,

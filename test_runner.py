@@ -674,7 +674,76 @@ class TestWritePointFailure(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. Setup-lock stale-stamp parsing
+# 9. FIELD scan waits for ramping magnets (MOVING state)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFieldRampWait(unittest.TestCase):
+    """FIELD scans (and temperature sweeps, which use the same path) must
+    wait while the magnet device reports MOVING — the AttoDRY superconducting
+    magnet ramps for minutes, and reading earlier records the field mid-ramp."""
+
+    class RampProxy:
+        RAMP_S = 0.06   # device stays MOVING this long after a setpoint write
+
+        def __init__(self):
+            self._until = 0.0
+            self.violations = 0
+            self.ramps = 0
+
+        def write_attribute(self, attr, val):
+            self._until = time.time() + self.RAMP_S
+            self.ramps += 1
+
+        def state(self):
+            return 'MOVING' if time.time() < self._until else 'ON'
+
+        def read_attribute(self, attr):
+            if time.time() < self._until:
+                self.violations += 1
+            r = MagicMock(); r.value = 0.42
+            return r
+
+    def test_field_scan_waits_for_ramp(self):
+        import tempfile
+        mag = self.RampProxy()
+        zi  = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+                 _runner_mod.safe_write, _runner_mod.safe_read)
+        _runner_mod.fresh_proxy    = lambda p: ((mag if 'mag' in p else zi), None)
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        _runner_mod.safe_write     = lambda p, a, v, **kw: p.write_attribute(a, v)
+        _runner_mod.safe_read      = lambda p, a, **kw: (p.read_attribute(a).value, None)
+        points = []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "FIELD", "scan_x": True, "scan_y": False,
+                    "name": "t", "field_start_A": 0.0, "field_stop_A": 1.0,
+                    "field_npts": 2, "field_device": "dev://mag",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td,
+                                     "field_settle_timeout": 5.0})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                r.run({"point": lambda ix, iy, x, v: points.append(x)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+             _runner_mod.safe_write, _runner_mod.safe_read) = _orig
+        self.assertEqual(len(points), 2)
+        self.assertEqual(mag.ramps, 2, "one setpoint write per point")
+        self.assertEqual(mag.violations, 0,
+                         "field must never be read while the magnet is MOVING")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Setup-lock stale-stamp parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestSetupLockStamp(unittest.TestCase):
