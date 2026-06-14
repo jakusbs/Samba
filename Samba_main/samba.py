@@ -1294,7 +1294,7 @@ class MainWindow(QMainWindow):
             self.live_tabs.setCurrentIndex(0)
         else:
             if   mode == "DC_HYST": xl, xu = "Field", "mT"
-            elif mode == "FIELD":   xl, xu = "Field", "T"
+            elif mode == "FIELD":   xl, xu = cfg.get("field_x_label", "Field"), cfg.get("field_x_unit", "mT")
             elif mode == "1D_Y":    xl, xu = cfg["act2_label"], cfg["act2_unit"]
             elif mode == "TIME":    xl, xu = "Time", "s"
             else:                   xl, xu = cfg["act1_label"], cfg["act1_unit"]

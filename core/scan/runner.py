@@ -242,10 +242,21 @@ class ScanRunner:
             # Per-config current/write attr override (falls back to setup)
             mag_cur_attr = (cfg.get("field_current_attr", "")
                             or setup.get("magnet_current_attr", "current_polar"))
-            mag_fld_attr = setup.get("magnet_field_attr", "field_polar_corr")
-            # Rough field-per-current estimate (T/A), used only when the
-            # field readback fails mid-scan.  Override per setup if the
-            # magnet calibration differs.
+            # Readback attr — what we plot as the actual x.  Per-scan override
+            # so a temperature sweep reads temperature back (not the field);
+            # falls back to the setup's magnet field attr.
+            mag_fld_attr = (cfg.get("field_readback_attr", "").strip()
+                            or setup.get("magnet_field_attr", "field_polar_corr"))
+            # The commanded setpoint unit may differ from the readback unit
+            # (write current [A] → read field [mT]) or match it (write
+            # temperature [K] → read temperature [K]).  When they match, a
+            # failed readback falls back to the setpoint itself rather than
+            # the current→field estimate below.
+            field_sp_unit = cfg.get("field_setpoint_unit", x_unit)
+            field_same_quantity = (field_sp_unit == x_unit
+                                   or mag_fld_attr == mag_cur_attr)
+            # Rough readback-per-setpoint estimate, used only when the
+            # readback fails mid-scan on a derived-quantity scan (current→field).
             field_per_amp = float(setup.get("field_per_amp_estimate", 0.15))
             # Devices with motion feedback (the AttoDRY superconducting
             # magnet — also the actuator for temperature sweeps) hold state
@@ -720,7 +731,15 @@ class ScanRunner:
                             if cfg["settle_time"] > 0:
                                 time.sleep(cfg["settle_time"])
                         v, _ = safe_read(mag_p, mag_fld_attr)
-                        x_read = v if v is not None else x_pos * field_per_amp
+                        if v is not None:
+                            x_read = v
+                        elif field_same_quantity:
+                            # Read back what we wrote (temperature K, Cryo
+                            # field T): the setpoint is the best estimate.
+                            x_read = x_pos
+                        else:
+                            # current→field: scale the setpoint by the estimate
+                            x_read = x_pos * field_per_amp
                     elif hdf_scan == "TIME":
                         x_read = time.time() - t0
                     else:
@@ -1587,8 +1606,12 @@ class ScanRunner:
             if is_time:
                 _ds("time", nan, "Time", "s", "x")
             elif is_field:
-                _ds(ax_key + "_setpoint", x_plan, f"{x_lbl} (setpoint)", "A",     "x_setpoint")
-                _ds(ax_key,               nan,    "Field",               "T",     "x")
+                # Use the configured axis label/unit (not hardcoded Field/T/A)
+                # so field [mT/T] and temperature [K] sweeps are labelled
+                # truthfully, and the setpoint carries its own unit.
+                sp_unit = cfg.get("field_setpoint_unit", x_unit)
+                _ds(ax_key + "_setpoint", x_plan, f"{x_lbl} (setpoint)", sp_unit, "x_setpoint")
+                _ds(ax_key,               nan,    x_lbl,                  x_unit,  "x")
                 _ds("time",               nan,    "Time",                "s",     "time")
             else:
                 _ds(ax_key + "_setpoint", x_plan, f"{x_lbl} (setpoint)", x_unit, "x_setpoint")

@@ -770,5 +770,51 @@ class TestSetupLockStamp(unittest.TestCase):
         self.assertIsNone(self.sl._stamp_age_hours(None))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. FIELD/temperature x-axis units come from config (not hardcoded)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFieldAxisUnits(unittest.TestCase):
+    """_open_hdf5 must label the FIELD axis from field_x_label/unit +
+    field_setpoint_unit, so a temperature sweep is 'Temperature [K]' and a
+    Beckhoff field scan is 'Field [mT]' — not the old hardcoded Field/T/A."""
+
+    def _open(self, cfg_extra):
+        import tempfile, h5py
+        r = ScanRunner.__new__(ScanRunner)
+        r._abort = False; r._paused = False
+        cfg = {"name": "t", "integration_time": 0.1, "settle_time": 0.0,
+               "move_timeout": 15.0, "field_segments": [[0.0, 1.0, 4]]}
+        cfg.update(cfg_extra)
+        x_plan = np.linspace(0.0, 1.0, 4); y_plan = np.array([0.0])
+        with tempfile.TemporaryDirectory() as td:
+            fn = os.path.join(td, "t.h5")
+            f = r._open_hdf5(fn, x_plan, y_plan, [], cfg["field_x_label"],
+                             cfg["field_x_unit"], "FIELD", cfg)
+            self.assertIsNotNone(f, "open failed")
+            d = f["data"]
+            xkey = str(f.attrs["_x_key"])
+            actual = (d[xkey].attrs["label"], d[xkey].attrs["unit"])
+            sp = d[xkey + "_setpoint"].attrs["unit"]
+            f.close()
+        return xkey, actual, sp
+
+    def test_temperature_sweep_labels(self):
+        xkey, (lbl, unit), sp = self._open({
+            "field_x_label": "Temperature", "field_x_unit": "K",
+            "field_setpoint_unit": "K"})
+        self.assertEqual(xkey, "actuator_temperature")
+        self.assertEqual((lbl, unit), ("Temperature", "K"))
+        self.assertEqual(sp, "K", "setpoint must be K, not the old hardcoded A")
+
+    def test_beckhoff_field_is_mT(self):
+        xkey, (lbl, unit), sp = self._open({
+            "field_x_label": "Field", "field_x_unit": "mT",
+            "field_setpoint_unit": "A"})
+        self.assertEqual((lbl, unit), ("Field", "mT"),
+                         "Beckhoff field readback is mT, not the old hardcoded T")
+        self.assertEqual(sp, "A", "current setpoint is Ampere")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -239,7 +239,23 @@ If no trigger devices exist, the engine falls back to `time.sleep(int_time)` ins
   once more after arrival. Devices without MOVING feedback (Beckhoff magnet)
   cost exactly one `state()` call per point. Temperature sweeps use the same
   path and therefore also wait for arrival.
-- Field readback: `safe_read(mag_proxy, mag_fld_attr)` with fallback estimate `0.15 × current`
+- Field readback: `safe_read(mag_proxy, mag_fld_attr)`. The readback attribute,
+  the axis label/unit, and the setpoint unit are **config-driven** (not
+  hardcoded), so the two magnets and temperature sweeps are labelled truthfully:
+  - `field_readback_attr` — which attr to read as the actual x (default = setup
+    `magnet_field_attr`). A **temperature sweep** sets this to the temperature
+    attr so it reads temperature back, not `field_polar_corr` (which is what
+    caused the old "weird x" — reading a Beckhoff field attr off the AttoDRY,
+    failing, and plotting `setpoint × 0.15`).
+  - `field_x_label` / `field_x_unit` — the plotted/stored actual axis.
+    Samba_main field = `Field [mT]` (Beckhoff returns mT, matches DC-Hyst);
+    Cryo field = `Field [T]` (AttoDRY); Cryo temperature = `Temperature [K]`.
+  - `field_setpoint_unit` — unit of the commanded setpoint (`A` for current,
+    `T`/`K` when reading back the same quantity). When setpoint and readback
+    are the same quantity, a failed readback falls back to the **setpoint**
+    itself, not `× field_per_amp`.
+  - `_open_hdf5` and the live-plot x-axis both use these keys (previously both
+    hardcoded `Field`/`T`/`A`).
 - Segmented ranges: `field_segments = [[start, stop, npts], ...]` concatenated via `np.concatenate([linspace(...)])`
 - Auto-demagnetize after scan completes (unless `demagnetize_after_scan == False` for superconducting magnets)
 
