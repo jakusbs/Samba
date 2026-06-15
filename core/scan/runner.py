@@ -1013,11 +1013,25 @@ class ScanRunner:
 
             # /data/
             data_grp = hfile.create_group("data")
+            _used_keys = set()   # dataset names already taken in /data/
             d = data_grp.create_dataset("actuator_field", data=np.full(n_loop, np.nan))
             _wsa(d, "label", "Field"); _wsa(d, "unit", "mT"); _wsa(d, "role", "x")
+            _used_keys.add("actuator_field")
 
             for c in active_ch:
+                # Deduplicate dataset names: two enabled channels whose labels
+                # sanitize to the same key (e.g. two blank labels → "sensor",
+                # or a label colliding with "actuator_field") would otherwise
+                # make create_dataset raise "name already exists".  Store the
+                # resolved key on the channel for the write-back below.
                 key = self._hdf5_key(c["label"])
+                if key in _used_keys:
+                    n = 2
+                    while f"{key}_{n}" in _used_keys:
+                        n += 1
+                    key = f"{key}_{n}"
+                _used_keys.add(key)
+                c["_hdf5_key"] = key
                 ds  = data_grp.create_dataset(key, data=np.full(n_loop, np.nan))
                 _wsa(ds, "label",           c["label"])
                 _wsa(ds, "unit",            c.get("unit", "V"))
@@ -1136,10 +1150,12 @@ class ScanRunner:
                 # ── Write to HDF5 ──────────────────────────────────────────────
                 hfile["data"]["actuator_field"][:n_actual] = field_arr[:n_actual]
                 for c in active_ch:
-                    key = self._hdf5_key(c["label"])
+                    # Use the deduplicated key chosen at dataset creation.
+                    key = c.get("_hdf5_key", self._hdf5_key(c["label"]))
                     arr = result_arrays.get(c["label"], np.full(n_loop, np.nan))
                     n_a = min(len(arr), n_loop)
-                    hfile["data"][key][:n_a] = arr[:n_a]
+                    if key in hfile["data"]:
+                        hfile["data"][key][:n_a] = arr[:n_a]
                 # Scalar results → metadata attrs
                 for s, v in scalars.items():
                     hfile["metadata"].attrs[s] = v

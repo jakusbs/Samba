@@ -816,5 +816,51 @@ class TestFieldAxisUnits(unittest.TestCase):
         self.assertEqual(sp, "A", "current setpoint is Ampere")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. DC hysteresis HDF5 — duplicate channel labels must not crash file creation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDcHystDuplicateLabels(unittest.TestCase):
+    """Two enabled hyst channels whose labels sanitize to the same dataset key
+    used to raise 'Unable to create dataset (name already exists)'. They must
+    be deduplicated like the spatial/field path."""
+
+    def _run(self, channels):
+        import tempfile, h5py
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "t.h5"
+        msgs = []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "t",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_channels": channels, "sensors": []}
+                r = ScanRunner(cfg, {"save_dir": td})
+                # Abort immediately after file creation so we only test _open path
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()
+                fn = r.run({"status": lambda m: msgs.append(m),
+                            "log": lambda m: msgs.append(m)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return msgs
+
+    def test_duplicate_blank_labels_do_not_crash(self):
+        chans = [{"label": "", "attr": "result1", "enabled": True, "y_axis": "Y1"},
+                 {"label": "", "attr": "result2", "enabled": True, "y_axis": "Y2"}]
+        msgs = self._run(chans)
+        self.assertFalse(any("already exists" in m for m in msgs),
+                         "duplicate labels must be deduplicated, not crash: " + repr(msgs))
+
+    def test_identical_labels_do_not_crash(self):
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True, "y_axis": "Y1"},
+                 {"label": "MOKE", "attr": "result5", "enabled": True, "y_axis": "Y2"}]
+        msgs = self._run(chans)
+        self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
