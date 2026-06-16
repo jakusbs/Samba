@@ -1,7 +1,7 @@
 # SAMBA — Developer Documentation
 
-**S**trnad & Goldenberg **A**pplication for **M**agnetism **B**ased **A**nalysis
-ETH Zürich — Intermag Lab | Creator: Jakub Strnad | Collaborator: Tobias Goldenberg
+**S**trnad & Goldenberger **A**pplication for **M**agnetism **B**ased **A**nalysis
+ETH Zürich — Intermag Lab | Creator: Jakub Strnad | Collaborator: Tobias Goldenberger
 April 2026
 
 > The acronym (tagline `SAMBA_TAGLINE` in `core/play_intro.py`) is shown on the

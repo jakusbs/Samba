@@ -16,9 +16,9 @@ _CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # What SAMBA stands for — the official backronym, surfaced on the splash
 # screen and as the main-window tooltip so the meaning is always discoverable.
-SAMBA_TAGLINE = "Strnad & Goldenberg Application for Magnetism Based Analysis"
+SAMBA_TAGLINE = "Strnad & Goldenberger Application for Magnetism Based Analysis"
 SAMBA_ACRONYM = [
-    ("S", "trnad & Goldenberg"),
+    ("S", "trnad & Goldenberger"),
     ("A", "pplication"),
     ("M", "agnetism"),    # "for Magnetism" — preposition folded in below
     ("B", "ased"),
