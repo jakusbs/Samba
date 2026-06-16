@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 samba_cryo.py — Samba Cryo — ETH Zürich Intermag Lab
+
+SAMBA — Strnad & Goldenberger Application for Magnetism Based Analysis
+    S  trnad & Goldenberger
+    A  pplication
+       for
+    M  agnetism
+    B  ased
+    A  nalysis
+
 Cryostat-specific fork of Samba.
 
 Differences from standard samba.py:

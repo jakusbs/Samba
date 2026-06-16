@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 samba.py — Samba v3 — ETH Zürich Intermag Lab
+
+SAMBA — Strnad & Goldenberger Application for Magnetism Based Analysis
+    S  trnad & Goldenberger
+    A  pplication
+       for
+    M  agnetism
+    B  ased
+    A  nalysis
+
 Entry point: MainWindow wires together all modules.
 
 Requirements:  pip install pytango PyQt6 matplotlib h5py numpy
