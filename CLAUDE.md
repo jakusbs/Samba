@@ -1,8 +1,11 @@
 # SAMBA — Developer Documentation
 
-**Scanning MOKE Acquisition & Measurement Application**
+**S**trnad & Goldenberg **A**pplication for **M**agnetism **B**ased **A**nalysis
 ETH Zürich — Intermag Lab | Creator: Jakub Strnad | Collaborator: Tobias Goldenberg
 April 2026
+
+> The acronym (tagline `SAMBA_TAGLINE` in `core/play_intro.py`) is shown on the
+> startup splash screen and as the main-window tooltip in both apps.
 
 ---
 

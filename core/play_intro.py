@@ -14,6 +14,37 @@ from PyQt6.QtCore import Qt, QTimer, QEventLoop
 
 _CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# What SAMBA stands for — the official backronym, surfaced on the splash
+# screen and as the main-window tooltip so the meaning is always discoverable.
+SAMBA_TAGLINE = "Strnad & Goldenberg Application for Magnetism Based Analysis"
+SAMBA_ACRONYM = [
+    ("S", "trnad & Goldenberg"),
+    ("A", "pplication"),
+    ("M", "agnetism"),    # "for Magnetism" — preposition folded in below
+    ("B", "ased"),
+    ("A", "nalysis"),
+]
+
+
+def _draw_tagline(pixmap: QPixmap):
+    """Paint the SAMBA tagline along the bottom of the splash pixmap, with a
+    subtle shadow so it stays legible over any background artwork."""
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    f = QFont("Segoe UI", 11)
+    f.setItalic(True)
+    p.setFont(f)
+    rect = pixmap.rect().adjusted(0, 0, 0, -14)
+    flags = Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter
+    # drop shadow
+    p.setPen(QColor(0, 0, 0, 160))
+    p.drawText(rect.adjusted(1, 1, 1, 1), flags, SAMBA_TAGLINE)
+    # foreground
+    p.setPen(QColor("#cdd6f4"))
+    p.drawText(rect, flags, SAMBA_TAGLINE)
+    p.end()
+
+
 
 def _asset(name, asset_dir=None):
     """Resolve asset path relative to asset_dir (or this file's directory)."""
@@ -45,6 +76,9 @@ def show_splash(app: QApplication, asset_dir: str = None) -> QSplashScreen:
         p.setFont(f)
         p.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "SAMBA v8")
         p.end()
+
+    # Always overlay the acronym tagline (on the real splash art or the fallback)
+    _draw_tagline(pixmap)
 
     splash = QSplashScreen(pixmap, Qt.WindowType.WindowStaysOnTopHint)
     splash.setStyleSheet("color: #a6adc8; font-size: 12px;")
