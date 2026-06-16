@@ -4,9 +4,6 @@
 ETH Zürich — Intermag Lab | Creator: Jakub Strnad | Collaborator: Tobias Goldenberger
 April 2026
 
-> The acronym (tagline `SAMBA_TAGLINE` in `core/play_intro.py`) is shown as the
-> main-window tooltip in both apps.
-
 ---
 
 ## 1. Overview

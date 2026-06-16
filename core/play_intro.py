@@ -14,10 +14,6 @@ from PyQt6.QtCore import Qt, QTimer, QEventLoop
 
 _CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# What SAMBA stands for — the official backronym, surfaced as the main-window
-# tooltip in both apps so the meaning is discoverable (not on the splash).
-SAMBA_TAGLINE = "Strnad & Goldenberger Application for Magnetism Based Analysis"
-
 
 
 def _asset(name, asset_dir=None):

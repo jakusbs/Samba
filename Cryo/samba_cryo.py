@@ -323,7 +323,6 @@ class CryoMainWindow(QMainWindow):
         super().__init__()
         self._post_to_main.connect(lambda fn: fn())
         self.setWindowTitle("Samba Cryo — ETH Zürich")
-        self.setToolTip(play_intro.SAMBA_TAGLINE)
         # Modest minimum so the window fits smaller laptop screens; the larger
         # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
         self.setMinimumSize(1180, 640)
