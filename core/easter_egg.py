@@ -46,6 +46,20 @@ class _KonamiFilter(QObject):
         return False   # never consume the event
 
     def _reveal(self):
+        # Terminal breadcrumb (visible when launched from a shell) + an
+        # always-visible status-bar line, so the egg is observable even if a
+        # window manager parks the dialog behind the main window.
+        print("\n🎉  SAMBA Konami code! — Somewhat Adequate, Mostly Buggy "
+              "Application 🐞\n", flush=True)
+        try:
+            sb = self._window.statusBar()
+            if sb is not None:
+                sb.showMessage(
+                    "🎉  SAMBA — Somewhat Adequate, Mostly Buggy Application  🐞",
+                    8000)
+        except Exception:
+            pass
+
         box = QMessageBox(self._window)
         box.setWindowTitle("SAMBA")
         box.setText("🎉  Konami code!  🎉")
@@ -56,7 +70,11 @@ class _KonamiFilter(QObject):
             f"(Officially: {_OFFICIAL}.)"
         )
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.show()   # modeless — never blocks a measurement
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._window._konami_box = box   # keep a reference alive
+        box.show()            # modeless — never blocks a measurement
+        box.raise_()
+        box.activateWindow()
 
 
 def install_easter_egg(window):
