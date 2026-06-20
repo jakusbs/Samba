@@ -1,7 +1,7 @@
 """
 easter_egg.py — a small hidden treat.
 
-Watches for the Konami code (↑ ↑ ↓ ↓ ← → ← → B A) anywhere in the app and
+Watches for the Konami code (↑ ↑ ↓ ↓ ← → ← →) anywhere in the app and
 reveals SAMBA's *unofficial* backronym.  The filter is installed on the
 QApplication and never consumes key events, so it cannot interfere with
 spin boxes, text fields or any normal typing.
@@ -15,8 +15,7 @@ _KONAMI = [
     Qt.Key.Key_Down, Qt.Key.Key_Down,
     Qt.Key.Key_Left, Qt.Key.Key_Right,
     Qt.Key.Key_Left, Qt.Key.Key_Right,
-    Qt.Key.Key_B,    Qt.Key.Key_A,
-]
+]   # the classic B-A ending is dropped — the eight arrows are enough
 
 _OFFICIAL = "Strnad & Goldenberger Application for Magnetism Based Analysis"
 _UNOFFICIAL = "Somewhat Adequate, Mostly Buggy Application"
