@@ -217,6 +217,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Samba v3 — ETH Zürich")
+        try:
+            from core.easter_egg import install_easter_egg
+            install_easter_egg(self)
+        except Exception:
+            pass
         # Modest minimum so the window fits smaller laptop screens; the larger
         # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
         self.setMinimumSize(1180, 640)
