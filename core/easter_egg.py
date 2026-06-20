@@ -44,25 +44,38 @@ class _KonamiFilter(QObject):
         super().__init__(window)
         self._window = window
         self._idx = 0
+        self._last_sig = None   # (key, timestamp) of the last counted press
 
     def eventFilter(self, obj, ev):
         # KeyPress arrives as a QKeyEvent; compare plain integer key codes
         # (ev.key() is an int; _KONAMI holds the enum .value ints).
         if ev is not None and ev.type() == QEvent.Type.KeyPress:
             try:
+                if ev.isAutoRepeat():
+                    return False        # ignore key held down
                 key = int(ev.key())
+                ts = int(ev.timestamp())
             except Exception:
-                key = None
-            if key is not None:
-                _dbg(f"key={key} want={_KONAMI[self._idx]} idx={self._idx}")
-                if key == _KONAMI[self._idx]:
-                    self._idx += 1
-                    if self._idx >= len(_KONAMI):
-                        self._idx = 0
-                        _dbg("sequence complete → reveal")
-                        self._reveal()
-                else:
-                    self._idx = 1 if key == _KONAMI[0] else 0
+                return False
+            # A single physical press is delivered to this application-wide
+            # filter several times as the event propagates up the widget
+            # tree.  Those copies share the event timestamp — count only the
+            # first, otherwise one press both resets and re-advances the
+            # sequence (net zero) and it can never complete.
+            sig = (key, ts)
+            if sig == self._last_sig:
+                return False
+            self._last_sig = sig
+
+            _dbg(f"key={key} ts={ts} want={_KONAMI[self._idx]} idx={self._idx}")
+            if key == _KONAMI[self._idx]:
+                self._idx += 1
+                if self._idx >= len(_KONAMI):
+                    self._idx = 0
+                    _dbg("sequence complete → reveal")
+                    self._reveal()
+            else:
+                self._idx = 1 if key == _KONAMI[0] else 0
         return False   # never consume the event
 
     def _reveal(self):
