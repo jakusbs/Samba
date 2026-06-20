@@ -82,13 +82,15 @@ class _KonamiFilter(QObject):
         print("\n🎉  SAMBA Konami code! — Somewhat Adequate, Mostly Buggy "
               "Application 🐞\n", flush=True)
         try:
+            # Plain text only — the Qt dialog font has no colour-emoji glyphs
+            # on most Linux setups, so emoji would render as empty boxes.
             box = QMessageBox(self._window)
             box.setWindowTitle("SAMBA")
-            box.setText("🎉  Konami code!  🎉")
+            box.setText("Konami code unlocked!")
             box.setInformativeText(
                 f"SAMBA also unofficially stands for:\n\n"
-                f"    {_UNOFFICIAL}  🐞\n\n"
-                f"…but you didn't hear that from us.\n"
+                f"    {_UNOFFICIAL}\n\n"
+                f"...but you didn't hear that from us.\n"
                 f"(Officially: {_OFFICIAL}.)"
             )
             box.setStandardButtons(QMessageBox.StandardButton.Ok)
