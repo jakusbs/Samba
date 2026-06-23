@@ -28,17 +28,14 @@ Status of the "see individual scans, kick one out of the average" feature:
    `_save_hyst_cycles`): on completion, `GetCycle(1..N)` → `/data/cycles`
    `[n_cycles, 7, n_loop]` (block 0 = field mT, 1..6 = result1..6). Best-effort;
    older servers without the commands simply produce no dataset. +4 tests.
-2. ⏳ **TODO — the real interactive UX.** Live overlay + per-cycle exclusion in
-   the DC-Hyst panel. **Design note (Jakub):** do *not* render N raw checkboxes —
-   with 40 cycles that's 40 boxes. Use a compact exclude control instead, e.g. an
-   "Exclude cycles: 3,7,12" line-edit (parse to a list) or a short scrollable list
-   with a fixed max-height. On change → `SetExcludedCycles` + `RecomputeAverage`
-   on the device, then repaint faint per-cycle traces + bold average. The plot
-   helper `Analysis/samba_io.plot_hyst_cycles` already does the overlay drawing
-   and can seed the widget's paint logic. Note the live `dc_loop` callback today
-   only carries the running average, not individual cycles — either read
-   `/data/cycles` after completion or accumulate per-cycle arrays as they arrive.
-   GUI-only; verify on the lab machine.
+2. 🚫 **NOT PLANNED (Jakub, this session).** A live in-acquisition exclusion UI
+   isn't needed: every cycle is now saved to `/data/cycles` (A.1) and outliers
+   can be dropped offline at analysis time via `hyst_cycle_average(exclude=)` /
+   `hyst_detect_outliers` (A.3). Acquisition keeps **all** cycles. If a live
+   overlay is ever revisited: do *not* render N raw checkboxes (40 cycles → 40
+   boxes) — use a compact "Exclude cycles: 3,7,12" line-edit or a fixed-height
+   scrollable list, on change call `SetExcludedCycles` + `RecomputeAverage` and
+   repaint; `Analysis/samba_io.plot_hyst_cycles` already does the overlay drawing.
 3. ✅ **DONE** — **Analysis** (`Analysis/samba_io.py`): `load_hyst_cycles`,
    `hyst_cycle_average(exclude=)`, `hyst_detect_outliers`, `plot_hyst_cycles`.
    scipy import made lazy so these stay numpy/h5py-only. +4 tests.
