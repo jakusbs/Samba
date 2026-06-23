@@ -1890,3 +1890,97 @@ reads), so:
   robust `^from Thread… import Thread…$` → relative-import form.
 - `zhinst` pinned to `>=24,<26` across all four install scripts.
 - Packaged `ZI_DAQ/` / `ZI2_DAQ/` copies regenerated to match (relative import).
+
+---
+
+## 30. Recent Changes (June 2026) — Reliability, X-Axis Units, Hysteresis & Easter Egg
+
+This batch came out of a full app review; all changes are on branch
+`claude/app-review-suggestions-jozwry` and run hardware-free unit tests via
+`python test_runner.py` (32 tests) + a GitHub Actions workflow.
+
+### Scan-engine reliability (`core/scan/runner.py`, `workers.py`)
+- **Sim-proxy guard**: actuator/magnet proxies use `fresh_proxy()`; when pytango
+  is available and a configured stage/magnet is unreachable, the scan **refuses
+  to start** instead of silently "moving" a cached `SimProxy` and recording fake
+  data. `ScanlistWorker` does the same for relay/magnet when relay/field flip is on.
+- **I/O timeout no longer starves**: `safe_read`/`safe_write` spawn one daemon
+  thread per call (was a fixed 8-thread pool whose slots a hung device could
+  permanently occupy).
+- **Dedup**: deleted `_trigger_poll_read` (158-line near-copy of `_do_acquire`);
+  the interleaved trace/retrace loops now use `_acquire_point_retry`, gaining the
+  same per-point retry + auto-pause as every other scan type. Trigger-recovery
+  factored into `_recover_trigger`.
+- **Polarity integrity** (`ScanlistWorker`): field flip retries 3× then
+  auto-pauses (was: logged + skipped → wrong polarity); failed field readback
+  records **NaN** (not `0.0`, which `sign()` turned into corrupted pos/neg grouping).
+- **HDF5 write failures** surface: `_write_point` logs the first failure and
+  auto-pauses after 5 consecutive (disk full / broken handle) instead of an
+  all-NaN file.
+- **Unit-aware `_move` tolerance**: position-mismatch warning is now ½ the scan
+  step in the axis' own units (was unit-blind `max(1 % target, 50)`).
+- **`_finalize_hdf5`** signature trimmed to the 3 args it uses; `ScanWorker.run`
+  emit-conditional unrolled.
+
+### Stale-lock recovery (`core/setup_lock.py`, new — shared)
+- Single shared implementation; `Samba_main/setup_lock.py` and `Cryo/setup_lock.py`
+  are re-exports. Lock stamps carry a full date+time; a lock older than
+  `STALE_LOCK_HOURS` (12 h) is treated as abandoned and taken over with a warning
+  (was: setup locked out until manual Jive clear). Legacy stamps without a date
+  are still honored as held.
+
+### FIELD scan waits for ramping magnets (`runner.py`)
+- After the settle sleep, FIELD scans poll the magnet device and wait while it
+  reports state `MOVING` (the AttoDRY superconducting magnet holds MOVING until
+  the written field/temperature setpoint is in tolerance), bounded by
+  `field_settle_timeout` (default 300 s, abort/pause-aware), then re-apply
+  `settle_time`. Beckhoff (no MOVING feedback) costs one `state()` call/point.
+  Temperature sweeps use the same path. **Pairs with the AttoDRY server fix** that
+  stops it being stuck-in-MOVING after a restart.
+
+### Config-driven FIELD / temperature / hysteresis x-axis units (`runner.py` + both apps)
+Fixes the "weird x-axis values". The FIELD path hardcoded `Field`/`T`/`A` in both
+`_open_hdf5` and the live plot, and always read back `setup["magnet_field_attr"]`:
+- Cryo temp sweep read `field_polar_corr` (a Beckhoff attr) off the AttoDRY →
+  failed → plotted `setpoint × 0.15`.
+- Samba_main field stored **mT** (Beckhoff returns mT) labelled as **T**.
+Now per-scan, config-driven (the two apps use **different magnets**):
+- `field_readback_attr` — attr read as the actual x (default = setup
+  `magnet_field_attr`). Temp sweep → temp attr; Cryo field → `MagneticField`
+  (AttoDRY R/W, read==write); Samba_main → `field_polar_corr` (mT).
+- `field_x_label` / `field_x_unit` — Samba_main `Field [mT]`, Cryo `Field [T]`,
+  Cryo temperature `Temperature [K]`. Used by both `_open_hdf5` and the live plot.
+- `field_setpoint_unit` — `A` for current, `T`/`K` when read-back is the same
+  quantity; same-quantity scans fall back to the setpoint (not `× field_per_amp`).
+- Old configs auto-upgrade: Samba_main migration v3→v4 + Cryo `_migrate_config`
+  backfill the keys with the right per-app values (scans always rebuild config
+  from the live panel, so running scans were never wrong — this fixes the
+  load-time label and any disk-replayed config).
+
+### DC-hyst HDF5 dedup (`runner.py`)
+- `_run_dc_hyst` deduplicates channel dataset names like `_open_hdf5` (suffix
+  `_2`, …). Two enabled channels whose labels sanitize to the same key (two blank
+  labels → `sensor`, identical names) no longer crash file creation with
+  "Unable to create dataset (name already exists)".
+
+### Device-server copies removed
+- `Samba_main/tango_devices/` and `Cryo/tango_device_cryo/` (~39 MB of duplicated
+  server source) deleted — all servers live in the separate **TANGO_Devices** repo,
+  which is ahead. Verified nothing imports them; the copies held no code missing
+  from TANGO_Devices.
+
+### SAMBA acronym + easter egg
+- The official backronym is documented in the `samba.py` / `samba_cryo.py` module
+  headers and the `CLAUDE.md` header: **S**trnad & Goldenberger **A**pplication for
+  **M**agnetism **B**ased **A**nalysis.
+- `core/easter_egg.py`: the Konami code (↑↑↓↓←→←→) reveals the unofficial
+  "Somewhat Adequate, Mostly Buggy Application". Application-wide event filter,
+  observes only (never consumes keys); dedupes propagated key deliveries by
+  `(key, timestamp)` and ignores auto-repeat; plain-text dialog (Linux Qt fonts
+  lack emoji glyphs). `SAMBA_EGG_DEBUG=1` logs to stderr.
+
+### Tests / CI
+- `test_runner.py` grew to 32 tests (actuator guard, interleaved traversal,
+  write-failure pause, FIELD ramp wait, field-axis units, DC-hyst dedup,
+  lock-stamp parsing). `.github/workflows/tests.yml` runs them on push/PR
+  (numpy + h5py only; Qt and tango are stubbed).
