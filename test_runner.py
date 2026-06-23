@@ -941,5 +941,103 @@ class TestDcHystCycleSave(unittest.TestCase):
         self.assertTrue(np.allclose(arr[2], 3.0))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. DC hysteresis — Analysis/samba_io.py reads /data/cycles round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RampCycleProxy:
+    """GetCycle(n): field ramps -10n..+10n, result1 = n + optional spike."""
+    def __init__(self, ncyc, blk, spike_cycle=None, spike_val=1000.0):
+        self.n, self.blk = ncyc, blk
+        self.spike_cycle, self.spike_val = spike_cycle, spike_val
+
+    def command_inout(self, cmd, *a):
+        if cmd == "GetNumberOfCycles":
+            return self.n
+        if cmd == "GetCycle":
+            n = a[0]
+            field = np.linspace(-10.0 * n, 10.0 * n, self.blk)
+            r1 = np.ones(self.blk) * (self.spike_val
+                                      if n == self.spike_cycle else float(n))
+            blocks = [field, r1] + [np.ones(self.blk) * n for _ in range(5)]
+            return np.concatenate(blocks).tolist()
+        raise Exception("bad command")
+
+
+class TestHystCycleRoundTrip(unittest.TestCase):
+    """A.1 writer (ScanRunner._save_hyst_cycles) ↔ A.3 reader
+    (Analysis/samba_io.load_hyst_cycles + re-average + outliers)."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Analysis'))
+        import samba_io as _sio
+        cls.sio = _sio
+
+    def _write(self, proxy, n_loop, channels):
+        import tempfile, h5py
+        r = _make_runner()
+        tmp = tempfile.mktemp(suffix='.h5')
+        f = h5py.File(tmp, 'w'); f.create_group('data')
+        r._save_hyst_cycles(f, proxy, channels, n_loop, _noop)
+        f.close()
+        return tmp
+
+    def test_roundtrip_shapes_labels_and_average(self):
+        import os as _os
+        chans = [{"label": "MOKE (R1)", "attr": "result1", "enabled": True},
+                 {"label": "R5 field",  "attr": "result5", "enabled": True}]
+        tmp = self._write(_RampCycleProxy(5, 8), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+        finally:
+            _os.remove(tmp)
+        self.assertIsNotNone(cyc)
+        self.assertEqual(cyc['n_cycles'], 5)
+        self.assertEqual(cyc['cube'].shape, (5, 7, 8))
+        self.assertEqual(cyc['labels'].get('result1'), "MOKE (R1)")
+        self.assertEqual(cyc['labels'].get('result5'), "R5 field")
+        # result1 of cycle n is filled with n → mean over all = 3.0
+        self.assertAlmostEqual(float(np.nanmean(cyc['result1'])), 3.0)
+        # exclude cycles 1 and 5 → average over {2,3,4}, result1 mean = 3.0
+        avg = self.sio.hyst_cycle_average(cyc, exclude=(1, 5))
+        self.assertEqual(avg['included'], [2, 3, 4])
+        self.assertAlmostEqual(float(np.nanmean(avg['result1'])), 3.0)
+
+    def test_missing_dataset_returns_none(self):
+        import tempfile, h5py, os as _os
+        tmp = tempfile.mktemp(suffix='.h5')
+        f = h5py.File(tmp, 'w'); f.create_group('data')
+        f['data'].create_dataset('actuator_field', data=np.zeros(8))
+        f.close()
+        try:
+            self.assertIsNone(self.sio.load_hyst_cycles(tmp))
+        finally:
+            _os.remove(tmp)
+
+    def test_outlier_detection_flags_spiked_cycle(self):
+        import os as _os
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True}]
+        # cycle 3 spikes far from the others → flagged as outlier
+        tmp = self._write(_RampCycleProxy(6, 8, spike_cycle=3), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+            outliers = self.sio.hyst_detect_outliers(cyc, 'result1', n_sigma=3.0)
+        finally:
+            _os.remove(tmp)
+        self.assertIn(3, outliers)
+
+    def test_all_excluded_raises(self):
+        import os as _os
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True}]
+        tmp = self._write(_RampCycleProxy(2, 8), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+            with self.assertRaises(ValueError):
+                self.sio.hyst_cycle_average(cyc, exclude=(1, 2))
+        finally:
+            _os.remove(tmp)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

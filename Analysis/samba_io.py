@@ -6,7 +6,8 @@ import os
 import warnings
 import numpy as np
 import h5py
-from scipy.interpolate import interp1d
+# scipy is imported lazily inside average_scans() so the loaders and the
+# DC-hysteresis cycle helpers stay usable with only numpy + h5py installed.
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,167 @@ def load_samba_h5(path: str) -> dict:
                 'metadata': {}, 'field_T': 0.0, 'temperature_K': None}
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# DC-hysteresis per-cycle data  (/data/cycles, written by ScanRunner)
+# ---------------------------------------------------------------------------
+
+_HYST_BLOCKS = ('field', 'result1', 'result2', 'result3',
+                'result4', 'result5', 'result6')
+
+
+def load_hyst_cycles(path: str) -> dict:
+    """Read the raw per-cycle DC-hysteresis half-loops from ``/data/cycles``.
+
+    The scan engine stores every retained cycle as a ``[n_cycles, 7, n_loop]``
+    cube (block 0 = field in mT, blocks 1..6 = result1..result6, positive half
+    then negative half).  This unpacks it into a convenient dict.
+
+    Returns ``None`` if the file has no per-cycle dataset (older files, or a
+    device server without the GetCycle commands).
+
+    Result dict::
+
+        {
+          'field':   np.ndarray [n_cycles, n_loop],   # mT
+          'result1': np.ndarray [n_cycles, n_loop], ... 'result6',
+          'cube':    np.ndarray [n_cycles, 7, n_loop],
+          'n_cycles': int,                # cycles actually present (not all-NaN)
+          'valid':    np.ndarray[bool] [n_cycles],
+          'labels':   {'result1': 'MOKE (R1)', ...},
+          'field_unit': 'mT',
+        }
+    """
+    path = str(path)
+    try:
+        with h5py.File(path, 'r') as f:
+            if 'data' not in f or 'cycles' not in f['data']:
+                return None
+            ds   = f['data']['cycles']
+            cube = np.array(ds, dtype=float)
+            attrs = dict(ds.attrs)
+    except Exception as e:
+        warnings.warn(f"load_hyst_cycles: could not open {path}: {e}")
+        return None
+
+    if cube.ndim != 3 or cube.shape[1] < 7:
+        warnings.warn(f"load_hyst_cycles: unexpected /data/cycles shape "
+                      f"{cube.shape} in {path}")
+        return None
+
+    # A cycle that failed to read at acquisition time stays all-NaN.
+    valid = ~np.all(np.isnan(cube.reshape(cube.shape[0], -1)), axis=1)
+
+    labels = {}
+    for k, v in attrs.items():
+        if k.startswith('channel_') and k.endswith('_label'):
+            res = k[len('channel_'):-len('_label')]      # e.g. 'result1'
+            labels[res] = v.decode() if isinstance(v, bytes) else str(v)
+
+    out = {
+        'cube':       cube,
+        'n_cycles':   int(valid.sum()),
+        'valid':      valid,
+        'labels':     labels,
+        'field_unit': (attrs.get('field_unit', b'mT').decode()
+                       if isinstance(attrs.get('field_unit'), bytes)
+                       else str(attrs.get('field_unit', 'mT'))),
+    }
+    for i, name in enumerate(_HYST_BLOCKS):
+        out[name] = cube[:, i, :]
+    return out
+
+
+def _included_mask(cyc: dict, exclude=()):
+    """Boolean [n_cycles] mask of valid, non-excluded cycles (1-based exclude)."""
+    valid = cyc['valid'].copy()
+    for n in (exclude or ()):
+        idx = int(n) - 1
+        if 0 <= idx < len(valid):
+            valid[idx] = False
+    return valid
+
+
+def hyst_cycle_average(cyc: dict, exclude=()) -> dict:
+    """Average the retained cycles, dropping 1-based cycle numbers in ``exclude``.
+
+    Mirrors the device's ``RecomputeAverage`` offline so a bad scan can be
+    kicked out of the average without re-measuring.  Returns a dict with
+    ``field`` and ``result1``..``result6`` each a 1-D ``[n_loop]`` array, plus
+    ``included`` (the 1-based cycle numbers used).
+    """
+    mask = _included_mask(cyc, exclude)
+    if not mask.any():
+        raise ValueError("hyst_cycle_average: every cycle is excluded/invalid")
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        avg = {name: np.nanmean(cyc[name][mask], axis=0)
+               for name in _HYST_BLOCKS}
+    avg['included'] = [i + 1 for i in range(len(mask)) if mask[i]]
+    return avg
+
+
+def hyst_detect_outliers(cyc: dict, channel: str = 'result1',
+                         n_sigma: float = 3.0) -> list:
+    """Flag outlier cycles by robust deviation of one channel's loop.
+
+    For each valid cycle, the RMS distance of its ``channel`` loop from the
+    per-point median across all valid cycles is computed.  Cycles whose RMS
+    distance exceeds ``median + n_sigma * 1.4826 * MAD`` are returned as a
+    sorted list of 1-based cycle numbers.  With < 3 valid cycles there is no
+    robust baseline, so an empty list is returned.
+    """
+    if channel not in cyc:
+        raise KeyError(f"hyst_detect_outliers: unknown channel {channel!r}")
+    valid = cyc['valid']
+    idxs  = np.where(valid)[0]
+    if len(idxs) < 3:
+        return []
+    loops = cyc[channel][idxs]                       # [n_valid, n_loop]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        median_loop = np.nanmedian(loops, axis=0)
+        rms = np.sqrt(np.nanmean((loops - median_loop) ** 2, axis=1))
+        med = np.nanmedian(rms)
+        mad = np.nanmedian(np.abs(rms - med))
+    thresh = med + n_sigma * 1.4826 * mad
+    if not np.isfinite(thresh) or mad == 0:
+        return []
+    return sorted(int(idxs[i]) + 1 for i in range(len(idxs)) if rms[i] > thresh)
+
+
+def plot_hyst_cycles(cyc: dict, channel: str = 'result1', exclude=(),
+                     ax=None, show_average: bool = True):
+    """Overlay each retained cycle's loop (faint) + the average (bold).
+
+    Excluded/invalid cycles are drawn dashed.  ``matplotlib`` is imported
+    lazily so the rest of this module stays usable without it.  Returns the
+    matplotlib Axes.
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+        _, ax = plt.subplots()
+    mask = _included_mask(cyc, exclude)
+    field, sig = cyc['field'], cyc[channel]
+    label = cyc['labels'].get(channel, channel)
+    for i in range(cyc['cube'].shape[0]):
+        if not cyc['valid'][i]:
+            continue
+        included = mask[i]
+        ax.plot(field[i], sig[i], lw=0.7,
+                alpha=0.6 if included else 0.25,
+                ls='-' if included else '--',
+                color='#89b4fa' if included else '#f38ba8',
+                label=None)
+    if show_average and mask.any():
+        avg = hyst_cycle_average(cyc, exclude)
+        ax.plot(avg['field'], avg[channel], lw=2.0, color='#cdd6f4',
+                label=f'average ({len(avg["included"])} cyc)')
+        ax.legend(fontsize=8)
+    ax.set_xlabel(f"Field [{cyc['field_unit']}]")
+    ax.set_ylabel(label)
+    return ax
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +499,7 @@ def average_scans(scans: list, channels: list, x_ref: np.ndarray = None) -> dict
             x_sorted = x_s[order]
             y_sorted = y_s[order]
             try:
+                from scipy.interpolate import interp1d
                 f_interp = interp1d(x_sorted, y_sorted,
                                     bounds_error=False,
                                     fill_value='extrapolate',
