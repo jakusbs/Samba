@@ -916,6 +916,78 @@ class ScanRunner:
 
         return result_arrays
 
+    def _save_hyst_cycles(self, hfile, hyst_p, active_ch: list,
+                          n_loop: int, lg) -> None:
+        """Read every retained cycle off the PyHysteresis device and store the
+        raw per-cycle half-loops in ``/data/cycles``.
+
+        The device retains each individual scan (``GetNumberOfCycles`` /
+        ``GetCycle(n)``); ``GetCycle`` returns a flat array of 7 blocks, each
+        ``2*NumberOfPoints`` (== ``n_loop``) long: field, result1..result6,
+        positive half then negative half.  We reshape to ``[7, n_loop]`` per
+        cycle and stack into a ``[n_cycles, 7, n_loop]`` dataset so a bad scan
+        can be inspected / excluded offline without re-measuring.
+
+        Best-effort: any failure is logged and swallowed — the averaged result
+        is already written, so the file is valid with or without this block.
+        Older device servers without the per-cycle commands simply yield no
+        dataset.
+        """
+        try:
+            try:
+                ncyc = int(hyst_p.command_inout("GetNumberOfCycles"))
+            except Exception as e:
+                lg(f"  (no per-cycle data: GetNumberOfCycles unavailable — {e})")
+                return
+            if ncyc < 1:
+                lg("  (no per-cycle data retained by device)")
+                return
+
+            cube = np.full((ncyc, 7, n_loop), np.nan)
+            kept = 0
+            for n in range(1, ncyc + 1):
+                if self._abort:
+                    break
+                try:
+                    flat = np.asarray(hyst_p.command_inout("GetCycle", n),
+                                      dtype=float).flatten()
+                except Exception as e:
+                    lg(f"  ⚠ GetCycle({n}) failed: {e}")
+                    continue
+                blk = len(flat) // 7
+                if blk < 1:
+                    lg(f"  ⚠ GetCycle({n}) too short ({len(flat)} vals)")
+                    continue
+                grid = flat[:7 * blk].reshape(7, blk)
+                m = min(blk, n_loop)
+                cube[n - 1, :, :m] = grid[:, :m]
+                kept += 1
+
+            if kept == 0:
+                lg("  ⚠ no cycles could be read — skipping /data/cycles")
+                return
+
+            data_grp = hfile["data"]
+            if "cycles" in data_grp:
+                del data_grp["cycles"]
+            ds = data_grp.create_dataset("cycles", data=cube)
+            # block index 0 = field (mT); 1..6 = result1..result6
+            _wsa(ds, "block_order",
+                 "field,result1,result2,result3,result4,result5,result6")
+            _wsa(ds, "field_unit", "mT")
+            _wsa(ds, "layout", "[cycle, block, point]")
+            ds.attrs["n_cycles"] = kept
+            # Map each enabled display channel to its result block (1..6) so
+            # the analysis / UI can pull the right slice without parsing labels.
+            for c in active_ch:
+                attr = str(c.get("attr", ""))
+                if attr.startswith("result") and attr[6:].isdigit():
+                    _wsa(ds, f"channel_{attr}_label", c.get("label", attr))
+            lg(f"  ✓ stored {kept}/{ncyc} raw cycle(s) → /data/cycles "
+               f"{cube.shape}")
+        except Exception as e:
+            lg(f"  ⚠ per-cycle save failed: {e}")
+
     # ── DC Hysteresis scan ────────────────────────────────────────────────────
     def _run_dc_hyst(self, cfg: dict, setup: dict, cbs: dict) -> Optional[str]:
         """
@@ -1159,6 +1231,9 @@ class ScanRunner:
                 # Scalar results → metadata attrs
                 for s, v in scalars.items():
                     hfile["metadata"].attrs[s] = v
+                # Raw per-cycle half-loops (best-effort; enables offline
+                # inspection / outlier exclusion without re-measuring).
+                self._save_hyst_cycles(hfile, hyst_p, active_ch, n_loop, lg)
                 _wsa(hfile, "scan_status",   "completed")
                 _wsa(hfile, "timestamp_end", datetime.now().isoformat())
                 hfile.attrs["duration_seconds"] = elapsed

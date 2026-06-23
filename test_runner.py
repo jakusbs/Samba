@@ -862,5 +862,84 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
         self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. DC hysteresis — raw per-cycle data saved to /data/cycles
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _CycleProxy:
+    """Fake PyHysteresis exposing GetNumberOfCycles / GetCycle(n).
+
+    Each GetCycle(n) returns 7 blocks of `blk` points (field + result1..6),
+    filled with the value `n` so each cycle is trivially identifiable.
+    """
+    def __init__(self, ncyc, blk, fail_get=()):
+        self._ncyc = ncyc
+        self._blk  = blk
+        self._fail = set(fail_get)
+
+    def command_inout(self, cmd, *a):
+        if cmd == "GetNumberOfCycles":
+            return self._ncyc
+        if cmd == "GetCycle":
+            n = a[0]
+            if n in self._fail:
+                raise Exception(f"simulated GetCycle({n}) failure")
+            return (np.ones(7 * self._blk, dtype=float) * float(n)).tolist()
+        raise Exception(f"unexpected command {cmd}")
+
+
+class TestDcHystCycleSave(unittest.TestCase):
+
+    def _save(self, proxy, n_loop, channels=None):
+        import h5py
+        r = _make_runner()
+        active = channels or [
+            {"label": "MOKE (R1)", "attr": "result1", "enabled": True}]
+        f = h5py.File("mem.h5", "w", driver="core", backing_store=False)
+        f.create_group("data")
+        try:
+            r._save_hyst_cycles(f, proxy, active, n_loop, _noop)
+            present = "cycles" in f["data"]
+            if present:
+                arr  = f["data"]["cycles"][...]
+                attr = dict(f["data"]["cycles"].attrs)
+            else:
+                arr, attr = None, None
+        finally:
+            f.close()
+        return present, arr, attr
+
+    def test_stores_cube_with_expected_shape_and_values(self):
+        # blk == n_loop == 8 (npts=4 → 2*npts)
+        present, arr, attr = self._save(_CycleProxy(ncyc=3, blk=8), n_loop=8)
+        self.assertTrue(present)
+        self.assertEqual(arr.shape, (3, 7, 8))
+        # cycle n is filled with value n across all blocks
+        for n in range(1, 4):
+            self.assertTrue(np.allclose(arr[n - 1], float(n)))
+        self.assertEqual(int(attr["n_cycles"]), 3)
+        self.assertIn("field", str(attr["block_order"]))
+
+    def test_no_cycles_writes_no_dataset(self):
+        present, _, _ = self._save(_CycleProxy(ncyc=0, blk=8), n_loop=8)
+        self.assertFalse(present)
+
+    def test_missing_command_is_swallowed(self):
+        class NoCmd:
+            def command_inout(self, *a):
+                raise Exception("GetNumberOfCycles not implemented")
+        present, _, _ = self._save(NoCmd(), n_loop=8)
+        self.assertFalse(present)
+
+    def test_partial_cycle_failure_keeps_the_rest(self):
+        present, arr, attr = self._save(
+            _CycleProxy(ncyc=3, blk=8, fail_get=(2,)), n_loop=8)
+        self.assertTrue(present)
+        self.assertEqual(int(attr["n_cycles"]), 2)   # cycle 2 dropped
+        self.assertTrue(np.allclose(arr[0], 1.0))
+        self.assertTrue(np.all(np.isnan(arr[1])))     # failed cycle stays NaN
+        self.assertTrue(np.allclose(arr[2], 3.0))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
