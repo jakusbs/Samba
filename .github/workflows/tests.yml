@@ -1,0 +1,16 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # PyQt6 / pytango are stubbed by test_runner.py — only the numeric
+      # stack is needed, keeping CI fast and hardware-free.
+      - run: pip install numpy h5py
+      - run: python test_runner.py -v

@@ -1,7 +1,0 @@
-SetupLock.py
-setup.py
-tangods_SetupLock.egg-info/PKG-INFO
-tangods_SetupLock.egg-info/SOURCES.txt
-tangods_SetupLock.egg-info/dependency_links.txt
-tangods_SetupLock.egg-info/entry_points.txt
-tangods_SetupLock.egg-info/top_level.txt

@@ -534,5 +534,333 @@ class TestZigzag2D(unittest.TestCase):
         self.assertEqual(col2, [0, 1])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Actuator connection guard (no scan against a simulated stage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestActuatorGuard(unittest.TestCase):
+    """With TANGO available, an unreachable actuator must abort the scan
+    before any data is taken — a SimProxy stand-in would silently produce a
+    plausible-looking file of fake data."""
+
+    def _run_1d(self, fresh):
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = fresh
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        points = []
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "SPATIAL", "scan_x": True, "scan_y": False,
+                    "name": "t", "act1_start": 0.0, "act1_stop": 1.0,
+                    "act1_npts": 2, "act1_label": "X", "act1_unit": "nm",
+                    "act1_device": "dev://stage", "act1_attr": "x",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                fn = r.run({"point": lambda ix, iy, x, v: points.append(ix)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return fn, points
+
+    def test_unreachable_actuator_aborts_scan(self):
+        proxy = InstantProxy()
+        fn, points = self._run_1d(lambda p: (proxy, "connection refused"))
+        self.assertIsNone(fn, "Scan must not start against a sim actuator")
+        self.assertEqual(points, [], "No points must be acquired")
+
+    def test_reachable_actuator_runs(self):
+        proxy = InstantProxy(read_val=1.0)
+        fn, points = self._run_1d(lambda p: (proxy, None))
+        self.assertEqual(len(points), 2, "Healthy connection must scan normally")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Interleaved trace/retrace traversal (Cryo 2D path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestInterleaved2D(unittest.TestCase):
+    """Interleaved 2D now routes through _acquire_point_retry — verify the
+    traversal order and full grid coverage survived the rewiring."""
+
+    def _run_grid(self):
+        import tempfile
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda path: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        trace, retrace = [], []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "SPATIAL", "scan_x": True, "scan_y": True,
+                    "_interleaved_2d": True, "_interleave_axis": "x", "name": "t",
+                    "act1_start": 0.0, "act1_stop": 2.0, "act1_npts": 3,
+                    "act2_start": 0.0, "act2_stop": 1.0, "act2_npts": 2,
+                    "act1_label": "X", "act1_unit": "nm", "act2_label": "Y",
+                    "act1_device": "dev://stage", "act2_device": "dev://stage",
+                    "act1_attr": "x", "act2_attr": "y",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                r.run({"point":         lambda ix, iy, x, v: trace.append((iy, ix)),
+                       "point_retrace": lambda ix, iy, x, v: retrace.append((iy, ix))})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return trace, retrace
+
+    def test_trace_and_retrace_cover_grid(self):
+        trace, retrace = self._run_grid()
+        full = {(iy, ix) for iy in range(2) for ix in range(3)}
+        self.assertEqual(set(trace),   full, "Trace must visit every cell")
+        self.assertEqual(set(retrace), full, "Retrace must visit every cell")
+
+    def test_retrace_sweeps_reversed(self):
+        trace, retrace = self._run_grid()
+        self.assertEqual([ix for (iy, ix) in trace if iy == 0],   [0, 1, 2])
+        self.assertEqual([ix for (iy, ix) in retrace if iy == 0], [2, 1, 0],
+                         "Retrace must sweep X in reverse")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. HDF5 write-failure detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestWritePointFailure(unittest.TestCase):
+    """_write_point used to swallow every exception; now it logs the first
+    failure and auto-pauses after AUTO_PAUSE_THRESHOLD consecutive ones."""
+
+    def _broken_file(self):
+        f = MagicMock()
+        f.attrs.__getitem__.side_effect = RuntimeError("disk full")
+        return f
+
+    def _runner_with_logs(self):
+        r = _make_runner()
+        r._write_fail_streak = 0
+        r._log_lines = []
+        r._lg = r._log_lines.append
+        r._st = lambda *a: None
+        return r
+
+    def test_first_failure_is_logged(self):
+        r = self._runner_with_logs()
+        r._write_point(self._broken_file(), 0, 0, 0.0, 0.0, {}, [], "SPATIAL_X")
+        self.assertTrue(any("write failed" in m for m in r._log_lines))
+        self.assertFalse(r._paused)
+
+    def test_consecutive_failures_pause(self):
+        r = self._runner_with_logs()
+        for _ in range(AUTO_PAUSE_THRESHOLD):
+            r._write_point(self._broken_file(), 0, 0, 0.0, 0.0, {}, [], "SPATIAL_X")
+        self.assertTrue(r._paused, "Persistent write failure must pause the scan")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. FIELD scan waits for ramping magnets (MOVING state)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFieldRampWait(unittest.TestCase):
+    """FIELD scans (and temperature sweeps, which use the same path) must
+    wait while the magnet device reports MOVING — the AttoDRY superconducting
+    magnet ramps for minutes, and reading earlier records the field mid-ramp."""
+
+    class RampProxy:
+        RAMP_S = 0.06   # device stays MOVING this long after a setpoint write
+
+        def __init__(self):
+            self._until = 0.0
+            self.violations = 0
+            self.ramps = 0
+
+        def write_attribute(self, attr, val):
+            self._until = time.time() + self.RAMP_S
+            self.ramps += 1
+
+        def state(self):
+            return 'MOVING' if time.time() < self._until else 'ON'
+
+        def read_attribute(self, attr):
+            if time.time() < self._until:
+                self.violations += 1
+            r = MagicMock(); r.value = 0.42
+            return r
+
+    def test_field_scan_waits_for_ramp(self):
+        import tempfile
+        mag = self.RampProxy()
+        zi  = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+                 _runner_mod.safe_write, _runner_mod.safe_read)
+        _runner_mod.fresh_proxy    = lambda p: ((mag if 'mag' in p else zi), None)
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        _runner_mod.safe_write     = lambda p, a, v, **kw: p.write_attribute(a, v)
+        _runner_mod.safe_read      = lambda p, a, **kw: (p.read_attribute(a).value, None)
+        points = []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {
+                    "scan_type": "FIELD", "scan_x": True, "scan_y": False,
+                    "name": "t", "field_start_A": 0.0, "field_stop_A": 1.0,
+                    "field_npts": 2, "field_device": "dev://mag",
+                    "integration_time": 0.0, "settle_time": 0.0,
+                    "move_timeout": 5.0,
+                    "sensors": [{"enabled": True, "device": "dev://zi",
+                                 "attribute": "x1", "label": "ZI x1",
+                                 "trigger_cmd": "Start",
+                                 "integ_time_attr": "", "settling_attr": ""}],
+                }
+                r = ScanRunner(cfg, {"save_dir": td,
+                                     "field_settle_timeout": 5.0})
+                r._open_hdf5     = lambda *a, **k: MagicMock()
+                r._write_point   = lambda *a, **k: None
+                r._finalize_hdf5 = lambda *a, **k: None
+                r.run({"point": lambda ix, iy, x, v: points.append(x)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+             _runner_mod.safe_write, _runner_mod.safe_read) = _orig
+        self.assertEqual(len(points), 2)
+        self.assertEqual(mag.ramps, 2, "one setpoint write per point")
+        self.assertEqual(mag.violations, 0,
+                         "field must never be read while the magnet is MOVING")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Setup-lock stale-stamp parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSetupLockStamp(unittest.TestCase):
+    """Stale-lock recovery relies on parsing the timestamp in the info stamp."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from core import setup_lock
+        self.sl = setup_lock
+
+    def test_fresh_stamp_age_near_zero(self):
+        age = self.sl._stamp_age_hours(self.sl._make_stamp())
+        self.assertIsNotNone(age)
+        self.assertLess(abs(age), 0.01)
+
+    def test_old_stamp_is_stale(self):
+        age = self.sl._stamp_age_hours("pc3:412 @ 2020-01-01 08:00:00")
+        self.assertGreater(age, self.sl.STALE_LOCK_HOURS)
+
+    def test_legacy_stamp_without_date_unparseable(self):
+        # Old-format stamps (no date) must be treated as held, not stale
+        self.assertIsNone(self.sl._stamp_age_hours("pc3:412 @ 14:02:31"))
+        self.assertIsNone(self.sl._stamp_age_hours(""))
+        self.assertIsNone(self.sl._stamp_age_hours(None))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. FIELD/temperature x-axis units come from config (not hardcoded)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFieldAxisUnits(unittest.TestCase):
+    """_open_hdf5 must label the FIELD axis from field_x_label/unit +
+    field_setpoint_unit, so a temperature sweep is 'Temperature [K]' and a
+    Beckhoff field scan is 'Field [mT]' — not the old hardcoded Field/T/A."""
+
+    def _open(self, cfg_extra):
+        import tempfile, h5py
+        r = ScanRunner.__new__(ScanRunner)
+        r._abort = False; r._paused = False
+        cfg = {"name": "t", "integration_time": 0.1, "settle_time": 0.0,
+               "move_timeout": 15.0, "field_segments": [[0.0, 1.0, 4]]}
+        cfg.update(cfg_extra)
+        x_plan = np.linspace(0.0, 1.0, 4); y_plan = np.array([0.0])
+        with tempfile.TemporaryDirectory() as td:
+            fn = os.path.join(td, "t.h5")
+            f = r._open_hdf5(fn, x_plan, y_plan, [], cfg["field_x_label"],
+                             cfg["field_x_unit"], "FIELD", cfg)
+            self.assertIsNotNone(f, "open failed")
+            d = f["data"]
+            xkey = str(f.attrs["_x_key"])
+            actual = (d[xkey].attrs["label"], d[xkey].attrs["unit"])
+            sp = d[xkey + "_setpoint"].attrs["unit"]
+            f.close()
+        return xkey, actual, sp
+
+    def test_temperature_sweep_labels(self):
+        xkey, (lbl, unit), sp = self._open({
+            "field_x_label": "Temperature", "field_x_unit": "K",
+            "field_setpoint_unit": "K"})
+        self.assertEqual(xkey, "actuator_temperature")
+        self.assertEqual((lbl, unit), ("Temperature", "K"))
+        self.assertEqual(sp, "K", "setpoint must be K, not the old hardcoded A")
+
+    def test_beckhoff_field_is_mT(self):
+        xkey, (lbl, unit), sp = self._open({
+            "field_x_label": "Field", "field_x_unit": "mT",
+            "field_setpoint_unit": "A"})
+        self.assertEqual((lbl, unit), ("Field", "mT"),
+                         "Beckhoff field readback is mT, not the old hardcoded T")
+        self.assertEqual(sp, "A", "current setpoint is Ampere")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. DC hysteresis HDF5 — duplicate channel labels must not crash file creation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDcHystDuplicateLabels(unittest.TestCase):
+    """Two enabled hyst channels whose labels sanitize to the same dataset key
+    used to raise 'Unable to create dataset (name already exists)'. They must
+    be deduplicated like the spatial/field path."""
+
+    def _run(self, channels):
+        import tempfile, h5py
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "t.h5"
+        msgs = []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "t",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_channels": channels, "sensors": []}
+                r = ScanRunner(cfg, {"save_dir": td})
+                # Abort immediately after file creation so we only test _open path
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()
+                fn = r.run({"status": lambda m: msgs.append(m),
+                            "log": lambda m: msgs.append(m)})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+        return msgs
+
+    def test_duplicate_blank_labels_do_not_crash(self):
+        chans = [{"label": "", "attr": "result1", "enabled": True, "y_axis": "Y1"},
+                 {"label": "", "attr": "result2", "enabled": True, "y_axis": "Y2"}]
+        msgs = self._run(chans)
+        self.assertFalse(any("already exists" in m for m in msgs),
+                         "duplicate labels must be deduplicated, not crash: " + repr(msgs))
+
+    def test_identical_labels_do_not_crash(self):
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True, "y_axis": "Y1"},
+                 {"label": "MOKE", "attr": "result5", "enabled": True, "y_axis": "Y2"}]
+        msgs = self._run(chans)
+        self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

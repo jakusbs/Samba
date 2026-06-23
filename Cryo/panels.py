@@ -2230,8 +2230,13 @@ class TrajectoryPanel(QWidget):
                 "field_npts":        npts,
                 "field_device":      temp_dev,
                 "field_current_attr": temp_attr,
+                # Read the temperature back (same R/W attr), NOT the magnet
+                # field attr — otherwise the engine reads field_polar_corr off
+                # the AttoDRY, fails, and falls back to setpoint×0.15.
+                "field_readback_attr": temp_attr,
                 "field_x_label":     temp_attr,
                 "field_x_unit":      "K",
+                "field_setpoint_unit": "K",
                 "integration_time":  self.int_time.value(),
                 "settle_time":       self.settle.value(),   # from Timing panel
                 "move_timeout":      self.timeout.value(),
@@ -2266,8 +2271,12 @@ class TrajectoryPanel(QWidget):
             "field_npts":        sum(int(s[2]) for s in segs) if segs else 101,
             "field_device":      self._ac_dev_combo.currentData() or "",
             "field_current_attr": self._ac_attr_combo.currentData() or "",
+            # AttoDRY MagneticField is a single R/W attr (write setpoint [T],
+            # read field [T] back) — read the same attr we command.
+            "field_readback_attr": self._ac_attr_combo.currentData() or "",
             "field_x_label":     "Field",
             "field_x_unit":      "T",
+            "field_setpoint_unit": "T",
             "integration_time":  self.int_time.value(),
             "settle_time":       self.settle.value(),
             "move_timeout":      self.timeout.value(),

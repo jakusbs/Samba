@@ -1673,6 +1673,11 @@ class TrajectoryPanel(QWidget):
             "field_stop_A":      segs[-1][1]                if segs else  1.0,
             "field_npts":        sum(int(s[2]) for s in segs) if segs else 101,
             "field_device":      self._ac_dev_combo.currentData() or "",
+            # Beckhoff magnet: command current [A], read corrected field [mT]
+            # (the Magnet device returns mT — matches the DC-Hyst convention).
+            "field_x_label":     "Field",
+            "field_x_unit":      "mT",
+            "field_setpoint_unit": "A",
             "integration_time":  self.int_time.value(),
             "settle_time":       self.settle.value(),
             "move_timeout":      self.timeout.value(),

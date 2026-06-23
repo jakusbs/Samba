@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 samba_cryo.py — Samba Cryo — ETH Zürich Intermag Lab
+
+SAMBA — Strnad & Goldenberger Application for Magnetism Based Analysis
+    S  trnad & Goldenberger
+    A  pplication
+       for
+    M  agnetism
+    B  ased
+    A  nalysis
+
 Cryostat-specific fork of Samba.
 
 Differences from standard samba.py:
@@ -323,6 +332,11 @@ class CryoMainWindow(QMainWindow):
         super().__init__()
         self._post_to_main.connect(lambda fn: fn())
         self.setWindowTitle("Samba Cryo — ETH Zürich")
+        try:
+            from core.easter_egg import install_easter_egg
+            install_easter_egg(self)
+        except Exception:
+            pass
         # Modest minimum so the window fits smaller laptop screens; the larger
         # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
         self.setMinimumSize(1180, 640)

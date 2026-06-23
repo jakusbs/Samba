@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt, QTimer, QEventLoop
 _CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+
 def _asset(name, asset_dir=None):
     """Resolve asset path relative to asset_dir (or this file's directory)."""
     return os.path.join(asset_dir or _CORE_DIR, name)

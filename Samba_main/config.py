@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -191,6 +191,10 @@ def make_default_config(name: str = "scan_x") -> dict:
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
         "field_current_attr":  "",               # "" = use setup's magnet_current_attr
+        "field_readback_attr": "",               # "" = use setup's magnet_field_attr
+        "field_x_label":       "Field",
+        "field_x_unit":        "mT",             # Beckhoff magnet returns mT
+        "field_setpoint_unit": "A",              # current commanded in Ampere
         "integration_time": 0.1, "settle_time": 0.05, "move_timeout": 15.0,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
@@ -332,10 +336,20 @@ def _migrate_v1_to_v2(cfg: dict):
 
 
 # Ordered list of (target_version, migration_func)
+def _migrate_v3_to_v4(cfg: dict):
+    """Config-driven field x-axis units. The Beckhoff magnet commands current
+    [A] and reads corrected field back in [mT] (matches the DC-Hyst unit)."""
+    cfg.setdefault("field_readback_attr", "")   # "" = setup's magnet_field_attr
+    cfg.setdefault("field_x_label", "Field")
+    cfg.setdefault("field_x_unit", "mT")
+    cfg.setdefault("field_setpoint_unit", "A")
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
+    (4, _migrate_v3_to_v4),
 ]
 
 

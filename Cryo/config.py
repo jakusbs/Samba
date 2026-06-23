@@ -314,6 +314,10 @@ def make_default_config(name: str = "scan_x") -> dict:
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
         "field_current_attr":  "",               # "" = use setup's magnet_current_attr
+        "field_readback_attr": "",               # "" = use setup's magnet_field_attr
+        "field_x_label":       "Field",
+        "field_x_unit":        "T",              # AttoDRY superconducting magnet in Tesla
+        "field_setpoint_unit": "T",
         "integration_time": 0.1, "settle_time": 0.05, "move_timeout": 15.0,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
@@ -370,6 +374,20 @@ def _migrate_config(cfg: dict):
         ]]
     cfg.setdefault("field_device",       "")
     cfg.setdefault("field_current_attr", "")
+    # Config-driven field/temperature x-axis. Cryo uses the AttoDRY only, for
+    # both magnet and temperature: read back the same R/W attr we command, so
+    # the readback never falls through to the Beckhoff field_polar_corr attr
+    # (which the AttoDRY does not have — the old cause of the weird x values).
+    if "temp_start" in cfg or cfg.get("field_x_unit") == "K":
+        cfg.setdefault("field_readback_attr", cfg.get("temp_attr", "Temperature"))
+        cfg.setdefault("field_x_label", cfg.get("temp_attr", "Temperature"))
+        cfg.setdefault("field_x_unit", "K")
+        cfg.setdefault("field_setpoint_unit", "K")
+    else:
+        cfg.setdefault("field_readback_attr", cfg.get("field_current_attr") or "MagneticField")
+        cfg.setdefault("field_x_label", "Field")
+        cfg.setdefault("field_x_unit", "T")
+        cfg.setdefault("field_setpoint_unit", "T")
     cfg.setdefault("hyst_channels", [
         {"label": "MOKE (R1)", "attr": "result1", "enabled": True,  "y_axis": "Y1"},
         {"label": "R2",        "attr": "result2", "enabled": False, "y_axis": "Y2"},

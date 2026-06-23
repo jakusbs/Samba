@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 samba.py — Samba v3 — ETH Zürich Intermag Lab
+
+SAMBA — Strnad & Goldenberger Application for Magnetism Based Analysis
+    S  trnad & Goldenberger
+    A  pplication
+       for
+    M  agnetism
+    B  ased
+    A  nalysis
+
 Entry point: MainWindow wires together all modules.
 
 Requirements:  pip install pytango PyQt6 matplotlib h5py numpy
@@ -208,6 +217,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Samba v3 — ETH Zürich")
+        try:
+            from core.easter_egg import install_easter_egg
+            install_easter_egg(self)
+        except Exception:
+            pass
         # Modest minimum so the window fits smaller laptop screens; the larger
         # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
         self.setMinimumSize(1180, 640)
@@ -1294,7 +1308,7 @@ class MainWindow(QMainWindow):
             self.live_tabs.setCurrentIndex(0)
         else:
             if   mode == "DC_HYST": xl, xu = "Field", "mT"
-            elif mode == "FIELD":   xl, xu = "Field", "T"
+            elif mode == "FIELD":   xl, xu = cfg.get("field_x_label", "Field"), cfg.get("field_x_unit", "mT")
             elif mode == "1D_Y":    xl, xu = cfg["act2_label"], cfg["act2_unit"]
             elif mode == "TIME":    xl, xu = "Time", "s"
             else:                   xl, xu = cfg["act1_label"], cfg["act1_unit"]
