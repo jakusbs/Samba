@@ -1984,3 +1984,53 @@ Now per-scan, config-driven (the two apps use **different magnets**):
   write-failure pause, FIELD ramp wait, field-axis units, DC-hyst dedup,
   lock-stamp parsing). `.github/workflows/tests.yml` runs them on push/PR
   (numpy + h5py only; Qt and tango are stubbed).
+
+---
+
+## 31. Recent Changes (June 2026) — DC-Hyst Per-Cycle Data & Source Selection
+
+Item A from `CONTINUATION.md` (the PyHysteresis per-cycle feature). The TANGO
+device already retains every cycle and can re-average excluding bad ones; this
+batch wires Samba into it. A.1/A.3/A.4 done; A.2 (the interactive panel UX) is
+still open — see `CONTINUATION.md` for the design note (use a compact
+exclude-list, **not** N checkboxes).
+
+### A.1 — Raw per-cycle half-loops saved to HDF5 (`core/scan/runner.py`)
+- New `_save_hyst_cycles()`, called from `_run_dc_hyst` on completion:
+  `GetNumberOfCycles` + `GetCycle(1..N)` → `/data/cycles` dataset, shape
+  `[n_cycles, 7, n_loop]` (block 0 = field mT, blocks 1..6 = result1..result6,
+  positive half then negative half). Dataset attrs: `block_order`, `field_unit`,
+  `layout`, `n_cycles`, and `channel_resultN_label` per enabled display channel.
+- Best-effort: any failure is logged and swallowed; a device server without the
+  per-cycle commands simply yields no dataset. The averaged result is already
+  written, so the file is valid either way.
+
+### A.3 — Analysis reads /data/cycles (`Analysis/samba_io.py`)
+- `load_hyst_cycles(path)` → dict with `field`/`result1..6` `[n_cycles, n_loop]`
+  arrays, a `valid` mask (all-NaN cycle = failed read), channel `labels`; `None`
+  on old files.
+- `hyst_cycle_average(cyc, exclude=())` — offline mirror of the device's
+  `RecomputeAverage`: drop bad 1-based cycles and re-average (NaN-aware).
+- `hyst_detect_outliers(cyc, channel, n_sigma)` — robust median+MAD flag of
+  cycles whose loop deviates from the per-point median.
+- `plot_hyst_cycles(...)` — faint per-cycle overlay + bold average (lazy mpl).
+- The module-level `scipy.interpolate` import was made lazy (only `average_scans`
+  uses it) so these numpy/h5py-only helpers — and the loaders — import without
+  scipy, matching the CI environment.
+
+### A.4 — Recorded-source selection (`config.py`, `right_panel.py`, `samba.py`, `runner.py`)
+- New config key `hyst_sources` (6 ints; 1..6 = AnalogIn1..6, 11..16 = ELM1..6;
+  default `[1..6]` preserves the old hard-wired behaviour). Schema bumped to v5
+  with `_migrate_v4_to_v5` backfilling old configs.
+- `RightPanel` DC page gains a compact "Recorded sources (PLC)" group: 6 combos
+  (R1..R6) with `get_dc_sources()` / `load_dc_sources()`. Round-tripped through
+  `_load_config` / `_save_active_config` / `get_config_partial`.
+- `_run_dc_hyst` writes `source1..6` to the device just after the base params,
+  before measuring; an older server/PLC that rejects the attr is logged and
+  tolerated (keeps AnalogIn1..6). `hyst_sources` is also stored in HDF5 metadata.
+- Samba_main only (the Beckhoff DC-hyst path); Cryo is unaffected.
+
+### Tests / CI
+- `test_runner.py` grew from 32 → 42 tests: `TestDcHystCycleSave` (4),
+  `TestHystCycleRoundTrip` (4, writer↔reader via `Analysis/samba_io`),
+  `TestDcHystSourceWrite` (2). Still numpy + h5py only.

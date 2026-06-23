@@ -969,6 +969,7 @@ class MainWindow(QMainWindow):
         hyst_chs = cfg.get("hyst_channels", [])
         if hyst_chs:
             self.right_panel.load_dc_channels(hyst_chs)
+        self.right_panel.load_dc_sources(cfg.get("hyst_sources", [1, 2, 3, 4, 5, 6]))
         self.right_panel.set_dc_mode(cfg.get("scan_type") == "DC_HYST")
         self.sl_panel.set_active_name(cfg.get("name","—"))
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
@@ -993,6 +994,7 @@ class MainWindow(QMainWindow):
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
         old["hyst_channels"]  = self.right_panel.get_dc_channels()
+        old["hyst_sources"]   = self.right_panel.get_dc_sources()
         # Sync save_dir, server_sync_dir, and setup defaults back into setup
         setup["save_dir"] = self.save_dir.text().strip()
         setup["server_sync_dir"] = self.server_dir.text().strip()
@@ -1253,6 +1255,7 @@ class MainWindow(QMainWindow):
                 ch["attr"] = ch.get("attribute", ch.get("attr", ""))
                 hyst_chs.append(ch)
             partial["hyst_channels"] = hyst_chs
+            partial["hyst_sources"]  = self.right_panel.get_dc_sources()
             # Use device from first enabled channel if hyst_device not set
             if not partial.get("hyst_device"):
                 for ch in hyst_chs:

@@ -1075,6 +1075,10 @@ class ScanRunner:
             meta.attrs["noDC"]             = bool(cfg.get("noDC",  False))
             meta.attrs["mirror_shift_mm"]  = float(cfg.get("mirror_shift", 0.0))
             meta.attrs["channels_json"]    = _json.dumps(hyst_chs)
+            _src = cfg.get("hyst_sources")
+            if _src:
+                meta.attrs["hyst_sources"] = np.asarray(
+                    [int(s) for s in _src[:6]], dtype=int)
 
             # Hardware snapshot + temperature-sweep keys
             _write_hw_metadata(meta, cfg)
@@ -1124,6 +1128,24 @@ class ScanRunner:
             err = safe_write(hyst_p, attr, val)
             tag = "✓" if not err else "⚠"
             lg(f"  {tag} {attr} ← {val}" + (f"  ({err})" if err else ""))
+
+        # Recorded-source selection (source1..6): which physical signal the PLC
+        # records into each result line.  1..6 = AnalogIn1..6, 11..16 = ELM1..6.
+        # Best-effort: device servers / PLC programs without the source* attrs
+        # raise — log once and keep the default AnalogIn1..6 wiring.
+        sources = cfg.get("hyst_sources")
+        if sources:
+            for i, src in enumerate(sources[:6], start=1):
+                try:
+                    src = int(src)
+                except (TypeError, ValueError):
+                    continue
+                err = safe_write(hyst_p, f"source{i}", src)
+                if err:
+                    lg(f"  ⚠ source{i} ← {src} not applied "
+                       f"(older server/PLC?): {err}")
+                    break
+                lg(f"  ✓ source{i} ← {src}")
 
         # Polling interval: 1/4 of a half-loop duration, minimum 200 ms.
         # This gives ~4 state-polls per half-loop — enough for smooth progress

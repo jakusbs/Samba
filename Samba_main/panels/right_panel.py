@@ -79,6 +79,34 @@ class RightPanel(QWidget):
         dc_btn_row.addWidget(dc_add_btn); dc_btn_row.addStretch()
         p1l.addLayout(dc_btn_row)
         self._dc_sensor_rows: List[SensorPickerRow] = []
+
+        # Recorded-source selection: which physical signal the PLC records into
+        # each result line 1..6 (written to the device's source1..6 attrs at
+        # scan start). 1..6 = AnalogIn1..6, 11..16 = ELM1..6.
+        src_box = QGroupBox("Recorded sources (PLC)")
+        src_box.setStyleSheet(
+            "QGroupBox{color:#89b4fa;font-size:10px;font-weight:bold;"
+            "border:1px solid #313244;border-radius:4px;margin-top:6px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:6px;padding:0 3px;}")
+        src_grid = QGridLayout(src_box)
+        src_grid.setContentsMargins(6, 4, 6, 4); src_grid.setHorizontalSpacing(6)
+        src_grid.setVerticalSpacing(2)
+        self._dc_source_combos: List[NoScrollComboBox] = []
+        for i in range(6):
+            lbl = QLabel(f"R{i + 1}")
+            lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
+            combo = NoScrollComboBox()
+            for n in range(1, 7):
+                combo.addItem(f"AnalogIn{n}", n)
+            for n in range(1, 7):
+                combo.addItem(f"ELM{n}", 10 + n)
+            combo.setCurrentIndex(i)                 # default Rn → AnalogIn(n)
+            combo.currentIndexChanged.connect(self._on_dc_sensors_changed)
+            row_i, col = divmod(i, 2)
+            src_grid.addWidget(lbl,   row_i, col * 2)
+            src_grid.addWidget(combo, row_i, col * 2 + 1)
+            self._dc_source_combos.append(combo)
+        p1l.addWidget(src_box)
         self._sensor_stack.addWidget(page1)
 
         lay.addWidget(self._sensor_stack, stretch=1)
@@ -291,6 +319,20 @@ class RightPanel(QWidget):
     def get_dc_channels(self) -> list:
         """Return hyst_channels list from the DC sensor picker rows."""
         return [r.get() for r in self._dc_sensor_rows]
+
+    def get_dc_sources(self) -> list:
+        """Return the 6 recorded-source codes (hyst_sources): 1..6 AnalogIn,
+        11..16 ELM."""
+        return [int(c.currentData()) for c in self._dc_source_combos]
+
+    def load_dc_sources(self, sources: list):
+        """Restore the 6 recorded-source combos from a hyst_sources list."""
+        for i, combo in enumerate(self._dc_source_combos):
+            code = sources[i] if sources and i < len(sources) else (i + 1)
+            idx = combo.findData(int(code))
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx if idx >= 0 else i)
+            combo.blockSignals(False)
 
     def load_dc_channels(self, chs: list):
         """Load DC channel config into the DC page using SensorPickerRow."""

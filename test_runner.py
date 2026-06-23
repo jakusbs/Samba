@@ -1039,5 +1039,59 @@ class TestHystCycleRoundTrip(unittest.TestCase):
             _os.remove(tmp)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. DC hysteresis — recorded-source selection written at scan start (A.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDcHystSourceWrite(unittest.TestCase):
+    """_run_dc_hyst must push cfg['hyst_sources'] to the device's source1..6
+    attributes before measuring; an older server that rejects them is tolerated."""
+
+    def _run(self, sources, write_hook=None):
+        import tempfile
+        writes = []   # (attr, val)
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+                 _runner_mod.safe_write)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "t.h5"
+
+        def _sw(p, attr, val, **kw):
+            writes.append((attr, val))
+            return write_hook(attr) if write_hook else None
+        _runner_mod.safe_write = _sw
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "t",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0,
+                       "hyst_int_time": 0.01, "hyst_sources": sources,
+                       "hyst_channels": [{"label": "R1", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}],
+                       "sensors": []}
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()                       # stop after the config writes
+                r.run({"status": _noop, "log": _noop})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+             _runner_mod.safe_write) = _orig
+        return writes
+
+    def test_sources_written_in_order(self):
+        writes = self._run([1, 2, 13, 4, 15, 6])
+        src = [(a, v) for a, v in writes if a.startswith("source")]
+        self.assertEqual(src, [("source1", 1), ("source2", 2), ("source3", 13),
+                               ("source4", 4), ("source5", 15), ("source6", 6)])
+
+    def test_older_server_rejecting_source_is_tolerated(self):
+        # safe_write returns an error string for source* → loop breaks, no raise
+        writes = self._run(
+            [1, 2, 3, 4, 5, 6],
+            write_hook=lambda attr: "no such attr" if attr.startswith("source") else None)
+        # base params still attempted; scan didn't crash (we got here)
+        self.assertTrue(any(a == "MagneticField" for a, _ in writes))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
