@@ -891,6 +891,11 @@ class _CycleProxy:
 class TestDcHystCycleSave(unittest.TestCase):
 
     def _save(self, proxy, n_loop, channels=None):
+        """Returns (present, blocks_dict, group_attrs).
+
+        blocks_dict maps 'field','result1'..'result6' → 2-D arrays, mirroring
+        the /data/cycles GROUP layout (one dataset per quantity).
+        """
         import h5py
         r = _make_runner()
         active = channels or [
@@ -900,27 +905,29 @@ class TestDcHystCycleSave(unittest.TestCase):
         try:
             r._save_hyst_cycles(f, proxy, active, n_loop, _noop)
             present = "cycles" in f["data"]
+            blocks, gattr = None, None
             if present:
-                arr  = f["data"]["cycles"][...]
-                attr = dict(f["data"]["cycles"].attrs)
-            else:
-                arr, attr = None, None
+                grp = f["data"]["cycles"]
+                blocks = {k: grp[k][...] for k in grp.keys()}
+                gattr = dict(grp.attrs)
         finally:
             f.close()
-        return present, arr, attr
+        return present, blocks, gattr
 
-    def test_stores_cube_with_expected_shape_and_values(self):
+    def test_stores_group_of_2d_arrays(self):
         # blk == n_loop == 8 (npts=4 → 2*npts)
-        present, arr, attr = self._save(_CycleProxy(ncyc=3, blk=8), n_loop=8)
+        present, blocks, gattr = self._save(_CycleProxy(ncyc=3, blk=8), n_loop=8)
         self.assertTrue(present)
-        self.assertEqual(arr.shape, (3, 7, 8))
-        # cycle n is filled with value n across all blocks
+        # one 2-D [n_cycles, n_loop] dataset per quantity, not a 3-D cube
+        for name in ("field", "result1", "result6"):
+            self.assertIn(name, blocks)
+            self.assertEqual(blocks[name].shape, (3, 8))
+        # cycle n is filled with value n
         for n in range(1, 4):
-            self.assertTrue(np.allclose(arr[n - 1], float(n)))
-        self.assertEqual(int(attr["n_cycles"]), 3)
-        self.assertIn("field", str(attr["block_order"]))
+            self.assertTrue(np.allclose(blocks["result1"][n - 1], float(n)))
+        self.assertEqual(int(gattr["n_cycles"]), 3)
 
-    def test_no_cycles_writes_no_dataset(self):
+    def test_no_cycles_writes_no_group(self):
         present, _, _ = self._save(_CycleProxy(ncyc=0, blk=8), n_loop=8)
         self.assertFalse(present)
 
@@ -932,13 +939,14 @@ class TestDcHystCycleSave(unittest.TestCase):
         self.assertFalse(present)
 
     def test_partial_cycle_failure_keeps_the_rest(self):
-        present, arr, attr = self._save(
+        present, blocks, gattr = self._save(
             _CycleProxy(ncyc=3, blk=8, fail_get=(2,)), n_loop=8)
         self.assertTrue(present)
-        self.assertEqual(int(attr["n_cycles"]), 2)   # cycle 2 dropped
-        self.assertTrue(np.allclose(arr[0], 1.0))
-        self.assertTrue(np.all(np.isnan(arr[1])))     # failed cycle stays NaN
-        self.assertTrue(np.allclose(arr[2], 3.0))
+        self.assertEqual(int(gattr["n_cycles"]), 2)        # cycle 2 dropped
+        r1 = blocks["result1"]
+        self.assertTrue(np.allclose(r1[0], 1.0))
+        self.assertTrue(np.all(np.isnan(r1[1])))           # failed cycle → NaN
+        self.assertTrue(np.allclose(r1[2], 3.0))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

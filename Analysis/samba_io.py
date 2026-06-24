@@ -95,14 +95,23 @@ _HYST_BLOCKS = ('field', 'result1', 'result2', 'result3',
                 'result4', 'result5', 'result6')
 
 
+def _as_str(v, default=''):
+    return v.decode() if isinstance(v, bytes) else (str(v) if v is not None else default)
+
+
 def load_hyst_cycles(path: str) -> dict:
-    """Read the raw per-cycle DC-hysteresis half-loops from ``/data/cycles``.
+    """Read the raw per-cycle DC-hysteresis half-loops written by ScanRunner.
 
-    The scan engine stores every retained cycle as a ``[n_cycles, 7, n_loop]``
-    cube (block 0 = field in mT, blocks 1..6 = result1..result6, positive half
-    then negative half).  This unpacks it into a convenient dict.
+    Current layout — ``/data/cycles`` is a **group** of per-quantity 2-D
+    datasets, each ``[n_cycles, n_loop]``::
 
-    Returns ``None`` if the file has no per-cycle dataset (older files, or a
+        /data/cycles/field      (mT)
+        /data/cycles/result1 .. result6
+
+    Legacy layout (early builds) — ``/data/cycles`` is a single 3-D dataset
+    ``[n_cycles, 7, n_loop]``; still read transparently.
+
+    Returns ``None`` if the file has no per-cycle data (older files, or a
     device server without the GetCycle commands).
 
     Result dict::
@@ -118,39 +127,66 @@ def load_hyst_cycles(path: str) -> dict:
         }
     """
     path = str(path)
+    blocks = {}            # name -> [n_cycles, n_loop]
+    labels = {}
+    field_unit = 'mT'
     try:
         with h5py.File(path, 'r') as f:
             if 'data' not in f or 'cycles' not in f['data']:
                 return None
-            ds   = f['data']['cycles']
-            cube = np.array(ds, dtype=float)
-            attrs = dict(ds.attrs)
+            node = f['data']['cycles']
+
+            if isinstance(node, h5py.Group):
+                # New layout: one 2-D dataset per quantity.
+                for name in _HYST_BLOCKS:
+                    if name in node:
+                        ds = node[name]
+                        blocks[name] = np.array(ds, dtype=float)
+                        lbl = ds.attrs.get('label')
+                        if lbl is not None:
+                            labels[name] = _as_str(lbl, name)
+                        if name == 'field':
+                            field_unit = _as_str(ds.attrs.get('unit'), 'mT')
+                if 'field' not in blocks:
+                    warnings.warn(f"load_hyst_cycles: /data/cycles group has no "
+                                  f"'field' dataset in {path}")
+                    return None
+            else:
+                # Legacy 3-D cube [n_cycles, 7, n_loop].
+                cube = np.array(node, dtype=float)
+                if cube.ndim != 3 or cube.shape[1] < 7:
+                    warnings.warn(f"load_hyst_cycles: unexpected /data/cycles "
+                                  f"shape {cube.shape} in {path}")
+                    return None
+                for i, name in enumerate(_HYST_BLOCKS):
+                    blocks[name] = cube[:, i, :]
+                attrs = dict(node.attrs)
+                field_unit = _as_str(attrs.get('field_unit'), 'mT')
+                for k, v in attrs.items():
+                    if k.startswith('channel_') and k.endswith('_label'):
+                        labels[k[len('channel_'):-len('_label')]] = _as_str(v)
     except Exception as e:
         warnings.warn(f"load_hyst_cycles: could not open {path}: {e}")
         return None
 
-    if cube.ndim != 3 or cube.shape[1] < 7:
-        warnings.warn(f"load_hyst_cycles: unexpected /data/cycles shape "
-                      f"{cube.shape} in {path}")
-        return None
+    # Stack into a cube for the `cube`/`valid` conveniences; align lengths.
+    n_cyc  = blocks['field'].shape[0]
+    n_loop = blocks['field'].shape[1]
+    cube = np.full((n_cyc, 7, n_loop), np.nan)
+    for i, name in enumerate(_HYST_BLOCKS):
+        arr = blocks.get(name)
+        if arr is not None and arr.shape == (n_cyc, n_loop):
+            cube[:, i, :] = arr
 
     # A cycle that failed to read at acquisition time stays all-NaN.
-    valid = ~np.all(np.isnan(cube.reshape(cube.shape[0], -1)), axis=1)
-
-    labels = {}
-    for k, v in attrs.items():
-        if k.startswith('channel_') and k.endswith('_label'):
-            res = k[len('channel_'):-len('_label')]      # e.g. 'result1'
-            labels[res] = v.decode() if isinstance(v, bytes) else str(v)
+    valid = ~np.all(np.isnan(cube.reshape(n_cyc, -1)), axis=1)
 
     out = {
         'cube':       cube,
         'n_cycles':   int(valid.sum()),
         'valid':      valid,
         'labels':     labels,
-        'field_unit': (attrs.get('field_unit', b'mT').decode()
-                       if isinstance(attrs.get('field_unit'), bytes)
-                       else str(attrs.get('field_unit', 'mT'))),
+        'field_unit': field_unit,
     }
     for i, name in enumerate(_HYST_BLOCKS):
         out[name] = cube[:, i, :]

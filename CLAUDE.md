@@ -1997,18 +1997,26 @@ exclude-list, **not** N checkboxes).
 
 ### A.1 — Raw per-cycle half-loops saved to HDF5 (`core/scan/runner.py`)
 - New `_save_hyst_cycles()`, called from `_run_dc_hyst` on completion:
-  `GetNumberOfCycles` + `GetCycle(1..N)` → `/data/cycles` dataset, shape
-  `[n_cycles, 7, n_loop]` (block 0 = field mT, blocks 1..6 = result1..result6,
-  positive half then negative half). Dataset attrs: `block_order`, `field_unit`,
-  `layout`, `n_cycles`, and `channel_resultN_label` per enabled display channel.
+  `GetNumberOfCycles` + `GetCycle(1..N)` → a **`/data/cycles` group** of
+  per-quantity 2-D datasets, each `[n_cycles, n_loop]`:
+  `field` (mT) + `result1`..`result6`, positive half then negative half.
+  Group attr `n_cycles`; `field` carries `unit`, each `resultN` carries its
+  display `label`.
+- **Why a group of 2-D arrays, not one 3-D `[n_cycles,7,n_loop]` dataset:**
+  PyMca could not open files where a 3-D dataset sat next to the 1-D averaged
+  signals in `/data` (its NXdata auto-plot chokes on the rank mismatch — there
+  is no `NX_class`, so it guesses from shapes). A subgroup of 2-D arrays is
+  invisible to the signal detector and each `resultN` opens as a clean
+  cycles×points image where a bad cycle is an obvious stripe.
 - Best-effort: any failure is logged and swallowed; a device server without the
-  per-cycle commands simply yields no dataset. The averaged result is already
+  per-cycle commands simply yields no group. The averaged result is already
   written, so the file is valid either way.
 
 ### A.3 — Analysis reads /data/cycles (`Analysis/samba_io.py`)
 - `load_hyst_cycles(path)` → dict with `field`/`result1..6` `[n_cycles, n_loop]`
   arrays, a `valid` mask (all-NaN cycle = failed read), channel `labels`; `None`
-  on old files.
+  on old files. Reads the current group-of-2-D-arrays layout and transparently
+  falls back to the legacy 3-D `[n_cycles,7,n_loop]` dataset.
 - `hyst_cycle_average(cyc, exclude=())` — offline mirror of the device's
   `RecomputeAverage`: drop bad 1-based cycles and re-average (NaN-aware).
 - `hyst_detect_outliers(cyc, channel, n_sigma)` — robust median+MAD flag of

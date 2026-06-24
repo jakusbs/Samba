@@ -919,19 +919,30 @@ class ScanRunner:
     def _save_hyst_cycles(self, hfile, hyst_p, active_ch: list,
                           n_loop: int, lg) -> None:
         """Read every retained cycle off the PyHysteresis device and store the
-        raw per-cycle half-loops in ``/data/cycles``.
+        raw per-cycle half-loops under the ``/data/cycles`` group.
 
         The device retains each individual scan (``GetNumberOfCycles`` /
         ``GetCycle(n)``); ``GetCycle`` returns a flat array of 7 blocks, each
         ``2*NumberOfPoints`` (== ``n_loop``) long: field, result1..result6,
-        positive half then negative half.  We reshape to ``[7, n_loop]`` per
-        cycle and stack into a ``[n_cycles, 7, n_loop]`` dataset so a bad scan
-        can be inspected / excluded offline without re-measuring.
+        positive half then negative half.
+
+        Layout — one 2-D dataset per quantity, each ``[n_cycles, n_loop]``::
+
+            /data/cycles/field      [n_cycles, n_loop]   (mT)
+            /data/cycles/result1    [n_cycles, n_loop]
+            ...                      ...
+            /data/cycles/result6    [n_cycles, n_loop]
+
+        This (rather than one 3-D ``[n_cycles, 7, n_loop]`` dataset) keeps PyMca
+        happy — a 3-D dataset sitting next to the 1-D averaged signals in
+        ``/data`` trips its NXdata auto-plot; a subgroup of 2-D arrays is
+        ignored by the signal detector and each opens as a clean cycles×points
+        image.  A bad cycle shows up as a stripe.
 
         Best-effort: any failure is logged and swallowed — the averaged result
         is already written, so the file is valid with or without this block.
         Older device servers without the per-cycle commands simply yield no
-        dataset.
+        group.
         """
         try:
             try:
@@ -943,7 +954,8 @@ class ScanRunner:
                 lg("  (no per-cycle data retained by device)")
                 return
 
-            cube = np.full((ncyc, 7, n_loop), np.nan)
+            # blocks[0] = field, blocks[1..6] = result1..result6
+            blocks = np.full((7, ncyc, n_loop), np.nan)
             kept = 0
             for n in range(1, ncyc + 1):
                 if self._abort:
@@ -960,7 +972,7 @@ class ScanRunner:
                     continue
                 grid = flat[:7 * blk].reshape(7, blk)
                 m = min(blk, n_loop)
-                cube[n - 1, :, :m] = grid[:, :m]
+                blocks[:, n - 1, :m] = grid[:, :m]
                 kept += 1
 
             if kept == 0:
@@ -968,23 +980,29 @@ class ScanRunner:
                 return
 
             data_grp = hfile["data"]
-            if "cycles" in data_grp:
+            if "cycles" in data_grp:          # replace any prior representation
                 del data_grp["cycles"]
-            ds = data_grp.create_dataset("cycles", data=cube)
-            # block index 0 = field (mT); 1..6 = result1..result6
-            _wsa(ds, "block_order",
-                 "field,result1,result2,result3,result4,result5,result6")
-            _wsa(ds, "field_unit", "mT")
-            _wsa(ds, "layout", "[cycle, block, point]")
-            ds.attrs["n_cycles"] = kept
-            # Map each enabled display channel to its result block (1..6) so
-            # the analysis / UI can pull the right slice without parsing labels.
+            cyc = data_grp.create_group("cycles")
+            cyc.attrs["n_cycles"] = kept
+            _wsa(cyc, "layout", "[cycle, point]")
+            # Map each enabled display channel to its result block so the label
+            # rides along on the right dataset.
+            labels = {}
             for c in active_ch:
                 attr = str(c.get("attr", ""))
                 if attr.startswith("result") and attr[6:].isdigit():
-                    _wsa(ds, f"channel_{attr}_label", c.get("label", attr))
-            lg(f"  ✓ stored {kept}/{ncyc} raw cycle(s) → /data/cycles "
-               f"{cube.shape}")
+                    labels[attr] = c.get("label", attr)
+
+            names = ["field", "result1", "result2", "result3",
+                     "result4", "result5", "result6"]
+            for i, name in enumerate(names):
+                ds = cyc.create_dataset(name, data=blocks[i])
+                if name == "field":
+                    _wsa(ds, "unit", "mT")
+                if name in labels:
+                    _wsa(ds, "label", labels[name])
+            lg(f"  ✓ stored {kept}/{ncyc} raw cycle(s) → /data/cycles/* "
+               f"[{kept} cyc × {n_loop} pt]")
         except Exception as e:
             lg(f"  ⚠ per-cycle save failed: {e}")
 
