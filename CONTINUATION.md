@@ -20,22 +20,29 @@ fresh chat can pick up without re-deriving context.
 
 ## Open follow-ups (roughly priority order)
 
-### A. PyHysteresis per-cycle UI in Samba (the natural next step)
-The TANGO device already retains every cycle and can re-average excluding bad
-ones (`GetNumberOfCycles`, `GetCycle(n)`, `SetExcludedCycles`, `RecomputeAverage`).
-Nothing in Samba uses these yet. To finish the "see individual scans, kick one
-out of the average" feature the colleague asked for:
-1. **Save per-cycle data to HDF5** — in `core/scan/runner.py` `_run_dc_hyst`, after
-   completion loop `GetCycle(1..N)` and write a `/data/cycles` dataset
-   (`[n_cycles, 7, 2*NumberOfPoints]` or similar). ~20 lines, low risk; preserves
-   the raw scans in every file so exclusion can also be done offline.
-2. **Live overlay + checkboxes** in the DC-Hyst panel: faint per-cycle traces over
-   the average; unchecking a cycle calls `SetExcludedCycles`/`RecomputeAverage`
-   and repaints. The real interactive UX.
-3. **Analysis pipeline** (`Analysis/analyze_samba.py`): read `/data/cycles`, show
-   them, drop outliers when re-fitting.
-4. **Source-selection dropdown** in the Samba DC-Hyst panel writing the new
-   `source1..6` attributes (currently set from Jive). ~30 lines.
+### A. PyHysteresis per-cycle UI in Samba (mostly done — A.2 remains)
+The TANGO device retains every cycle and can re-average excluding bad ones
+(`GetNumberOfCycles`, `GetCycle(n)`, `SetExcludedCycles`, `RecomputeAverage`).
+Status of the "see individual scans, kick one out of the average" feature:
+1. ✅ **DONE** — **Save per-cycle data to HDF5** (`core/scan/runner.py`
+   `_save_hyst_cycles`): on completion, `GetCycle(1..N)` → `/data/cycles`
+   `[n_cycles, 7, n_loop]` (block 0 = field mT, 1..6 = result1..6). Best-effort;
+   older servers without the commands simply produce no dataset. +4 tests.
+2. 🚫 **NOT PLANNED (Jakub, this session).** A live in-acquisition exclusion UI
+   isn't needed: every cycle is now saved to `/data/cycles` (A.1) and outliers
+   can be dropped offline at analysis time via `hyst_cycle_average(exclude=)` /
+   `hyst_detect_outliers` (A.3). Acquisition keeps **all** cycles. If a live
+   overlay is ever revisited: do *not* render N raw checkboxes (40 cycles → 40
+   boxes) — use a compact "Exclude cycles: 3,7,12" line-edit or a fixed-height
+   scrollable list, on change call `SetExcludedCycles` + `RecomputeAverage` and
+   repaint; `Analysis/samba_io.plot_hyst_cycles` already does the overlay drawing.
+3. ✅ **DONE** — **Analysis** (`Analysis/samba_io.py`): `load_hyst_cycles`,
+   `hyst_cycle_average(exclude=)`, `hyst_detect_outliers`, `plot_hyst_cycles`.
+   scipy import made lazy so these stay numpy/h5py-only. +4 tests.
+4. ✅ **DONE** — **Source-selection dropdowns** in the Samba DC-Hyst panel
+   (`right_panel.py` "Recorded sources (PLC)" group, 6 combos) writing
+   `source1..6` at scan start (`runner._run_dc_hyst`). Config key `hyst_sources`
+   (schema v5 migration), also stored in HDF5 metadata. +2 tests.
 
 ### B. Samba structural refactors (deferred from the original review — larger)
 - **Cryo ↔ Samba_main UI dedup**: `Cryo/panels.py` (~2400 lines) reimplements

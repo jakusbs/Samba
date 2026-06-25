@@ -862,5 +862,244 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
         self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. DC hysteresis — raw per-cycle data saved to /data/cycles
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _CycleProxy:
+    """Fake PyHysteresis exposing GetNumberOfCycles / GetCycle(n).
+
+    Each GetCycle(n) returns 7 blocks of `blk` points (field + result1..6),
+    filled with the value `n` so each cycle is trivially identifiable.
+    """
+    def __init__(self, ncyc, blk, fail_get=()):
+        self._ncyc = ncyc
+        self._blk  = blk
+        self._fail = set(fail_get)
+
+    def command_inout(self, cmd, *a):
+        if cmd == "GetNumberOfCycles":
+            return self._ncyc
+        if cmd == "GetCycle":
+            n = a[0]
+            if n in self._fail:
+                raise Exception(f"simulated GetCycle({n}) failure")
+            return (np.ones(7 * self._blk, dtype=float) * float(n)).tolist()
+        raise Exception(f"unexpected command {cmd}")
+
+
+class TestDcHystCycleSave(unittest.TestCase):
+
+    def _save(self, proxy, n_loop, channels=None):
+        """Returns (present, blocks_dict, group_attrs).
+
+        blocks_dict maps 'field','result1'..'result6' → 2-D arrays, mirroring
+        the /data/cycles GROUP layout (one dataset per quantity).
+        """
+        import h5py
+        r = _make_runner()
+        active = channels or [
+            {"label": "MOKE (R1)", "attr": "result1", "enabled": True}]
+        f = h5py.File("mem.h5", "w", driver="core", backing_store=False)
+        f.create_group("data")
+        try:
+            r._save_hyst_cycles(f, proxy, active, n_loop, _noop)
+            present = "cycles" in f["data"]
+            blocks, gattr = None, None
+            if present:
+                grp = f["data"]["cycles"]
+                blocks = {k: grp[k][...] for k in grp.keys()}
+                gattr = dict(grp.attrs)
+        finally:
+            f.close()
+        return present, blocks, gattr
+
+    def test_stores_group_of_2d_arrays(self):
+        # blk == n_loop == 8 (npts=4 → 2*npts)
+        present, blocks, gattr = self._save(_CycleProxy(ncyc=3, blk=8), n_loop=8)
+        self.assertTrue(present)
+        # one 2-D [n_cycles, n_loop] dataset per quantity, not a 3-D cube
+        for name in ("field", "result1", "result6"):
+            self.assertIn(name, blocks)
+            self.assertEqual(blocks[name].shape, (3, 8))
+        # cycle n is filled with value n
+        for n in range(1, 4):
+            self.assertTrue(np.allclose(blocks["result1"][n - 1], float(n)))
+        self.assertEqual(int(gattr["n_cycles"]), 3)
+
+    def test_no_cycles_writes_no_group(self):
+        present, _, _ = self._save(_CycleProxy(ncyc=0, blk=8), n_loop=8)
+        self.assertFalse(present)
+
+    def test_missing_command_is_swallowed(self):
+        class NoCmd:
+            def command_inout(self, *a):
+                raise Exception("GetNumberOfCycles not implemented")
+        present, _, _ = self._save(NoCmd(), n_loop=8)
+        self.assertFalse(present)
+
+    def test_partial_cycle_failure_keeps_the_rest(self):
+        present, blocks, gattr = self._save(
+            _CycleProxy(ncyc=3, blk=8, fail_get=(2,)), n_loop=8)
+        self.assertTrue(present)
+        self.assertEqual(int(gattr["n_cycles"]), 2)        # cycle 2 dropped
+        r1 = blocks["result1"]
+        self.assertTrue(np.allclose(r1[0], 1.0))
+        self.assertTrue(np.all(np.isnan(r1[1])))           # failed cycle → NaN
+        self.assertTrue(np.allclose(r1[2], 3.0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. DC hysteresis — Analysis/samba_io.py reads /data/cycles round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RampCycleProxy:
+    """GetCycle(n): field ramps -10n..+10n, result1 = n + optional spike."""
+    def __init__(self, ncyc, blk, spike_cycle=None, spike_val=1000.0):
+        self.n, self.blk = ncyc, blk
+        self.spike_cycle, self.spike_val = spike_cycle, spike_val
+
+    def command_inout(self, cmd, *a):
+        if cmd == "GetNumberOfCycles":
+            return self.n
+        if cmd == "GetCycle":
+            n = a[0]
+            field = np.linspace(-10.0 * n, 10.0 * n, self.blk)
+            r1 = np.ones(self.blk) * (self.spike_val
+                                      if n == self.spike_cycle else float(n))
+            blocks = [field, r1] + [np.ones(self.blk) * n for _ in range(5)]
+            return np.concatenate(blocks).tolist()
+        raise Exception("bad command")
+
+
+class TestHystCycleRoundTrip(unittest.TestCase):
+    """A.1 writer (ScanRunner._save_hyst_cycles) ↔ A.3 reader
+    (Analysis/samba_io.load_hyst_cycles + re-average + outliers)."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Analysis'))
+        import samba_io as _sio
+        cls.sio = _sio
+
+    def _write(self, proxy, n_loop, channels):
+        import tempfile, h5py
+        r = _make_runner()
+        tmp = tempfile.mktemp(suffix='.h5')
+        f = h5py.File(tmp, 'w'); f.create_group('data')
+        r._save_hyst_cycles(f, proxy, channels, n_loop, _noop)
+        f.close()
+        return tmp
+
+    def test_roundtrip_shapes_labels_and_average(self):
+        import os as _os
+        chans = [{"label": "MOKE (R1)", "attr": "result1", "enabled": True},
+                 {"label": "R5 field",  "attr": "result5", "enabled": True}]
+        tmp = self._write(_RampCycleProxy(5, 8), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+        finally:
+            _os.remove(tmp)
+        self.assertIsNotNone(cyc)
+        self.assertEqual(cyc['n_cycles'], 5)
+        self.assertEqual(cyc['cube'].shape, (5, 7, 8))
+        self.assertEqual(cyc['labels'].get('result1'), "MOKE (R1)")
+        self.assertEqual(cyc['labels'].get('result5'), "R5 field")
+        # result1 of cycle n is filled with n → mean over all = 3.0
+        self.assertAlmostEqual(float(np.nanmean(cyc['result1'])), 3.0)
+        # exclude cycles 1 and 5 → average over {2,3,4}, result1 mean = 3.0
+        avg = self.sio.hyst_cycle_average(cyc, exclude=(1, 5))
+        self.assertEqual(avg['included'], [2, 3, 4])
+        self.assertAlmostEqual(float(np.nanmean(avg['result1'])), 3.0)
+
+    def test_missing_dataset_returns_none(self):
+        import tempfile, h5py, os as _os
+        tmp = tempfile.mktemp(suffix='.h5')
+        f = h5py.File(tmp, 'w'); f.create_group('data')
+        f['data'].create_dataset('actuator_field', data=np.zeros(8))
+        f.close()
+        try:
+            self.assertIsNone(self.sio.load_hyst_cycles(tmp))
+        finally:
+            _os.remove(tmp)
+
+    def test_outlier_detection_flags_spiked_cycle(self):
+        import os as _os
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True}]
+        # cycle 3 spikes far from the others → flagged as outlier
+        tmp = self._write(_RampCycleProxy(6, 8, spike_cycle=3), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+            outliers = self.sio.hyst_detect_outliers(cyc, 'result1', n_sigma=3.0)
+        finally:
+            _os.remove(tmp)
+        self.assertIn(3, outliers)
+
+    def test_all_excluded_raises(self):
+        import os as _os
+        chans = [{"label": "MOKE", "attr": "result1", "enabled": True}]
+        tmp = self._write(_RampCycleProxy(2, 8), 8, chans)
+        try:
+            cyc = self.sio.load_hyst_cycles(tmp)
+            with self.assertRaises(ValueError):
+                self.sio.hyst_cycle_average(cyc, exclude=(1, 2))
+        finally:
+            _os.remove(tmp)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. DC hysteresis — recorded-source selection written at scan start (A.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDcHystSourceWrite(unittest.TestCase):
+    """_run_dc_hyst must push cfg['hyst_sources'] to the device's source1..6
+    attributes before measuring; an older server that rejects them is tolerated."""
+
+    def _run(self, sources, write_hook=None):
+        import tempfile
+        writes = []   # (attr, val)
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+                 _runner_mod.safe_write)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "t.h5"
+
+        def _sw(p, attr, val, **kw):
+            writes.append((attr, val))
+            return write_hook(attr) if write_hook else None
+        _runner_mod.safe_write = _sw
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "t",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0,
+                       "hyst_int_time": 0.01, "hyst_sources": sources,
+                       "hyst_channels": [{"label": "R1", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}],
+                       "sensors": []}
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()                       # stop after the config writes
+                r.run({"status": _noop, "log": _noop})
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+             _runner_mod.safe_write) = _orig
+        return writes
+
+    def test_sources_written_in_order(self):
+        writes = self._run([1, 2, 13, 4, 15, 6])
+        src = [(a, v) for a, v in writes if a.startswith("source")]
+        self.assertEqual(src, [("source1", 1), ("source2", 2), ("source3", 13),
+                               ("source4", 4), ("source5", 15), ("source6", 6)])
+
+    def test_older_server_rejecting_source_is_tolerated(self):
+        # safe_write returns an error string for source* → loop breaks, no raise
+        writes = self._run(
+            [1, 2, 3, 4, 5, 6],
+            write_hook=lambda attr: "no such attr" if attr.startswith("source") else None)
+        # base params still attempted; scan didn't crash (we got here)
+        self.assertTrue(any(a == "MagneticField" for a, _ in writes))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

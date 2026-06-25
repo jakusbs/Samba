@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -212,6 +212,10 @@ def make_default_config(name: str = "scan_x") -> dict:
             {"label": "R5 (Hall)", "attr": "result5", "enabled": False, "y_axis": "Y2"},
             {"label": "R6",        "attr": "result6", "enabled": False, "y_axis": "Y2"},
         ],
+        # Which physical signal the PLC records into each result line 1..6.
+        # 1..6 = AnalogIn1..6 (hard-wired default), 11..16 = ELM1..6.
+        # Written to the PyHysteresis source1..6 attributes at scan start.
+        "hyst_sources": [1, 2, 3, 4, 5, 6],
         # TR-MOKE defaults
         "trmoke_dg645":     "hpp-N42/delay/DG645",
         "trmoke_channel":   "A",
@@ -345,11 +349,18 @@ def _migrate_v3_to_v4(cfg: dict):
     cfg.setdefault("field_setpoint_unit", "A")
 
 
+def _migrate_v4_to_v5(cfg: dict):
+    """v4→v5: Add DC-hyst recorded-source selection (source1..6).
+    Default 1..6 = AnalogIn1..6, preserving the old hard-wired behaviour."""
+    cfg.setdefault("hyst_sources", [1, 2, 3, 4, 5, 6])
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
+    (5, _migrate_v4_to_v5),
 ]
 
 

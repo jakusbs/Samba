@@ -916,6 +916,96 @@ class ScanRunner:
 
         return result_arrays
 
+    def _save_hyst_cycles(self, hfile, hyst_p, active_ch: list,
+                          n_loop: int, lg) -> None:
+        """Read every retained cycle off the PyHysteresis device and store the
+        raw per-cycle half-loops under the ``/data/cycles`` group.
+
+        The device retains each individual scan (``GetNumberOfCycles`` /
+        ``GetCycle(n)``); ``GetCycle`` returns a flat array of 7 blocks, each
+        ``2*NumberOfPoints`` (== ``n_loop``) long: field, result1..result6,
+        positive half then negative half.
+
+        Layout — one 2-D dataset per quantity, each ``[n_cycles, n_loop]``::
+
+            /data/cycles/field      [n_cycles, n_loop]   (mT)
+            /data/cycles/result1    [n_cycles, n_loop]
+            ...                      ...
+            /data/cycles/result6    [n_cycles, n_loop]
+
+        This (rather than one 3-D ``[n_cycles, 7, n_loop]`` dataset) keeps PyMca
+        happy — a 3-D dataset sitting next to the 1-D averaged signals in
+        ``/data`` trips its NXdata auto-plot; a subgroup of 2-D arrays is
+        ignored by the signal detector and each opens as a clean cycles×points
+        image.  A bad cycle shows up as a stripe.
+
+        Best-effort: any failure is logged and swallowed — the averaged result
+        is already written, so the file is valid with or without this block.
+        Older device servers without the per-cycle commands simply yield no
+        group.
+        """
+        try:
+            try:
+                ncyc = int(hyst_p.command_inout("GetNumberOfCycles"))
+            except Exception as e:
+                lg(f"  (no per-cycle data: GetNumberOfCycles unavailable — {e})")
+                return
+            if ncyc < 1:
+                lg("  (no per-cycle data retained by device)")
+                return
+
+            # blocks[0] = field, blocks[1..6] = result1..result6
+            blocks = np.full((7, ncyc, n_loop), np.nan)
+            kept = 0
+            for n in range(1, ncyc + 1):
+                if self._abort:
+                    break
+                try:
+                    flat = np.asarray(hyst_p.command_inout("GetCycle", n),
+                                      dtype=float).flatten()
+                except Exception as e:
+                    lg(f"  ⚠ GetCycle({n}) failed: {e}")
+                    continue
+                blk = len(flat) // 7
+                if blk < 1:
+                    lg(f"  ⚠ GetCycle({n}) too short ({len(flat)} vals)")
+                    continue
+                grid = flat[:7 * blk].reshape(7, blk)
+                m = min(blk, n_loop)
+                blocks[:, n - 1, :m] = grid[:, :m]
+                kept += 1
+
+            if kept == 0:
+                lg("  ⚠ no cycles could be read — skipping /data/cycles")
+                return
+
+            data_grp = hfile["data"]
+            if "cycles" in data_grp:          # replace any prior representation
+                del data_grp["cycles"]
+            cyc = data_grp.create_group("cycles")
+            cyc.attrs["n_cycles"] = kept
+            _wsa(cyc, "layout", "[cycle, point]")
+            # Map each enabled display channel to its result block so the label
+            # rides along on the right dataset.
+            labels = {}
+            for c in active_ch:
+                attr = str(c.get("attr", ""))
+                if attr.startswith("result") and attr[6:].isdigit():
+                    labels[attr] = c.get("label", attr)
+
+            names = ["field", "result1", "result2", "result3",
+                     "result4", "result5", "result6"]
+            for i, name in enumerate(names):
+                ds = cyc.create_dataset(name, data=blocks[i])
+                if name == "field":
+                    _wsa(ds, "unit", "mT")
+                if name in labels:
+                    _wsa(ds, "label", labels[name])
+            lg(f"  ✓ stored {kept}/{ncyc} raw cycle(s) → /data/cycles/* "
+               f"[{kept} cyc × {n_loop} pt]")
+        except Exception as e:
+            lg(f"  ⚠ per-cycle save failed: {e}")
+
     # ── DC Hysteresis scan ────────────────────────────────────────────────────
     def _run_dc_hyst(self, cfg: dict, setup: dict, cbs: dict) -> Optional[str]:
         """
@@ -1003,6 +1093,10 @@ class ScanRunner:
             meta.attrs["noDC"]             = bool(cfg.get("noDC",  False))
             meta.attrs["mirror_shift_mm"]  = float(cfg.get("mirror_shift", 0.0))
             meta.attrs["channels_json"]    = _json.dumps(hyst_chs)
+            _src = cfg.get("hyst_sources")
+            if _src:
+                meta.attrs["hyst_sources"] = np.asarray(
+                    [int(s) for s in _src[:6]], dtype=int)
 
             # Hardware snapshot + temperature-sweep keys
             _write_hw_metadata(meta, cfg)
@@ -1052,6 +1146,24 @@ class ScanRunner:
             err = safe_write(hyst_p, attr, val)
             tag = "✓" if not err else "⚠"
             lg(f"  {tag} {attr} ← {val}" + (f"  ({err})" if err else ""))
+
+        # Recorded-source selection (source1..6): which physical signal the PLC
+        # records into each result line.  1..6 = AnalogIn1..6, 11..16 = ELM1..6.
+        # Best-effort: device servers / PLC programs without the source* attrs
+        # raise — log once and keep the default AnalogIn1..6 wiring.
+        sources = cfg.get("hyst_sources")
+        if sources:
+            for i, src in enumerate(sources[:6], start=1):
+                try:
+                    src = int(src)
+                except (TypeError, ValueError):
+                    continue
+                err = safe_write(hyst_p, f"source{i}", src)
+                if err:
+                    lg(f"  ⚠ source{i} ← {src} not applied "
+                       f"(older server/PLC?): {err}")
+                    break
+                lg(f"  ✓ source{i} ← {src}")
 
         # Polling interval: 1/4 of a half-loop duration, minimum 200 ms.
         # This gives ~4 state-polls per half-loop — enough for smooth progress
@@ -1159,6 +1271,9 @@ class ScanRunner:
                 # Scalar results → metadata attrs
                 for s, v in scalars.items():
                     hfile["metadata"].attrs[s] = v
+                # Raw per-cycle half-loops (best-effort; enables offline
+                # inspection / outlier exclusion without re-measuring).
+                self._save_hyst_cycles(hfile, hyst_p, active_ch, n_loop, lg)
                 _wsa(hfile, "scan_status",   "completed")
                 _wsa(hfile, "timestamp_end", datetime.now().isoformat())
                 hfile.attrs["duration_seconds"] = elapsed
