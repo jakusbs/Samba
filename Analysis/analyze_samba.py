@@ -8,7 +8,8 @@ Channel mapping (auto):
     ZI_x1  → zix1      ZI_y1  → ziy1
     ZI_x2  → zix2      ZI__y2 → ziy2   (handles double-underscore typo)
     DC/Mon → FL         (reflection / focus-laser equivalent)
-    actuator_x → 'x'   (already in µm in Cryo HDF5)
+    actuator_x / actuator_y → 'x'   (already in µm in Cryo HDF5; scan axis
+                                     is auto-detected, so SOT-y scans work)
 """
 
 import os
@@ -636,10 +637,16 @@ def find_phase(x, x1_data, y1_data, edges, ch, do_plot=False, ax=None):
 # Channel name mapping
 # ---------------------------------------------------------------------------
 
-_SKIP_CH = {'actuator_x_setpoint', 'x_setpoint', 'time', 'Field', 'Temperature'}
+_SKIP_CH = {'actuator_x_setpoint', 'actuator_y_setpoint',
+            'x_setpoint', 'y_setpoint', 'time', 'Field', 'Temperature',
+            'calibration'}
 
-# Priority-ordered candidates for auto-detecting the X-axis and intensity channels
-_X_CH_CANDIDATES         = ('actuator_x', 'x_actual', 'x_setpoint')
+# Priority-ordered candidates for auto-detecting the scan-axis and intensity
+# channels.  Y-axis names cover SOT-y scans (e.g. IR SAMBA), where the file
+# has actuator_y instead of actuator_x; actual positions beat setpoints.
+_X_CH_CANDIDATES         = ('actuator_x', 'x_actual',
+                            'actuator_y', 'y_actual',
+                            'x_setpoint', 'y_setpoint')
 _INTENSITY_CH_CANDIDATES = ('DC', 'FL', 'Mon')
 
 # Regex that matches any lock-in channel name (with or without ZI/ZI2 prefix)
@@ -1176,6 +1183,12 @@ class analyze_cryo:
             x_ch=self.x_ch,
         )
         print(f'  Data keys loaded: {list(self.data.keys())}')
+        if 'x' not in self.data:
+            raise RuntimeError(
+                f'import_data: no position data loaded (x_ch="{self.x_ch}", '
+                f'channels in file: {self._detected["all"]}). Check that the '
+                f'scan-axis channel exists and that the scanlist has scans of '
+                f'both field polarities.')
         return self
 
     # ── per-scan intensity plot ───────────────────────────────────────────
