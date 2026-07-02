@@ -1257,6 +1257,15 @@ Polarity is `relay_sign × sign(field_T)` from columns 2–3 of the scanlist.
 to avoid the 180° degeneracy that an unbounded optimiser hits. Run per
 polarity and averaged. Saved as `phase_search.png` when `do_plot=True`.
 
+**Edge detection** (`find_edges_width`) tries the innermost derivative-peak
+pair first, then falls back to the left/right-half strategy, then to the
+steepest gradient — the first result with width ≥ `min_width` (default 4)
+wins. `get_edges` never aborts: if the width is still too small it warns
+loudly and uses a central 15–85 % percentile window for the phase search
+(the fit uses the Oersted edges, so it is unaffected). `import_analyze_both`
+runs each direction in its own try/except and prints the full traceback on
+failure, so one bad direction never silently loses the other.
+
 ### Pipeline (`evaluate_data` modes)
 
 - `sumdiff` / `sumdiff2nd` — half-sum vs. half-difference plot

@@ -648,54 +648,89 @@ def nan_helper(y):
 # Edge detection & phase optimisation
 # ---------------------------------------------------------------------------
 
-def find_edges_width(position, reflex):
-    """Find device edges from reflection profile using spline + derivative peaks."""
+def find_edges_width(position, reflex, min_width=4.0):
+    """Find device edges from the reflection profile (spline + derivative peaks).
+
+    Two strategies are tried, in order, and the first whose width is
+    ``>= min_width`` wins (else the widest is returned — best effort):
+
+    1. **Innermost peak pair** (Tobi): left edge = rightmost negative-derivative
+       peak, right edge = leftmost positive-derivative peak.  Robust against
+       noise spikes *outside* the device.
+    2. **Left/right-half** (the earlier method): strongest negative-derivative
+       peak in the left half, strongest positive in the right half.  Robust
+       when the innermost pair collapses onto a spurious feature near the
+       centre (which is what makes a single scan direction fail).
+    """
     def derivatives(x, y):
         h = x[1] - x[0]
-        dy  = [(y[i + 1] - y[i - 1]) / (2 * h)          for i in range(1, len(x) - 1)]
-        ddy = [(y[i + 1] - 2 * y[i] + y[i - 1]) / (h * h) for i in range(1, len(x) - 1)]
-        return list(x[1:-1]), dy, ddy
+        dy = [(y[i + 1] - y[i - 1]) / (2 * h) for i in range(1, len(x) - 1)]
+        return list(x[1:-1]), dy
 
     tck = interpolate.splrep(position, reflex, s=0)
     step = (position[1] - position[0]) / 10.0
     pos_i = np.arange(position[0], position[-1], step)
     ref_i = interpolate.splev(pos_i, tck, der=0)
 
-    newpos, dy, _ = derivatives(pos_i, ref_i)
+    newpos, dy = derivatives(pos_i, ref_i)
     newpos = np.array(newpos)
     dy = np.array(dy)
 
     threshold = 0.3 * np.max(np.abs(dy))
     min_dist  = max(10, len(dy) // 50)
-
-    # Innermost peak pair: left edge = rightmost negative peak, right edge
-    # = leftmost positive peak.  Outer noise spikes can't steal an edge; if
-    # there is dirt *inside* the device the measurement is bad from the
-    # start anyway (and the min_width guard in get_edges catches the
-    # resulting collapse).
     neg_idx, _ = signal.find_peaks(-dy, height=threshold, distance=min_dist)
     pos_idx, _ = signal.find_peaks( dy, height=threshold, distance=min_dist)
 
-    if len(neg_idx) > 0 and len(pos_idx) > 0:
-        left_idx  = neg_idx[np.argmax(neg_idx)]
-        right_idx = pos_idx[np.argmin(pos_idx)]
-        if left_idx >= right_idx:           # reversed scan / flipped polarity
-            left_idx  = pos_idx[np.argmax(pos_idx)]
-            right_idx = neg_idx[np.argmin(neg_idx)]
-    elif len(neg_idx) > 0:
-        s = np.sort(neg_idx)
-        left_idx, right_idx = s[0], s[-1]
-    elif len(pos_idx) > 0:
-        s = np.sort(pos_idx)
-        left_idx, right_idx = s[0], s[-1]
-    else:
-        left_idx  = int(np.argmin(dy))
-        right_idx = int(np.argmax(dy))
-        if left_idx > right_idx:
-            left_idx, right_idx = right_idx, left_idx
+    def _innermost():
+        # rightmost negative peak / leftmost positive peak
+        if len(neg_idx) and len(pos_idx):
+            li, ri = int(neg_idx[np.argmax(neg_idx)]), int(pos_idx[np.argmin(pos_idx)])
+            if li >= ri:                     # reversed scan / flipped polarity
+                li, ri = int(pos_idx[np.argmax(pos_idx)]), int(neg_idx[np.argmin(neg_idx)])
+            return li, ri
+        if len(neg_idx):
+            s = np.sort(neg_idx); return int(s[0]), int(s[-1])
+        if len(pos_idx):
+            s = np.sort(pos_idx); return int(s[0]), int(s[-1])
+        return None
 
-    x1 = round(float(newpos[left_idx]),  2)
-    x2 = round(float(newpos[right_idx]), 2)
+    def _halves():
+        n = len(newpos); off = n // 2
+        dyL, dyR = dy[:off], dy[off:]
+        negL, _ = signal.find_peaks(-dyL, height=threshold, distance=min_dist)
+        posL, _ = signal.find_peaks( dyL, height=threshold, distance=min_dist)
+        negR, _ = signal.find_peaks(-dyR, height=threshold, distance=min_dist)
+        posR, _ = signal.find_peaks( dyR, height=threshold, distance=min_dist)
+        if   len(negL): li = int(negL[np.argmax(np.abs(dyL[negL]))])
+        elif len(posL): li = int(posL[np.argmax(np.abs(dyL[posL]))])
+        else:           li = int(np.argmin(dyL))
+        if   len(posR): ri = int(posR[np.argmax(np.abs(dyR[posR]))]) + off
+        elif len(negR): ri = int(negR[np.argmax(np.abs(dyR[negR]))]) + off
+        else:           ri = int(np.argmax(dyR)) + off
+        return li, ri
+
+    def _steepest():
+        li, ri = int(np.argmin(dy)), int(np.argmax(dy))
+        return (li, ri) if li <= ri else (ri, li)
+
+    cands = []
+    for fn in (_innermost, _halves, _steepest):
+        try:
+            r = fn()
+        except Exception:
+            r = None
+        if not r:
+            continue
+        li, ri = min(r), max(r)
+        cands.append((li, ri, abs(float(newpos[ri]) - float(newpos[li]))))
+
+    chosen = next((c for c in cands if c[2] >= min_width), None)
+    if chosen is None:
+        chosen = max(cands, key=lambda c: c[2]) if cands else (0, len(newpos) - 1, 0.0)
+
+    li, ri, _w = chosen
+    x1 = round(float(newpos[li]), 2)
+    x2 = round(float(newpos[ri]), 2)
     return [x1, x2], round(x2 - x1, 2)
 
 
@@ -1404,10 +1439,12 @@ class analyze_SOT:
     def get_edges(self, I_ch=None, min_width=4.0):
         """Detect device edges from the reflection channel.
 
-        Raises ``RuntimeError`` when the detected width is below
-        ``min_width`` (in x-axis units) — a sub-µm "device" means the edge
-        algorithm latched onto noise, and continuing would produce a
-        nonsense phase window and fit.
+        Tries the innermost-pair then the left/right-half strategy
+        (:func:`find_edges_width`).  If the width still comes out below
+        ``min_width`` (edge detection latched onto noise), it does **not**
+        abort — it warns loudly and falls back to a central 15–85 %
+        percentile window so the phase search and fit (which use the Oersted
+        edges) still run.  Pass ``min_width=0`` to accept any detected width.
         """
         if I_ch is None:
             I_ch = self._reflec_key
@@ -1424,22 +1461,32 @@ class analyze_SOT:
         rsort  = reflec[mask]
 
         try:
-            edges, width = find_edges_width(xsort[5:-5], rsort[5:-5])
+            edges, width = find_edges_width(xsort[5:-5], rsort[5:-5],
+                                            min_width=min_width)
         except Exception as e:
             warnings.warn(f'get_edges: find_edges_width failed: {e}')
-            return self
+            edges, width = None, 0.0
 
-        if width < 0:
+        if edges is not None and width < 0:
             edges  = [edges[1], edges[0]]
             width  = -width
-        print(f'  Edges: {edges[0]:.2f} – {edges[1]:.2f} {self.x_unit}  '
-              f'width = {width:.2f} {self.x_unit}')
-        if width < min_width:
-            raise RuntimeError(
-                f'get_edges: detected width {width:.2f} {self.x_unit} < '
-                f'min_width {min_width} — edge detection failed (edges '
-                f'{edges[0]:.2f}/{edges[1]:.2f}). Check the "{I_ch}" '
-                f'reflection profile or pass min_width= explicitly.')
+        if edges is not None:
+            print(f'  Edges: {edges[0]:.2f} – {edges[1]:.2f} {self.x_unit}  '
+                  f'width = {width:.2f} {self.x_unit}')
+
+        if edges is None or width < min_width:
+            lo, hi = np.percentile(xsort, [15, 85])
+            fb = [round(float(lo), 2), round(float(hi), 2)]
+            warnings.warn(
+                f'get_edges: reflection edge detection unreliable '
+                f'(width {width:.2f} {self.x_unit} < {min_width}); falling '
+                f'back to the central {fb[0]}–{fb[1]} {self.x_unit} window '
+                f'for the phase search. The fit uses the Oersted edges, so '
+                f'it is unaffected — but check the "{I_ch}" reflection.')
+            print(f'  → edge fallback: phase window {fb[0]}–{fb[1]} '
+                  f'{self.x_unit}')
+            edges, width = fb, round(fb[1] - fb[0], 2)
+
         self.edges     = edges
         self.dev_center = float(np.mean(edges))
         self.width     = width
@@ -2197,17 +2244,23 @@ class analyze_SOT:
             return res, None
 
         def _run(direction):
-            # A failure in one direction (e.g. edge detection on a bad
-            # reflection profile) must not lose the other direction's result.
+            # A failure in one direction must not lose the other's result —
+            # but never fail silently: print the full traceback so the cause
+            # is visible in the console.
             try:
                 return analyze_SOT.import_analyze_SOT(
                     scanlist_path, see_channels=see_channels,
                     direction=direction, ignorLines=ignorLines,
                     fit_edge_offset=fit_edge_offset, **kwargs)
             except Exception as e:
+                import traceback
+                print('=' * 60)
+                print(f'  !! {direction.upper()} analysis FAILED: '
+                      f'{type(e).__name__}: {e}')
+                traceback.print_exc()
+                print('=' * 60)
                 warnings.warn(f'import_analyze_both: {direction} analysis '
                               f'failed: {e}')
-                print(f'  !! {direction.upper()} failed: {e}')
                 return None
 
         res_trace = res_retrace = None
