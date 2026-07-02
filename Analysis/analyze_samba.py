@@ -277,6 +277,40 @@ def _json_safe(v):
     return v
 
 
+def _safe_savefig(path, dpi=150, tight=True, tight_kw=None, **savekw):
+    """Save the current figure, tolerating ``tight_layout`` failures.
+
+    ``tight_layout`` can raise ``ValueError: cannot convert float NaN to
+    integer`` when a two-panel ``sharey`` figure with twin axes carries very
+    large tick labels (e.g. real ``sln`` × raw lock-in signal).  On failure
+    we restore the pre-tight axes positions and save the figure flat, so a
+    single unlucky plot never aborts the analysis pipeline.
+    """
+    fig = plt.gcf()
+    saved_pos = [ax.get_position(original=True) for ax in fig.axes]
+    if tight:
+        try:
+            fig.tight_layout(**(tight_kw or {}))
+        except Exception:
+            pass
+    try:
+        fig.savefig(path, dpi=dpi, **savekw)
+        return True
+    except Exception as e:
+        warnings.warn(f'_safe_savefig: tight layout failed ({type(e).__name__}: '
+                      f'{e}); saving "{os.path.basename(path)}" without it')
+        try:
+            fig.set_layout_engine('none')
+            for ax, pos in zip(fig.axes, saved_pos):
+                ax.set_position(pos)
+            fig.savefig(path, dpi=dpi, **savekw)
+            return True
+        except Exception as e2:
+            warnings.warn(f'_safe_savefig: could not save '
+                          f'{os.path.basename(path)}: {e2}')
+            return False
+
+
 def _moke_calibrate(um_ticks, m_volts):
     """Fit MOKE-calibration sweep → slope (mV/deg). HWP doubles the angle."""
     x = np.array(um_ticks, dtype=float) / (100.0 / 4.0) * 2.0   # ticks → deg
@@ -292,7 +326,38 @@ def get_sample_folder(sample_name, base=DEFAULT_ANALYSIS_BASE):
     return folder
 
 
-def read_calibration(folder, filename='calibration.txt'):
+def read_h5_calibration(h5_path):
+    """BD calibration straight from a SAMBA HDF5 file.
+
+    Reads ``/data/calibration`` (the 6 mV λ/2-plate readings at ticks
+    0,5,10,15,20,25 that Samba writes on every scan) and converts the slope
+    to ``sln`` in µrad/mV, exactly like :func:`read_calibration`.
+
+    Returns ``(sln, cal_mV_array)``, or ``(None, None)`` when the dataset is
+    absent or unusable (old files predating the BD-calibration feature).
+    """
+    if not h5_path or not os.path.exists(h5_path):
+        return None, None
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'data' in f and 'calibration' in f['data']:
+                cal = np.asarray(f['data']['calibration'], dtype=float).ravel()
+            else:
+                return None, None
+    except Exception as e:
+        warnings.warn(f'read_h5_calibration: {e}')
+        return None, None
+
+    if cal.size < 2 or not np.all(np.isfinite(cal)) or np.allclose(cal, 0):
+        return None, (cal if cal.size else None)
+    slope = _moke_calibrate(_CALIB_X_TICKS[:cal.size], cal)
+    if slope == 0 or not np.isfinite(slope):
+        return None, cal
+    sln = (1.0 / slope) * np.pi / 180.0 * 1e6
+    return sln, cal
+
+
+def read_calibration(folder, filename='calibration.txt', allow_prompt=True):
     """Read ``calibration.txt`` from ``folder``.
 
     File format (one value/line, all required):
@@ -302,11 +367,19 @@ def read_calibration(folder, filename='calibration.txt'):
         line 4 : theta (1st harmonic phase offset, deg)
 
     Returns ``(sln, R1, R2, theta)`` where ``sln`` is in µrad/mV.
-    If the file doesn't exist, the user is prompted interactively to enter the
+    When the file is missing and ``allow_prompt`` is False (e.g. the
+    calibration already came from the HDF5 file), returns
+    ``(None, 1.0, 1.0, 0.0)`` without prompting or writing anything.
+    If the file doesn't exist and ``allow_prompt`` is True, the user is
+    prompted interactively to enter the
     values; the file is then written so subsequent runs skip the prompt.
     """
     path = os.path.join(folder, filename)
     if not os.path.exists(path):
+        if not allow_prompt:
+            # Calibration already sourced elsewhere (e.g. the HDF5 file) —
+            # don't block on a prompt; R/theta fall back to defaults.
+            return None, 1.0, 1.0, 0.0
         print(f'\nNo calibration file found at:\n  {path}')
         print('Please enter the calibration values manually.\n')
 
@@ -411,6 +484,33 @@ def read_calibration(folder, filename='calibration.txt'):
 # HDF5 I/O
 # ---------------------------------------------------------------------------
 
+_NON_CHANNEL_DS = {'calibration'}   # datasets in /data that aren't scan channels
+
+
+def _pick_group(f):
+    """Return the HDF5 group holding the scan channels.
+
+    Prefers ``/data`` (new SAMBA) but only when it actually contains scan
+    channels — a file whose ``/data`` group holds *only* auxiliary datasets
+    (e.g. ``calibration``) with the real channels under ``/measurement``
+    falls back to ``/measurement``.  Returns ``None`` for the old
+    ``/scan_X`` layout (handled separately).
+    """
+    d = f['data'] if ('data' in f and isinstance(f['data'], h5py.Group)) else None
+    m = (f['measurement']
+         if ('measurement' in f and isinstance(f['measurement'], h5py.Group)
+             and not any(k.startswith('scan_') for k in f.keys()))
+         else None)
+    if d is not None:
+        real = [k for k in d
+                if k not in _NON_CHANNEL_DS and isinstance(d[k], h5py.Dataset)]
+        if real:
+            return d
+    if m is not None:
+        return m
+    return d   # /data with only aux datasets, or None
+
+
 def data_load(filename, data_channel, despike=False, return_unit=False):
     """Load one channel from a SAMBA HDF5 file.
 
@@ -432,22 +532,9 @@ def data_load(filename, data_channel, despike=False, return_unit=False):
     unit = ''
     with h5py.File(filename, 'r') as f:
 
-        # ── Cryo format ─────────────────────────────────────────────────
-        if 'data' in f and isinstance(f['data'], h5py.Group):
-            grp = f['data']
-            if data_channel in grp:
-                ds   = grp[data_channel]
-                data = np.array(ds, dtype=float)
-                unit = str(ds.attrs.get('unit', '')) if hasattr(ds, 'attrs') else ''
-            else:
-                warnings.warn(f'data_load: "{data_channel}" not found in {filename}')
-                return (np.zeros(1), '') if return_unit else np.zeros(1)
-
-        # ── Green/IR new SAMBA format ────────────────────────────────────
-        elif ('measurement' in f
-              and isinstance(f['measurement'], h5py.Group)
-              and not any(k.startswith('scan_') for k in f.keys())):
-            grp = f['measurement']
+        # ── Cryo / Green / IR new SAMBA format (/data or /measurement) ───
+        grp = _pick_group(f)
+        if grp is not None:
             if data_channel in grp:
                 ds   = grp[data_channel]
                 data = np.array(ds, dtype=float)
@@ -534,15 +621,13 @@ def get_channels(scanlist_or_h5, logfilepath='', data_base_dir=''):
         for k, v in f.attrs.items():
             meta[k] = v.decode('UTF-8') if isinstance(v, bytes) else v
 
-        # Cryo / new SAMBA
-        if 'data' in f and isinstance(f['data'], h5py.Group):
-            grp = f['data']
-        elif 'measurement' in f and isinstance(f['measurement'], h5py.Group):
-            grp = f['measurement']
-        else:
+        grp = _pick_group(f)
+        if grp is None:
             grp = {}
 
         for name in grp:
+            if name in _NON_CHANNEL_DS:
+                continue
             if isinstance(grp[name], h5py.Dataset):
                 print(f'    {name}')
                 res[name] = name
@@ -679,14 +764,11 @@ def _detect_channels(h5_path):
         return out
     try:
         with h5py.File(h5_path, 'r') as f:
-            grp = None
-            if 'data' in f and isinstance(f['data'], h5py.Group):
-                grp = f['data']
-            elif 'measurement' in f and isinstance(f['measurement'], h5py.Group):
-                grp = f['measurement']
+            grp = _pick_group(f)
             if grp is None:
                 return out
-            names = [n for n in grp if isinstance(grp[n], h5py.Dataset)]
+            names = [n for n in grp
+                     if n not in _NON_CHANNEL_DS and isinstance(grp[n], h5py.Dataset)]
     except Exception:
         return out
 
@@ -1100,25 +1182,36 @@ class analyze_SOT:
         self.sample_folder = sample_folder
         print(f'  Sample folder: {sample_folder}')
 
+        # ── BD calibration straight from the HDF5 file (per-scan) ─────────
+        h5_sln, h5_cal_mV = (read_h5_calibration(first_h5)
+                             if first_h5 else (None, None))
+        if h5_sln is not None:
+            print(f'  Calibration from HDF5 /data/calibration: '
+                  f'sln = {h5_sln:.4g} µrad/mV')
+
         cal_sln = None
         cal_R   = None
         cal_th  = None
         if use_calibration_file:
             try:
-                cal_sln, cal_R1, cal_R2, cal_th = read_calibration(sample_folder)
+                # If the HDF5 already gave us sln, don't block on a prompt.
+                cal_sln, cal_R1, cal_R2, cal_th = read_calibration(
+                    sample_folder, allow_prompt=(h5_sln is None))
                 cal_R = (cal_R1, cal_R2)
             except Exception as e:
                 warnings.warn(f'read_calibration: {e}')
 
-        # Resolve sln / R / theta : explicit args > calibration.txt > defaults
+        # Resolve sln : explicit args > HDF5 calibration > calibration.txt > default
         if sln is not None:
-            sln_val = float(sln)
+            sln_val, sln_src = float(sln), 'explicit sln='
         elif calibration is not None:
-            sln_val = float(calibration)
+            sln_val, sln_src = float(calibration), 'explicit calibration='
+        elif h5_sln is not None:
+            sln_val, sln_src = float(h5_sln), 'HDF5 /data/calibration'
         elif cal_sln is not None:
-            sln_val = float(cal_sln)
+            sln_val, sln_src = float(cal_sln), 'calibration.txt'
         else:
-            sln_val = 1.0
+            sln_val, sln_src = 1.0, 'default (1.0)'
 
         if R is not None:
             R_val = list(R)
@@ -1148,6 +1241,14 @@ class analyze_SOT:
         ci.theta2_pos = float(theta2)
         ci.theta2_neg = float(theta2)
         ci.R        = R_val
+        ci.sln_source        = sln_src
+        ci.bd_calibration_mV = (list(map(float, h5_cal_mV))
+                                if h5_cal_mV is not None else None)
+        # Device resistances / id from the HDF5 metadata (recorded, not used
+        # in the fit — 4-wire/2-wire are not the parallel-channel R1/R2).
+        ci.r_4wire_kohm = h5_meta.get('r_4wire_kohm')
+        ci.r_2wire_kohm = h5_meta.get('r_2wire_kohm')
+        ci.device_id    = str(h5_meta.get('device_id', '') or '')
         ci.LI_type  = li_type
         ci.system   = sample_name
         ci.sample_id = sample_name
@@ -1174,17 +1275,38 @@ class analyze_SOT:
         self.fit_DL_error_mT   = None
 
         # ── output directory ──────────────────────────────────────────────
-        # Default: <analysis_base_dir>/<sample>/<ts>_<scanlist-stem>[_<direction>]/
+        # Layout:
+        #   <sample>/<current>mA <meas-date>/<run-date> <run-time>[_<dir>]/
+        # e.g.  MySample/15mA 20260326/20260702 105936/
+        # The mid folder groups every analysis of one measurement (same
+        # current + measurement date); each run gets its own date-time folder.
         # save_dir overrides the parent; save_subdir=False writes directly to it.
-        ts     = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        cur = float(current_mA)
+        cur_str = (f'{int(round(cur))}mA'
+                   if abs(cur - round(cur)) < 1e-9 else f'{cur:g}mA')
+
+        # Measurement date: data file's date sub-folder → YYYYMMDD token in the
+        # scanlist name → today.
+        meas_date = None
+        if first_h5:
+            dd = os.path.basename(os.path.dirname(first_h5))
+            if re.fullmatch(r'\d{8}', dd):
+                meas_date = dd
+        if meas_date is None:
+            m = re.search(r'(20\d{6})', name)
+            meas_date = m.group(1) if m else datetime.datetime.now().strftime('%Y%m%d')
+
+        run_ts = datetime.datetime.now().strftime('%Y%m%d %H%M%S')
         suffix = f'_{direction}' if direction else ''
-        subdir = f'{ts}_{name}{suffix}'
+        mid    = _safe_dirname(f'{cur_str} {meas_date}')
+        inner  = f'{run_ts}{suffix}'
+
         if save_dir is None:
-            parent = sample_folder
+            parent = os.path.join(sample_folder, mid)
         else:
             parent = os.path.abspath(save_dir)
         if save_subdir:
-            self.path3 = os.path.join(parent, subdir)
+            self.path3 = os.path.join(parent, inner)
         else:
             self.path3 = parent
         os.makedirs(self.path3, exist_ok=True)
@@ -1250,9 +1372,8 @@ class analyze_SOT:
             ax2.legend(fontsize=8)
         ax2.set_xlabel(f'x [{self.x_unit}]')
         ax2.grid()
-        plt.tight_layout()
         fname = os.path.join(self.path3, f'intensity_{ch_var}.png')
-        plt.savefig(fname, dpi=150)
+        _safe_savefig(fname)
         print(f'  Plot saved: {fname}')
         plt.show()
         return self
@@ -1317,9 +1438,8 @@ class analyze_SOT:
         ax.grid()
         ax.legend(loc=3)
         ax_d.legend(loc=4)
-        plt.tight_layout()
         fname = os.path.join(self.path3, 'edges.png')
-        plt.savefig(fname, dpi=150)
+        _safe_savefig(fname)
         print(f'  Plot saved: {fname}')
         plt.show()
         return self
@@ -1399,9 +1519,8 @@ class analyze_SOT:
                 axes[1].grid(True); axes[1].legend(fontsize=9)
 
         if do_plot:
-            plt.tight_layout()
             fname = os.path.join(self.path3, 'phase_search.png')
-            plt.savefig(fname, dpi=150)
+            _safe_savefig(fname)
             print(f'  Plot saved: {fname}')
             plt.show()
         return self
@@ -1599,9 +1718,8 @@ class analyze_SOT:
         ax1.set_xlabel(f'x [{self.x_unit}]', fontsize=fs)
         ax1.tick_params(axis='both', which='major', labelsize=fs - 2)
         ax2.legend(fontsize=fs, loc=4)
-        plt.tight_layout()
         fname = os.path.join(self.path3, plotname + '.png')
-        plt.savefig(fname, pad_inches=0.1, dpi=150)
+        _safe_savefig(fname, pad_inches=0.1)
         print(f'  Plot saved: {fname}')
         plt.show()
 
@@ -1805,7 +1923,7 @@ class analyze_SOT:
         ax2.plot(position, reflex, color='firebrick', label='reflection')
 
         fname = os.path.join(self.path3, f'fit_{plotname}.png')
-        plt.savefig(fname)
+        _safe_savefig(fname, tight=False)
         print(f'  Plot saved: {fname}')
         plt.show()
 
@@ -1897,6 +2015,12 @@ class analyze_SOT:
             'width':              self.width,
             'fit_DL_mT':          self.fit_DL_mT,
             'fit_DL_error_mT':    self.fit_DL_error_mT,
+            'sln':                getattr(self.calc_info, 'sln', None),
+            'sln_source':         getattr(self.calc_info, 'sln_source', None),
+            'bd_calibration_mV':  getattr(self.calc_info, 'bd_calibration_mV', None),
+            'device_id':          getattr(self.calc_info, 'device_id', None),
+            'r_4wire_kohm':       getattr(self.calc_info, 'r_4wire_kohm', None),
+            'r_2wire_kohm':       getattr(self.calc_info, 'r_2wire_kohm', None),
             'h5_metadata':        {k: _json_safe(v)
                                     for k, v in self.h5_meta.items()},
         }
@@ -1936,9 +2060,8 @@ class analyze_SOT:
         ax2.plot(position, reflex, color='firebrick', label='reflection')
         ax.tick_params(axis='both', which='major', labelsize=fs)
         ax2.tick_params(axis='both', which='major', labelsize=fs)
-        plt.tight_layout(pad=0.5)
         fname = os.path.join(self.path3, f'nice_plot_{plotname}.png')
-        plt.savefig(fname, bbox_inches='tight')
+        _safe_savefig(fname, tight_kw={'pad': 0.5}, bbox_inches='tight')
         print(f'  Plot saved: {fname}')
         plt.show()
 

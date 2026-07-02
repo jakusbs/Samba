@@ -1101,5 +1101,36 @@ class TestDcHystSourceWrite(unittest.TestCase):
         self.assertTrue(any(a == "MagneticField" for a, _ in writes))
 
 
+class TestSampleMetadata(unittest.TestCase):
+    """_write_hw_metadata records device_id + device resistances so the
+    analysis can read the calibration/resistivity from the file's metadata."""
+
+    def _write(self, cfg):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "m.h5")
+        with h5py.File(p, "w") as f:
+            _runner_mod._write_hw_metadata(f.create_group("metadata"), cfg)
+        with h5py.File(p, "r") as f:
+            return dict(f["metadata"].attrs)
+
+    def test_device_id_and_resistances_written(self):
+        a = self._write({"device_id": "devX", "r_4wire_kohm": 2.5,
+                         "r_2wire_kohm": 3.0})
+        self.assertEqual(a["device_id"], "devX")
+        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 2.5)
+        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 3.0)
+
+    def test_missing_fields_default_safely(self):
+        a = self._write({})
+        self.assertEqual(a["device_id"], "")
+        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 0.0)
+        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 0.0)
+
+    def test_blank_resistance_string_coerces_to_zero(self):
+        a = self._write({"r_4wire_kohm": "", "r_2wire_kohm": None})
+        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 0.0)
+        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 0.0)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

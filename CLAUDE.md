@@ -1176,14 +1176,20 @@ scripts — the module analyses Green, IR, and Cryo data alike.
 ```
 <analysis_base>/<sample_name>/
   calibration.txt
-  <YYYYMMDD_HHMMSS>_<scanlist-stem>[_<direction>]/
-    intensity_<ch>.png
-    phase_search.png
-    sumdiff_<ch>.png  …  realimag_<ch>.png  …  negpos_<ch>.png
-    fit_<ch>.png
-    analyzed_data.csv
-    results.json
+  <current>mA <meas-date>/          # e.g. "15mA 20260326" — groups a measurement
+    <run-date> <run-time>[_<direction>]/   # e.g. "20260702 105936"
+      intensity_<ch>.png
+      phase_search.png
+      sumdiff_<ch>.png  …  realimag_<ch>.png  …  negpos_<ch>.png
+      fit_<ch>.png
+      analyzed_data.csv
+      results.json
 ```
+
+The mid folder groups every analysis of one measurement (same current +
+measurement date); each run drops a fresh date-time subfolder inside it.
+Measurement date is taken from the data file's `YYYYMMDD` sub-folder, else a
+date token in the scanlist name, else today.
 
 Default `analysis_base` is auto-set to `Analysis_Samba/` two levels above
 the scanlist folder — scanlists in `<...>/Scanning/Data/ScanLists_<X>/` put
@@ -1203,11 +1209,17 @@ A timestamped subfolder per scan keeps re-runs separated. Override with
 0.0                              # theta — 1st-harmonic phase offset (deg)
 ```
 
-When the file is missing, `read_calibration()` prompts interactively for each
-value and writes the file so subsequent runs skip the prompt. The slope from
-the 6 mV calibration points is converted to `sln = (1/slope) × π/180 × 1e6`
-(µrad/mV). Pass `use_calibration_file=False` to disable the prompt entirely
-and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
+`sln` resolution order: explicit `sln=`/`calibration=` → **HDF5
+`/data/calibration`** (the 6 mV λ/2 readings Samba writes on every scan,
+`read_h5_calibration()`) → `calibration.txt` → default 1.0. When the HDF5
+already supplies `sln`, the interactive `calibration.txt` prompt is skipped.
+Otherwise, when the file is missing, `read_calibration()` prompts and writes
+it. Slope → `sln = (1/slope) × π/180 × 1e6` (µrad/mV). `results.json` records
+`sln`, `sln_source`, the 6 `bd_calibration_mV`, and the device `device_id` /
+`r_4wire_kohm` / `r_2wire_kohm` from the HDF5 metadata (the 4-/2-wire
+resistances are recorded, **not** fed into the parallel-channel R1/R2). Pass
+`use_calibration_file=False` to disable the prompt entirely and use explicit
+`sln=`, `R=(R1,R2)`, `theta=` args.
 
 ### Per-channel data layout
 

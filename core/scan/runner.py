@@ -122,6 +122,14 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
                     meta.attrs[dst] = v
                 except Exception:
                     _wsa(meta, dst, str(v))
+    # Sample-identity / device resistance (from MokeMetadataGroup) — recorded
+    # so the analysis can pick them up from the file's metadata.
+    _wsa(meta, "device_id", str(cfg.get("device_id", "")))
+    for k in ("r_4wire_kohm", "r_2wire_kohm"):
+        try:
+            meta.attrs[k] = float(cfg.get(k, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            meta.attrs[k] = 0.0
 
 
 # How often to flush to disk for 1D scans (every N points)
