@@ -578,38 +578,34 @@ def find_edges_width(position, reflex):
     threshold = 0.3 * np.max(np.abs(dy))
     min_dist  = max(10, len(dy) // 50)
 
-    # Split into left/right halves: the left device edge must lie in the
-    # left half of the scan and the right edge in the right half.  This is
-    # robust against impurity spikes inside the device (they can't steal an
-    # edge from the other half).
-    N = len(newpos)
-    newposL, newposR = newpos[:N // 2], newpos[N // 2:]
-    dyL,     dyR     = dy[:N // 2],     dy[N // 2:]
+    # Innermost peak pair: left edge = rightmost negative peak, right edge
+    # = leftmost positive peak.  Outer noise spikes can't steal an edge; if
+    # there is dirt *inside* the device the measurement is bad from the
+    # start anyway (and the min_width guard in get_edges catches the
+    # resulting collapse).
+    neg_idx, _ = signal.find_peaks(-dy, height=threshold, distance=min_dist)
+    pos_idx, _ = signal.find_peaks( dy, height=threshold, distance=min_dist)
 
-    # --- Find x1 in the LEFT half ---
-    neg_idxL, _ = signal.find_peaks(-dyL, height=threshold, distance=min_dist)
-    pos_idxL, _ = signal.find_peaks( dyL, height=threshold, distance=min_dist)
-
-    if len(neg_idxL) > 0:
-        left_idx = neg_idxL[np.argmax(np.abs(dyL[neg_idxL]))]  # strongest negative peak
-    elif len(pos_idxL) > 0:
-        left_idx = pos_idxL[np.argmax(np.abs(dyL[pos_idxL]))]  # fallback: strongest positive peak
+    if len(neg_idx) > 0 and len(pos_idx) > 0:
+        left_idx  = neg_idx[np.argmax(neg_idx)]
+        right_idx = pos_idx[np.argmin(pos_idx)]
+        if left_idx >= right_idx:           # reversed scan / flipped polarity
+            left_idx  = pos_idx[np.argmax(pos_idx)]
+            right_idx = neg_idx[np.argmin(neg_idx)]
+    elif len(neg_idx) > 0:
+        s = np.sort(neg_idx)
+        left_idx, right_idx = s[0], s[-1]
+    elif len(pos_idx) > 0:
+        s = np.sort(pos_idx)
+        left_idx, right_idx = s[0], s[-1]
     else:
-        left_idx = int(np.argmin(dyL))                          # fallback: steepest point
+        left_idx  = int(np.argmin(dy))
+        right_idx = int(np.argmax(dy))
+        if left_idx > right_idx:
+            left_idx, right_idx = right_idx, left_idx
 
-    # --- Find x2 in the RIGHT half ---
-    neg_idxR, _ = signal.find_peaks(-dyR, height=threshold, distance=min_dist)
-    pos_idxR, _ = signal.find_peaks( dyR, height=threshold, distance=min_dist)
-
-    if len(pos_idxR) > 0:
-        right_idx = pos_idxR[np.argmax(np.abs(dyR[pos_idxR]))]  # strongest positive peak
-    elif len(neg_idxR) > 0:
-        right_idx = neg_idxR[np.argmax(np.abs(dyR[neg_idxR]))]  # fallback: strongest negative peak
-    else:
-        right_idx = int(np.argmax(dyR))                          # fallback: steepest point
-
-    x1 = round(float(newposL[left_idx]),  2)
-    x2 = round(float(newposR[right_idx]), 2)
+    x1 = round(float(newpos[left_idx]),  2)
+    x2 = round(float(newpos[right_idx]), 2)
     return [x1, x2], round(x2 - x1, 2)
 
 
@@ -1033,7 +1029,7 @@ class analyze_SOT:
                  x_ch='actuator_x', li_type='zi',
                  reflec_key='FL', x_unit='µm', signal_unit='V',
                  sample_name=None,
-                 analysis_base_dir=DEFAULT_ANALYSIS_BASE,
+                 analysis_base_dir=None,
                  save_dir=None, save_subdir=True,
                  use_calibration_file=True):
         self.scanlist_path = str(scanlist_path)
@@ -1090,6 +1086,14 @@ class analyze_SOT:
             current_mA = 10.0
 
         # ── sample folder + calibration.txt ───────────────────────────────
+        # ── analysis base: sibling "Analysis_Samba" folder ────────────────
+        # Default: one level above the scanlist folder (i.e. next to
+        # ScanLists_<X> and Data_Samba_<X>), sample-name directories inside.
+        if analysis_base_dir is None:
+            scan_dir          = os.path.dirname(os.path.abspath(scanlist_path))
+            analysis_base_dir = os.path.join(os.path.dirname(scan_dir),
+                                             'Analysis_Samba')
+            print(f'  Analysis base auto-set: {analysis_base_dir}')
         sample_folder = get_sample_folder(sample_name, base=analysis_base_dir)
         self.sample_name   = sample_name
         self.sample_folder = sample_folder
@@ -1136,8 +1140,12 @@ class analyze_SOT:
         ci.current  = float(current_mA)
         ci.sln      = sln_val
         ci.calibration = sln_val
-        ci.theta    = theta_val
-        ci.theta2   = float(theta2)
+        ci.theta      = theta_val
+        ci.theta_pos  = theta_val      # per-polarity phases (get_theta refines)
+        ci.theta_neg  = theta_val
+        ci.theta2     = float(theta2)
+        ci.theta2_pos = float(theta2)
+        ci.theta2_neg = float(theta2)
         ci.R        = R_val
         ci.LI_type  = li_type
         ci.system   = sample_name
@@ -1355,7 +1363,9 @@ class analyze_SOT:
                 f'({t_neg:.2f}°) scans differ by '
                 f'{abs(t_pos - t_neg):.2f}° (> 5°) — check polarity '
                 f'grouping / signal quality before trusting the fit.')
-        self.calc_info.theta = theta
+        self.calc_info.theta     = theta       # mean, kept for reference
+        self.calc_info.theta_pos = float(t_pos)
+        self.calc_info.theta_neg = float(t_neg)
         if do_plot:
             axes[0].axhline(0, color='k', lw=0.5)
             axes[0].set_title(rf'1ω : $\theta$={theta:.2f}°')
@@ -1373,7 +1383,14 @@ class analyze_SOT:
             theta2 = float(np.mean([t2_pos, t2_neg]))
             print(f'  theta₂ (2ω) = {theta2:.2f}°  (from pos={t2_pos:.2f}°, '
                   f'neg={t2_neg:.2f}°)')
-            self.calc_info.theta2 = theta2
+            if abs(t2_pos - t2_neg) > 5.0:
+                warnings.warn(
+                    f'get_theta: 2ω phase from pos ({t2_pos:.2f}°) and neg '
+                    f'({t2_neg:.2f}°) scans differ by '
+                    f'{abs(t2_pos - t2_neg):.2f}° (> 5°).')
+            self.calc_info.theta2     = theta2
+            self.calc_info.theta2_pos = float(t2_pos)
+            self.calc_info.theta2_neg = float(t2_neg)
             if do_plot:
                 axes[1].axhline(0, color='k', lw=0.5)
                 axes[1].set_title(rf'2ω : $\theta_2$={theta2:.2f}°')
@@ -1413,31 +1430,50 @@ class analyze_SOT:
                     + self.calc_info.LightPol + '_' + do_plot + '_'
                     + self.calc_info.specific)
 
-        theta  = phase  if phase  is not None else self.calc_info.theta
-        theta2 = phase2 if phase2 is not None else self.calc_info.theta2
-        li  = self.calc_info.LI_type
-        sln = self.calc_info.sln
-        t1  = theta  * np.pi / 180.0
+        # Phases: an explicit ``phase``/``phase2`` argument applies to both
+        # polarities; otherwise each polarity is rotated by its own phase
+        # from get_theta (falls back to the mean for pre-get_theta calls).
+        ci     = self.calc_info
+        theta  = phase  if phase  is not None else ci.theta
+        theta2 = phase2 if phase2 is not None else ci.theta2
+        if phase is not None:
+            th1_pos = th1_neg = float(phase)
+        else:
+            th1_pos = getattr(ci, 'theta_pos', ci.theta)
+            th1_neg = getattr(ci, 'theta_neg', ci.theta)
+        if phase2 is not None:
+            th2_pos = th2_neg = float(phase2)
+        else:
+            th2_pos = getattr(ci, 'theta2_pos', ci.theta2)
+            th2_neg = getattr(ci, 'theta2_neg', ci.theta2)
+        li  = ci.LI_type
+        sln = ci.sln
+        t1  = theta  * np.pi / 180.0     # mean phase (error propagation)
         t2  = theta2 * np.pi / 180.0
+        t1p, t1n = np.deg2rad(th1_pos), np.deg2rad(th1_neg)
+        t2p, t2n = np.deg2rad(th2_pos), np.deg2rad(th2_neg)
 
         D   = self.data
         fac = 1000 if 'sr' in li else 1
 
-        # 1ω
-        theta_Oe  = (D[li+'x1'][2] * np.cos(t1) + D[li+'y1'][2] * np.sin(t1)) * sln
-        theta_DL  = (D[li+'x1'][1] * np.cos(t1) + D[li+'y1'][1] * np.sin(t1)) * sln
+        # 1ω — rotate each polarity by its own phase, then form sum/diff.
+        # (With equal phases this is identical to rotating sum/diff by θ.)
+        theta_pos = (D[li+'x1'][4] * np.cos(t1p) + D[li+'y1'][4] * np.sin(t1p)) * sln
+        theta_neg = (D[li+'x1'][5] * np.cos(t1n) + D[li+'y1'][5] * np.sin(t1n)) * sln
+        theta_Oe  = (theta_pos + theta_neg) / 2.0
+        theta_DL  = (theta_pos - theta_neg) / 2.0
         error_bar = (np.sqrt((D[li+'x1'][3] * np.cos(t1))**2 +
                              (D[li+'y1'][3] * np.sin(t1))**2) * np.abs(sln))
         pos       = D['x']
-        theta_neg = (D[li+'x1'][5] * np.cos(t1) + D[li+'y1'][5] * np.sin(t1)) * sln
-        theta_pos = (D[li+'x1'][4] * np.cos(t1) + D[li+'y1'][4] * np.sin(t1)) * sln
 
         # 2ω — only if the channels are present
         has_2nd = (li + 'x2' in D) and (li + 'y2' in D)
         theta2_Oe = theta2_DL = error_bar2 = None
         if has_2nd:
-            theta2_Oe = (D[li+'x2'][2] * np.cos(t2) + D[li+'y2'][2] * np.sin(t2)) * sln
-            theta2_DL = (D[li+'x2'][1] * np.cos(t2) + D[li+'y2'][1] * np.sin(t2)) * sln
+            theta2_pos = (D[li+'x2'][4] * np.cos(t2p) + D[li+'y2'][4] * np.sin(t2p)) * sln
+            theta2_neg = (D[li+'x2'][5] * np.cos(t2n) + D[li+'y2'][5] * np.sin(t2n)) * sln
+            theta2_Oe  = (theta2_pos + theta2_neg) / 2.0
+            theta2_DL  = (theta2_pos - theta2_neg) / 2.0
             error_bar2 = (np.sqrt((D[li+'x2'][3] * np.cos(t2))**2 +
                                   (D[li+'y2'][3] * np.sin(t2))**2) * np.abs(sln))
         elif do_plot in ('sumdiff2nd', 'realimag2nd', 'comp_1st_2nd',
@@ -1523,10 +1559,10 @@ class analyze_SOT:
         elif do_plot == 'findphase':
             # Residual imaginary component after rotating by θ (1ω).  Should
             # be near zero across the device if the phase is correct.
-            imag_pos = (-D[li+'x1'][4] * np.sin(t1)
-                        + D[li+'y1'][4] * np.cos(t1))
-            imag_neg = (-D[li+'x1'][5] * np.sin(t1)
-                        + D[li+'y1'][5] * np.cos(t1))
+            imag_pos = (-D[li+'x1'][4] * np.sin(t1p)
+                        + D[li+'y1'][4] * np.cos(t1p))
+            imag_neg = (-D[li+'x1'][5] * np.sin(t1n)
+                        + D[li+'y1'][5] * np.cos(t1n))
             ax1.plot(pos, imag_pos, '-.v', color='cyan',
                      label='imag pos (→ 0)')
             ax1.plot(pos, imag_neg, '-.v', color='k',
@@ -1794,6 +1830,10 @@ class analyze_SOT:
             current_coefficient2=float(current_coefficient2),
             R=list(self.calc_info.R), sln=float(self.calc_info.sln),
             theta_deg=float(self.calc_info.theta),
+            theta_pos_deg=float(getattr(self.calc_info, 'theta_pos',
+                                        self.calc_info.theta)),
+            theta_neg_deg=float(getattr(self.calc_info, 'theta_neg',
+                                        self.calc_info.theta)),
             theta2_deg=float(self.calc_info.theta2),
             use_Oe_as_edges=bool(use_Oe_as_edges),
             fit_edge_offset=int(fit_edge_offset),

@@ -1185,7 +1185,10 @@ scripts — the module analyses Green, IR, and Cryo data alike.
     results.json
 ```
 
-Default `analysis_base` is `Z:\projects\MOKE_lab\Scanning\Analysis_Scripts`.
+Default `analysis_base` is auto-set to `Analysis_Samba/` one level above
+the scanlist folder (i.e. a sibling of `ScanLists_<X>` / `Data_Samba_<X>`);
+sample-name directories are created inside it. Pass `analysis_base_dir=`
+to override.
 A timestamped subfolder per scan keeps re-runs separated. Override with
 `save_dir=` (parent) or `save_subdir=False` (write directly into `save_dir`).
 
