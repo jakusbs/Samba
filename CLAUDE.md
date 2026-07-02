@@ -1140,13 +1140,13 @@ Cryo, Green, and IR scanlists from the same entry point.
 ### Entry points
 
 ```python
-from analyze_samba import analyze_cryo
+from analyze_samba import analyze_SOT
 
 # Trace + retrace (returns (res, None) for legacy single-direction data)
-res_trace, res_retrace = analyze_cryo.import_analyze_both(SCANLIST)
+res_trace, res_retrace = analyze_SOT.import_analyze_both(SCANLIST)
 
 # Single direction with explicit overrides
-res = analyze_cryo.import_analyze_SOT(
+res = analyze_SOT.import_analyze_SOT(
     SCANLIST,
     see_channels = ('DC', 'ZI_x1'),   # None = auto-detect
     current_mA   = 12.5,              # None = HDF5 metadata → filename → 10 mA
@@ -1155,8 +1155,9 @@ res = analyze_cryo.import_analyze_SOT(
 )
 ```
 
-The class is also exported as `SambaSOTAnalysis` for backwards compatibility
-with older measurement scripts.
+`analyze_cryo` and `SambaSOTAnalysis` are kept as aliases (as are the old
+`*_cryo` helper names) for backwards compatibility with older measurement
+scripts — the module analyses Green, IR, and Cryo data alike.
 
 ### Auto-detection (no config needed)
 

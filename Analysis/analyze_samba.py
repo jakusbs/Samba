@@ -1,8 +1,12 @@
 """
-analyze_samba.py  —  SOT/MOKE analysis for SAMBA Cryo HDF5 data.
+analyze_samba.py  —  SOT/MOKE scan analysis for SAMBA HDF5 data
+(Green, IR and Cryo setups).
 Based on analysis_samba.py by Tobias Goldenberg (ETH Zürich, 2026).
-Adapted for the Cryo setup: /data/ HDF5 group, absolute scanlist paths,
-trace/retrace direction support, Linux-compatible saving.
+Handles /data/ (Cryo) and /measurement/ (Green/IR) HDF5 groups, absolute
+scanlist paths, trace/retrace direction support, Linux-compatible saving.
+
+Primary entry class: ``analyze_SOT``.  The old names ``analyze_SOT`` and
+``SambaSOTAnalysis`` are kept as aliases so existing scripts keep working.
 
 Channel mapping (auto):
     ZI_x1  → zix1      ZI_y1  → ziy1
@@ -574,29 +578,38 @@ def find_edges_width(position, reflex):
     threshold = 0.3 * np.max(np.abs(dy))
     min_dist  = max(10, len(dy) // 50)
 
-    neg_idx, _ = signal.find_peaks(-dy, height=threshold, distance=min_dist)
-    pos_idx, _ = signal.find_peaks( dy, height=threshold, distance=min_dist)
+    # Split into left/right halves: the left device edge must lie in the
+    # left half of the scan and the right edge in the right half.  This is
+    # robust against impurity spikes inside the device (they can't steal an
+    # edge from the other half).
+    N = len(newpos)
+    newposL, newposR = newpos[:N // 2], newpos[N // 2:]
+    dyL,     dyR     = dy[:N // 2],     dy[N // 2:]
 
-    if len(neg_idx) > 0 and len(pos_idx) > 0:
-        left_idx  = neg_idx[np.argmax(neg_idx)]
-        right_idx = pos_idx[np.argmin(pos_idx)]
-        if left_idx >= right_idx:           # reversed scan / flipped polarity
-            left_idx  = pos_idx[np.argmax(pos_idx)]
-            right_idx = neg_idx[np.argmin(neg_idx)]
-    elif len(neg_idx) > 0:
-        s = np.sort(neg_idx)
-        left_idx, right_idx = s[0], s[-1]
-    elif len(pos_idx) > 0:
-        s = np.sort(pos_idx)
-        left_idx, right_idx = s[0], s[-1]
+    # --- Find x1 in the LEFT half ---
+    neg_idxL, _ = signal.find_peaks(-dyL, height=threshold, distance=min_dist)
+    pos_idxL, _ = signal.find_peaks( dyL, height=threshold, distance=min_dist)
+
+    if len(neg_idxL) > 0:
+        left_idx = neg_idxL[np.argmax(np.abs(dyL[neg_idxL]))]  # strongest negative peak
+    elif len(pos_idxL) > 0:
+        left_idx = pos_idxL[np.argmax(np.abs(dyL[pos_idxL]))]  # fallback: strongest positive peak
     else:
-        left_idx  = int(np.argmin(dy))
-        right_idx = int(np.argmax(dy))
-        if left_idx > right_idx:
-            left_idx, right_idx = right_idx, left_idx
+        left_idx = int(np.argmin(dyL))                          # fallback: steepest point
 
-    x1 = round(float(newpos[left_idx]),  2)
-    x2 = round(float(newpos[right_idx]), 2)
+    # --- Find x2 in the RIGHT half ---
+    neg_idxR, _ = signal.find_peaks(-dyR, height=threshold, distance=min_dist)
+    pos_idxR, _ = signal.find_peaks( dyR, height=threshold, distance=min_dist)
+
+    if len(pos_idxR) > 0:
+        right_idx = pos_idxR[np.argmax(np.abs(dyR[pos_idxR]))]  # strongest positive peak
+    elif len(neg_idxR) > 0:
+        right_idx = neg_idxR[np.argmax(np.abs(dyR[neg_idxR]))]  # fallback: strongest negative peak
+    else:
+        right_idx = int(np.argmax(dyR))                          # fallback: steepest point
+
+    x1 = round(float(newposL[left_idx]),  2)
+    x2 = round(float(newposR[right_idx]), 2)
     return [x1, x2], round(x2 - x1, 2)
 
 
@@ -768,11 +781,11 @@ _EXPECTED_X_UNITS = {'µm', 'um', 'micrometer', 'micrometre', 'micrometers',
                      'micrometres'}
 
 
-def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
+def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                            direction=None, ignorLines=(),
                            data_base_dir=None, median=False,
                            expected_x_unit='µm'):
-    """Load one data channel from all scans in a SAMBA Cryo scanlist.
+    """Load one data channel from all scans in a SAMBA scanlist.
 
     Groups scans by  effective sign = relay_sign × sign(field_T).
 
@@ -811,7 +824,7 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
 
             filepath = _resolve_path(localfile, data_base_dir)
             if filepath is None:
-                warnings.warn(f'data_calculation_cryo: not found: {localfile}')
+                warnings.warn(f'data_calculation: not found: {localfile}')
                 continue
 
             try:
@@ -833,7 +846,7 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                 if (not x_unit_checked) and x_unit and expected_x_unit:
                     if x_unit.strip().lower() not in _EXPECTED_X_UNITS:
                         warnings.warn(
-                            f'data_calculation_cryo: x-axis unit '
+                            f'data_calculation: x-axis unit '
                             f'"{x_unit}" ≠ expected "{expected_x_unit}" '
                             f'(in {bname}). Distances and fit width may '
                             f'be wrong.')
@@ -867,7 +880,7 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                 n_neg += 1
 
     if x is None or var_pos is None or var_neg is None:
-        warnings.warn(f'data_calculation_cryo: no valid data for "{ch_var}" '
+        warnings.warn(f'data_calculation: no valid data for "{ch_var}" '
                       f'(n_pos={n_pos}, n_neg={n_neg})')
         return [np.zeros(1)] * 7
 
@@ -895,9 +908,9 @@ def data_calculation_cryo(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
     return [x, diff, summation, err, res_pos, res_neg, n_pos]
 
 
-def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
+def linescan_calc(scanlist_path, direction=None, ignorLines=(),
                         data_base_dir=None, x_ch='actuator_x'):
-    """Load all sensor channels from a SAMBA Cryo scanlist.
+    """Load all sensor channels from a SAMBA scanlist.
 
     Returns a dict::
 
@@ -911,7 +924,7 @@ def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
     """
     res_ch, meta = get_channels(scanlist_path, data_base_dir=data_base_dir)
     if not res_ch:
-        warnings.warn('linescan_calc_cryo: get_channels returned no channels; '
+        warnings.warn('linescan_calc: get_channels returned no channels; '
                       'check data_base_dir')
         return {}
 
@@ -923,7 +936,7 @@ def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
         if ch_name in skip or 'actuator' in ch_name.lower():
             continue
 
-        data = data_calculation_cryo(
+        data = data_calculation(
             scanlist_path, ch_x=x_ch, ch_var=ch_name,
             direction=direction, ignorLines=ignorLines,
             data_base_dir=data_base_dir,
@@ -941,7 +954,7 @@ def linescan_calc_cryo(scanlist_path, direction=None, ignorLines=(),
     return my_dict
 
 
-def intensity_mean_cryo(scanlist_path, ch_var='DC', direction=None,
+def intensity_mean(scanlist_path, ch_var='DC', direction=None,
                          ignorLines=(), data_base_dir=None):
     """Collect per-scan profiles of *ch_var* (for ``see_intensity`` plot).
 
@@ -995,20 +1008,20 @@ def intensity_mean_cryo(scanlist_path, ch_var='DC', direction=None,
 # Main analysis class
 # ---------------------------------------------------------------------------
 
-class analyze_cryo:
-    """SOT / MOKE scan analysis for SAMBA Cryo HDF5 data.
+class analyze_SOT:
+    """SOT / MOKE scan analysis for SAMBA HDF5 data (Green, IR, Cryo).
 
     Typical usage::
 
         # Single direction
-        res = analyze_cryo.import_analyze_SOT(
+        res = analyze_SOT.import_analyze_SOT(
             'path/to/scanlist.txt',
             current_mA=12.5,
             see_channels=None,   # auto-detect from HDF5
         )
 
         # Trace + retrace separately (piezo hysteresis)
-        tr, rt = analyze_cryo.import_analyze_both(
+        tr, rt = analyze_SOT.import_analyze_both(
             'path/to/scanlist.txt',
             current_mA=12.5,
         )
@@ -1175,7 +1188,7 @@ class analyze_cryo:
         if data_base_dir:
             self.data_base_dir = data_base_dir
 
-        self.data = linescan_calc_cryo(
+        self.data = linescan_calc(
             self.scanlist_path,
             direction=self.direction,
             ignorLines=ignorLines,
@@ -1195,7 +1208,7 @@ class analyze_cryo:
 
     def see_intensity(self, ch_var='DC', ignorelines=(), ylim=()):
         """Plot per-scan mean intensity and individual profiles (copper colourmap)."""
-        I, var_all = intensity_mean_cryo(
+        I, var_all = intensity_mean(
             self.scanlist_path, ch_var=ch_var,
             direction=self.direction, ignorLines=ignorelines,
             data_base_dir=self.data_base_dir,
@@ -1237,8 +1250,14 @@ class analyze_cryo:
 
     # ── edge detection ────────────────────────────────────────────────────
 
-    def get_edges(self, I_ch=None):
-        """Detect device edges from the reflection channel."""
+    def get_edges(self, I_ch=None, min_width=4.0):
+        """Detect device edges from the reflection channel.
+
+        Raises ``RuntimeError`` when the detected width is below
+        ``min_width`` (in x-axis units) — a sub-µm "device" means the edge
+        algorithm latched onto noise, and continuing would produce a
+        nonsense phase window and fit.
+        """
         if I_ch is None:
             I_ch = self._reflec_key
 
@@ -1259,8 +1278,17 @@ class analyze_cryo:
             warnings.warn(f'get_edges: find_edges_width failed: {e}')
             return self
 
+        if width < 0:
+            edges  = [edges[1], edges[0]]
+            width  = -width
         print(f'  Edges: {edges[0]:.2f} – {edges[1]:.2f} {self.x_unit}  '
               f'width = {width:.2f} {self.x_unit}')
+        if width < min_width:
+            raise RuntimeError(
+                f'get_edges: detected width {width:.2f} {self.x_unit} < '
+                f'min_width {min_width} — edge detection failed (edges '
+                f'{edges[0]:.2f}/{edges[1]:.2f}). Check the "{I_ch}" '
+                f'reflection profile or pass min_width= explicitly.')
         self.edges     = edges
         self.dev_center = float(np.mean(edges))
         self.width     = width
@@ -1318,6 +1346,15 @@ class analyze_cryo:
         theta = float(np.mean([t_pos, t_neg]))
         print(f'  theta  (1ω) = {theta:.2f}°  (from pos={t_pos:.2f}°, '
               f'neg={t_neg:.2f}°)')
+        # The lock-in phase is instrumental — it must be the same for both
+        # field polarities.  A large disagreement means drift, a polarity
+        # mix-up in the scanlist, or too little signal in one group.
+        if abs(t_pos - t_neg) > 5.0:
+            warnings.warn(
+                f'get_theta: phase from pos ({t_pos:.2f}°) and neg '
+                f'({t_neg:.2f}°) scans differ by '
+                f'{abs(t_pos - t_neg):.2f}° (> 5°) — check polarity '
+                f'grouping / signal quality before trusting the fit.')
         self.calc_info.theta = theta
         if do_plot:
             axes[0].axhline(0, color='k', lw=0.5)
@@ -1582,8 +1619,13 @@ class analyze_cryo:
         # ── find fitting window edges ──────────────────────────────────────
         if use_Oe_as_edges:
             print('  Using Oersted sum to find fit edges.')
-            x1 = position[np.argmin(theta_Oe)]
-            x2 = position[np.argmax(theta_Oe)]
+            # Pick the extrema on a lightly median-filtered trace so a
+            # single noisy point can't set the fit window; the positions
+            # still come from the measured grid.
+            oe_smooth = (signal.medfilt(theta_Oe, 3)
+                         if len(theta_Oe) >= 3 else theta_Oe)
+            x1 = position[np.argmin(oe_smooth)]
+            x2 = position[np.argmax(oe_smooth)]
         elif self.edges:
             x1, x2 = self.edges
         else:
@@ -1604,7 +1646,6 @@ class analyze_cryo:
 
         # ── build mask ────────────────────────────────────────────────────
         mask = (position > 0) & (position < width)
-        off  = ~mask
         true_idx = np.where(mask)[0]
         if len(true_idx) > 2 * fit_edge_offset:
             mask[true_idx[:fit_edge_offset]]  = False
@@ -1616,21 +1657,27 @@ class analyze_cryo:
             return self
 
         pos_fit  = position[mask]
-        err_fit  = np.maximum(error_bar[mask], 1e-12)
         pos_mask = position[(~mask) & (position > 0) & (position < width)]
 
-        # Constant offset of Oe outside device
-        try:
-            const_offset, _ = curve_fit(Const_fit, position[off], theta_Oe[off],
-                                         sigma=np.maximum(error_bar[off], 1e-12),
-                                         absolute_sigma=True)
-        except Exception:
-            const_offset = [0.0]
+        # Weighted fit only when real error bars exist.  With one scan per
+        # polarity the SEM is zero everywhere; clamping zeros to 1e-12 and
+        # using absolute_sigma=True would produce meaningless (absurdly
+        # small) parameter errors, so fall back to an unweighted fit whose
+        # errors are scaled from the fit residuals instead.
+        weighted = bool(np.any(error_bar[mask] > 0))
+        if weighted:
+            fit_kw = dict(sigma=np.maximum(error_bar[mask], 1e-12),
+                          absolute_sigma=True)
+        else:
+            warnings.warn('eval_width_and_fit: all error bars are zero '
+                          '(single scan per polarity?) — using an '
+                          'unweighted fit with residual-scaled errors.')
+            fit_kw = {}
 
         # DL constant fit
         try:
             pConst, covConst = curve_fit(Const_fit, pos_fit, theta_DL[mask],
-                                          sigma=err_fit, absolute_sigma=True)
+                                          **fit_kw)
             errConst = np.sqrt(np.diag(covConst))
         except Exception as e:
             warnings.warn(f'DL const fit failed: {e}')
@@ -1642,7 +1689,7 @@ class analyze_cryo:
             pLog, covLog = curve_fit(
                 lambda x, A, A0: Log_fit(x, A, A0, width),
                 pos_fit, theta_Oe[mask],
-                sigma=err_fit, absolute_sigma=True)
+                **fit_kw)
             errLog = np.sqrt(np.diag(covLog))
         except Exception as e:
             warnings.warn(f'Oe log fit failed: {e}')
@@ -1664,6 +1711,18 @@ class analyze_cryo:
         print(f'  Width       = {width:.2f} {self.x_unit}')
         print(f'  conconst    = {conconst:.4g} nrad/mT')
         print(f'  DL-field    = ({conDL:.4g} ± {conDL_error:.4g}) mT')
+        # NM-layer current from the parallel-channel model (R1 = NM/M stack,
+        # R2 = reference without NM).  B_DL above is a real field and stays
+        # referenced to the total current (which also generates the Oersted
+        # calibration field); B_DL per NM-layer mA is what enters an
+        # efficiency estimate.  With the default R1 = R2 = 1 the NM current
+        # is undefined (coefficient 0) and NaN is reported.
+        DL_per_NM_mA = np.nan
+        if Ic1 and np.isfinite(Ic1) and abs(Ic1) > 1e-12:
+            DL_per_NM_mA = conDL / Ic1
+            print(f'  I_NM        = {Ic1:.4g} mA  '
+                  f'(parallel-channel coeff = {Ic1 / Ic:.3g})')
+            print(f'  DL / I_NM   = {DL_per_NM_mA:.4g} mT/mA')
         self.fit_DL_mT       = conDL
         self.fit_DL_error_mT = conDL_error
 
@@ -1730,6 +1789,8 @@ class analyze_cryo:
             Oe_A0=float(pLog[1]), conconst_nrad_per_mT=float(conconst),
             DL_field_mT=float(conDL), DL_field_err_mT=float(conDL_error),
             current_mA=float(self.calc_info.current),
+            current_NM_mA=float(Ic1),
+            DL_field_per_NM_mA=float(DL_per_NM_mA),
             current_coefficient2=float(current_coefficient2),
             R=list(self.calc_info.R), sln=float(self.calc_info.sln),
             theta_deg=float(self.calc_info.theta),
@@ -1865,8 +1926,8 @@ class analyze_cryo:
         Equivalent to ``analyze_SHE_OHE.import_analyze_SOT`` from Jakub_methods.py.
         Pass ``see_channels=None`` (default) to auto-detect from the HDF5 file.
         """
-        res = analyze_cryo(scanlist_path, direction=direction, **kwargs)
-        see_channels = analyze_cryo._resolve_see_channels(see_channels, res._detected)
+        res = analyze_SOT(scanlist_path, direction=direction, **kwargs)
+        see_channels = analyze_SOT._resolve_see_channels(see_channels, res._detected)
         res.import_data(ignorLines=ignorLines)
 
         for ch in see_channels:
@@ -1902,7 +1963,7 @@ class analyze_cryo:
 
         if not dirs:
             print('=' * 60 + '\n  SINGLE DIRECTION\n' + '=' * 60)
-            res = analyze_cryo.import_analyze_SOT(
+            res = analyze_SOT.import_analyze_SOT(
                 scanlist_path, see_channels=see_channels, direction=None,
                 ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
             return res, None
@@ -1910,16 +1971,24 @@ class analyze_cryo:
         res_trace = res_retrace = None
         if 'trace' in dirs:
             print('=' * 60 + '\n  TRACE\n' + '=' * 60)
-            res_trace = analyze_cryo.import_analyze_SOT(
+            res_trace = analyze_SOT.import_analyze_SOT(
                 scanlist_path, see_channels=see_channels, direction='trace',
                 ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
         if 'retrace' in dirs:
             print('=' * 60 + '\n  RETRACE\n' + '=' * 60)
-            res_retrace = analyze_cryo.import_analyze_SOT(
+            res_retrace = analyze_SOT.import_analyze_SOT(
                 scanlist_path, see_channels=see_channels, direction='retrace',
                 ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
         return res_trace, res_retrace
 
 
-# backwards-compatibility alias used by existing measurement scripts
-SambaSOTAnalysis = analyze_cryo
+# ---------------------------------------------------------------------------
+# Backwards-compatibility aliases used by existing measurement scripts.
+# The primary names are setup-neutral (the module analyses Green, IR and
+# Cryo data alike); the old *_cryo names came from the first port.
+# ---------------------------------------------------------------------------
+analyze_cryo          = analyze_SOT
+SambaSOTAnalysis      = analyze_SOT
+data_calculation_cryo = data_calculation
+linescan_calc_cryo    = linescan_calc
+intensity_mean_cryo   = intensity_mean
