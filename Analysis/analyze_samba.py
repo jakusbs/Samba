@@ -30,6 +30,11 @@ from scipy.optimize import curve_fit, minimize_scalar
 from scipy import interpolate, signal
 import h5py
 
+# Physical constants (SI) for the SOT / spin-Hall efficiency
+_E_CHARGE = 1.602176634e-19      # C
+_H_BAR    = 1.054571817e-34      # J·s
+_MU0      = 1.25663706212e-6     # T·m/A
+
 
 # ---------------------------------------------------------------------------
 # Filename / scanlist parsing helpers
@@ -1113,7 +1118,8 @@ class analyze_SOT:
                  sample_name=None,
                  analysis_base_dir=None,
                  save_dir=None, save_subdir=True,
-                 use_calibration_file=True):
+                 use_calibration_file=True,
+                 Ms=None, t_stack_nm=None, t_fm_nm=None):
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
         # ── auto-infer data_base_dir from scanlist location ───────────────
@@ -1253,6 +1259,17 @@ class analyze_SOT:
                                      (h5_meta.get('r_2wire_kohm', 0.0) or 0.0) * 1000
                                      if 'r_2wire_kohm' in h5_meta else None)
         ci.device_id   = str(h5_meta.get('device_id', '') or '')
+        # ── SOT / spin-Hall efficiency inputs ──────────────────────────────
+        # Ms [A/m] and stack thickness [nm] are analysis-side args; FM
+        # thickness [nm] comes from the HDF5 metadata (fm_thickness_nm) when
+        # not passed explicitly.  Device width comes from the fit (§ below).
+        ci.Ms         = float(Ms) if Ms is not None else None
+        ci.t_stack_nm = float(t_stack_nm) if t_stack_nm is not None else None
+        if t_fm_nm is not None:
+            ci.t_fm_nm = float(t_fm_nm)
+        else:
+            mv = h5_meta.get('fm_thickness_nm')
+            ci.t_fm_nm = float(mv) if mv not in (None, '', 0, 0.0) else None
         ci.LI_type  = li_type
         ci.system   = sample_name
         ci.sample_id = sample_name
@@ -1884,6 +1901,44 @@ class analyze_SOT:
             print(f'  DL / I_NM   = {DL_per_NM_mA:.4g} mT/mA')
         self.fit_DL_mT       = conDL
         self.fit_DL_error_mT = conDL_error
+        self.fit_width_um    = float(width)
+
+        # ── SOT / spin-Hall efficiency ─────────────────────────────────────
+        #   ξ_DL = (2e/ℏ) · μ₀ Ms t_FM · (B_DL/μ₀) / J
+        #        = (2e/ℏ) · Ms t_FM B_DL / J          (μ₀ cancels)
+        # with the charge current density in the stack
+        #   J = I / (w · t_stack)         [A/m²]
+        # I is the (coefficient-corrected) total current Ic; w is the fitted
+        # device width; t_stack / t_FM the stack / ferromagnet thicknesses.
+        # Requires Ms [A/m], t_stack [nm] (args) and t_FM [nm] (arg or the
+        # HDF5 fm_thickness_nm metadata); otherwise skipped.
+        ci = self.calc_info
+        xi_DL = xi_DL_err = J = np.nan
+        if (ci.Ms and ci.t_stack_nm and ci.t_fm_nm
+                and np.isfinite(conDL) and width > 0):
+            w_m       = width * 1e-6
+            t_stack_m = ci.t_stack_nm * 1e-9
+            t_fm_m    = ci.t_fm_nm * 1e-9
+            I_A       = Ic * 1e-3                       # Ic = current·coeff2 (mA→A)
+            J         = I_A / (w_m * t_stack_m)         # A/m²
+            B_DL_T    = conDL * 1e-3                    # mT → T
+            pref      = (2.0 * _E_CHARGE / _H_BAR) * ci.Ms * t_fm_m / J
+            xi_DL     = pref * B_DL_T
+            xi_DL_err = abs(pref * conDL_error * 1e-3)  # from B_DL error only
+            print(f'  J           = {J:.4g} A/m²  '
+                  f'(Ic={I_A*1e3:.4g} mA, w={width:.2f} µm, '
+                  f't_stack={ci.t_stack_nm:g} nm)')
+            print(f'  ξ_DL        = {xi_DL:.4g} ± {xi_DL_err:.2g}  '
+                  f'(Ms={ci.Ms:.4g} A/m, t_FM={ci.t_fm_nm:g} nm)')
+        elif ci.Ms or ci.t_stack_nm or ci.t_fm_nm:
+            missing = [n for n, v in (('Ms', ci.Ms),
+                                      ('t_stack_nm', ci.t_stack_nm),
+                                      ('t_fm_nm', ci.t_fm_nm)) if not v]
+            warnings.warn(f'eval_width_and_fit: ξ_DL not computed — missing '
+                          f'{", ".join(missing)}.')
+        self.xi_DL     = xi_DL
+        self.xi_DL_err = xi_DL_err
+        self.J_A_per_m2 = J
 
         # ── main fit plot ─────────────────────────────────────────────────
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -1950,6 +2005,11 @@ class analyze_SOT:
             current_mA=float(self.calc_info.current),
             current_NM_mA=float(Ic1),
             DL_field_per_NM_mA=float(DL_per_NM_mA),
+            xi_DL=float(xi_DL), xi_DL_err=float(xi_DL_err),
+            J_A_per_m2=float(J),
+            Ms_A_per_m=(float(ci.Ms) if ci.Ms else None),
+            t_stack_nm=(float(ci.t_stack_nm) if ci.t_stack_nm else None),
+            t_fm_nm=(float(ci.t_fm_nm) if ci.t_fm_nm else None),
             current_coefficient2=float(current_coefficient2),
             R=list(self.calc_info.R), sln=float(self.calc_info.sln),
             theta_deg=float(self.calc_info.theta),
@@ -2136,17 +2196,27 @@ class analyze_SOT:
                 ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
             return res, None
 
+        def _run(direction):
+            # A failure in one direction (e.g. edge detection on a bad
+            # reflection profile) must not lose the other direction's result.
+            try:
+                return analyze_SOT.import_analyze_SOT(
+                    scanlist_path, see_channels=see_channels,
+                    direction=direction, ignorLines=ignorLines,
+                    fit_edge_offset=fit_edge_offset, **kwargs)
+            except Exception as e:
+                warnings.warn(f'import_analyze_both: {direction} analysis '
+                              f'failed: {e}')
+                print(f'  !! {direction.upper()} failed: {e}')
+                return None
+
         res_trace = res_retrace = None
         if 'trace' in dirs:
             print('=' * 60 + '\n  TRACE\n' + '=' * 60)
-            res_trace = analyze_SOT.import_analyze_SOT(
-                scanlist_path, see_channels=see_channels, direction='trace',
-                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+            res_trace = _run('trace')
         if 'retrace' in dirs:
             print('=' * 60 + '\n  RETRACE\n' + '=' * 60)
-            res_retrace = analyze_SOT.import_analyze_SOT(
-                scanlist_path, see_channels=see_channels, direction='retrace',
-                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+            res_retrace = _run('retrace')
         return res_trace, res_retrace
 
 

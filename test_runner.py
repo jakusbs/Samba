@@ -1131,6 +1131,12 @@ class TestSampleMetadata(unittest.TestCase):
         self.assertAlmostEqual(float(a["r_4wire_ohm"]), 2500.0)
         self.assertAlmostEqual(float(a["r_2wire_ohm"]), 3000.0)
 
+    def test_fm_thickness_written(self):
+        a = self._write({"fm_thickness_nm": 3.5})
+        self.assertAlmostEqual(float(a["fm_thickness_nm"]), 3.5)
+        b = self._write({})
+        self.assertAlmostEqual(float(b["fm_thickness_nm"]), 0.0)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

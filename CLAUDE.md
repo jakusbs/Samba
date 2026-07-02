@@ -1216,10 +1216,21 @@ already supplies `sln`, the interactive `calibration.txt` prompt is skipped.
 Otherwise, when the file is missing, `read_calibration()` prompts and writes
 it. Slope → `sln = (1/slope) × π/180 × 1e6` (µrad/mV). `results.json` records
 `sln`, `sln_source`, the 6 `bd_calibration_mV`, and the device `device_id` /
-`r_4wire_ohm` / `r_2wire_ohm` (Ω) from the HDF5 metadata (the 4-/2-wire
-resistances are recorded, **not** fed into the parallel-channel R1/R2). Pass
-`use_calibration_file=False` to disable the prompt entirely and use explicit
-`sln=`, `R=(R1,R2)`, `theta=` args.
+`r_4wire_ohm` / `r_2wire_ohm` (Ω) and `fm_thickness_nm` from the HDF5
+metadata (the 4-/2-wire resistances are recorded, **not** fed into the
+parallel-channel R1/R2). Pass `use_calibration_file=False` to disable the
+prompt entirely and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
+
+**SOT / spin-Hall efficiency** — pass `Ms=` (A/m) and `t_stack_nm=` to
+`import_analyze_SOT` / `import_analyze_both`; FM thickness comes from the
+HDF5 `fm_thickness_nm` metadata (set in the Samba/Cryo metadata panel) or an
+explicit `t_fm_nm=`. `eval_width_and_fit` then computes
+`ξ_DL = (2e/ℏ)·μ₀·Ms·t_FM·(B_DL/μ₀) / J` with `J = Ic/(w·t_stack)` (w = the
+fitted device width, Ic = the coefficient-corrected total current) and stores
+`xi_DL`, `xi_DL_err`, `J_A_per_m2`, `Ms_A_per_m`, `t_stack_nm`, `t_fm_nm` in
+`results.json`. `import_analyze_both` runs each direction independently, so a
+failure in one (e.g. the edge-detection `min_width` guard on a bad reflection
+profile) returns `None` for that direction and a warning, keeping the other.
 
 ### Per-channel data layout
 

@@ -135,6 +135,11 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
             meta.attrs[ohm_key] = float(v or 0.0)
         except (TypeError, ValueError):
             meta.attrs[ohm_key] = 0.0
+    # Ferromagnet thickness [nm] — for the SOT / spin-Hall efficiency analysis.
+    try:
+        meta.attrs["fm_thickness_nm"] = float(cfg.get("fm_thickness_nm", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        meta.attrs["fm_thickness_nm"] = 0.0
 
 
 # How often to flush to disk for 1D scans (every N points)

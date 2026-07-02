@@ -595,6 +595,12 @@ class MokeMetadataGroup(QGroupBox):
         self.r2w_spin.setRange(0, 10_000_000); self.r2w_spin.setDecimals(3)
         self.r2w_spin.setSuffix(" Ω"); self.r2w_spin.setMinimumWidth(80)
         left.addWidget(self.r2w_spin, 2, 3)
+        left.addWidget(QLabel("t_FM:"), 2, 4)
+        self.tfm_spin = NoScrollDoubleSpinBox()
+        self.tfm_spin.setRange(0, 1000); self.tfm_spin.setDecimals(2)
+        self.tfm_spin.setSuffix(" nm"); self.tfm_spin.setMinimumWidth(80)
+        self.tfm_spin.setToolTip("Ferromagnet thickness (for SOT efficiency ξ_DL)")
+        left.addWidget(self.tfm_spin, 2, 5)
 
         left.addWidget(QLabel("Notes:"), 3, 0)
         self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
@@ -657,6 +663,7 @@ class MokeMetadataGroup(QGroupBox):
         self.mirror_shift.valueChanged.connect(self.changed.emit)
         self.r4w_spin.valueChanged.connect(self.changed.emit)
         self.r2w_spin.valueChanged.connect(self.changed.emit)
+        self.tfm_spin.valueChanged.connect(self.changed.emit)
 
         # Trigger initial visibility
         self._on_incidence_changed(self.incidence_combo.currentText())
@@ -690,6 +697,7 @@ class MokeMetadataGroup(QGroupBox):
             "noDC":         self.nodc_cb.isChecked(),
             "r_4wire_ohm": self.r4w_spin.value(),
             "r_2wire_ohm": self.r2w_spin.value(),
+            "fm_thickness_nm": self.tfm_spin.value(),
         }
 
     def load_values(self, cfg: dict):
@@ -714,6 +722,7 @@ class MokeMetadataGroup(QGroupBox):
         self.nodc_cb.setChecked(cfg.get("noDC", False))
         self.r4w_spin.setValue(cfg.get("r_4wire_ohm", cfg.get("r_4wire_kohm", 0.0) * 1000))
         self.r2w_spin.setValue(cfg.get("r_2wire_ohm", cfg.get("r_2wire_kohm", 0.0) * 1000))
+        self.tfm_spin.setValue(cfg.get("fm_thickness_nm", 0.0))
 
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
