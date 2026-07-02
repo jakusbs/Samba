@@ -1086,13 +1086,14 @@ class analyze_SOT:
             current_mA = 10.0
 
         # ── sample folder + calibration.txt ───────────────────────────────
-        # ── analysis base: sibling "Analysis_Samba" folder ────────────────
-        # Default: one level above the scanlist folder (i.e. next to
-        # ScanLists_<X> and Data_Samba_<X>), sample-name directories inside.
+        # ── analysis base: "Analysis_Samba" folder ────────────────────────
+        # Default: two levels above the scanlist folder — e.g. scanlists in
+        # <...>/Scanning/Data/ScanLists_IR/ put the analysis in
+        # <...>/Scanning/Analysis_Samba/, sample-name directories inside.
         if analysis_base_dir is None:
             scan_dir          = os.path.dirname(os.path.abspath(scanlist_path))
-            analysis_base_dir = os.path.join(os.path.dirname(scan_dir),
-                                             'Analysis_Samba')
+            analysis_base_dir = os.path.join(
+                os.path.dirname(os.path.dirname(scan_dir)), 'Analysis_Samba')
             print(f'  Analysis base auto-set: {analysis_base_dir}')
         sample_folder = get_sample_folder(sample_name, base=analysis_base_dir)
         self.sample_name   = sample_name

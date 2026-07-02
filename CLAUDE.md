@@ -1185,10 +1185,10 @@ scripts — the module analyses Green, IR, and Cryo data alike.
     results.json
 ```
 
-Default `analysis_base` is auto-set to `Analysis_Samba/` one level above
-the scanlist folder (i.e. a sibling of `ScanLists_<X>` / `Data_Samba_<X>`);
-sample-name directories are created inside it. Pass `analysis_base_dir=`
-to override.
+Default `analysis_base` is auto-set to `Analysis_Samba/` two levels above
+the scanlist folder — scanlists in `<...>/Scanning/Data/ScanLists_<X>/` put
+the analysis in `<...>/Scanning/Analysis_Samba/`; sample-name directories
+are created inside it. Pass `analysis_base_dir=` to override.
 A timestamped subfolder per scan keeps re-runs separated. Override with
 `save_dir=` (parent) or `save_subdir=False` (write directly into `save_dir`).
 
