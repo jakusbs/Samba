@@ -1216,7 +1216,7 @@ already supplies `sln`, the interactive `calibration.txt` prompt is skipped.
 Otherwise, when the file is missing, `read_calibration()` prompts and writes
 it. Slope → `sln = (1/slope) × π/180 × 1e6` (µrad/mV). `results.json` records
 `sln`, `sln_source`, the 6 `bd_calibration_mV`, and the device `device_id` /
-`r_4wire_kohm` / `r_2wire_kohm` from the HDF5 metadata (the 4-/2-wire
+`r_4wire_ohm` / `r_2wire_ohm` (Ω) from the HDF5 metadata (the 4-/2-wire
 resistances are recorded, **not** fed into the parallel-channel R1/R2). Pass
 `use_calibration_file=False` to disable the prompt entirely and use explicit
 `sln=`, `R=(R1,R2)`, `theta=` args.

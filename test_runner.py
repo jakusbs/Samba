@@ -1114,22 +1114,22 @@ class TestSampleMetadata(unittest.TestCase):
             return dict(f["metadata"].attrs)
 
     def test_device_id_and_resistances_written(self):
-        a = self._write({"device_id": "devX", "r_4wire_kohm": 2.5,
-                         "r_2wire_kohm": 3.0})
+        a = self._write({"device_id": "devX", "r_4wire_ohm": 2500.0,
+                         "r_2wire_ohm": 3000.0})
         self.assertEqual(a["device_id"], "devX")
-        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 2.5)
-        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 3.0)
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 2500.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 3000.0)
 
     def test_missing_fields_default_safely(self):
         a = self._write({})
         self.assertEqual(a["device_id"], "")
-        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 0.0)
-        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 0.0)
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 0.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 0.0)
 
-    def test_blank_resistance_string_coerces_to_zero(self):
-        a = self._write({"r_4wire_kohm": "", "r_2wire_kohm": None})
-        self.assertAlmostEqual(float(a["r_4wire_kohm"]), 0.0)
-        self.assertAlmostEqual(float(a["r_2wire_kohm"]), 0.0)
+    def test_legacy_kohm_key_converted_to_ohm(self):
+        a = self._write({"r_4wire_kohm": 2.5, "r_2wire_kohm": 3.0})
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 2500.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 3000.0)
 
 
 if __name__ == '__main__':

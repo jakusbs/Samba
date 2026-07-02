@@ -1244,11 +1244,15 @@ class analyze_SOT:
         ci.sln_source        = sln_src
         ci.bd_calibration_mV = (list(map(float, h5_cal_mV))
                                 if h5_cal_mV is not None else None)
-        # Device resistances / id from the HDF5 metadata (recorded, not used
-        # in the fit — 4-wire/2-wire are not the parallel-channel R1/R2).
-        ci.r_4wire_kohm = h5_meta.get('r_4wire_kohm')
-        ci.r_2wire_kohm = h5_meta.get('r_2wire_kohm')
-        ci.device_id    = str(h5_meta.get('device_id', '') or '')
+        # Device resistances / id from the HDF5 metadata (recorded in ohms;
+        # older files may carry the legacy kΩ keys).
+        ci.r_4wire_ohm = h5_meta.get('r_4wire_ohm',
+                                     (h5_meta.get('r_4wire_kohm', 0.0) or 0.0) * 1000
+                                     if 'r_4wire_kohm' in h5_meta else None)
+        ci.r_2wire_ohm = h5_meta.get('r_2wire_ohm',
+                                     (h5_meta.get('r_2wire_kohm', 0.0) or 0.0) * 1000
+                                     if 'r_2wire_kohm' in h5_meta else None)
+        ci.device_id   = str(h5_meta.get('device_id', '') or '')
         ci.LI_type  = li_type
         ci.system   = sample_name
         ci.sample_id = sample_name
@@ -2019,8 +2023,8 @@ class analyze_SOT:
             'sln_source':         getattr(self.calc_info, 'sln_source', None),
             'bd_calibration_mV':  getattr(self.calc_info, 'bd_calibration_mV', None),
             'device_id':          getattr(self.calc_info, 'device_id', None),
-            'r_4wire_kohm':       getattr(self.calc_info, 'r_4wire_kohm', None),
-            'r_2wire_kohm':       getattr(self.calc_info, 'r_2wire_kohm', None),
+            'r_4wire_ohm':        getattr(self.calc_info, 'r_4wire_ohm', None),
+            'r_2wire_ohm':        getattr(self.calc_info, 'r_2wire_ohm', None),
             'h5_metadata':        {k: _json_safe(v)
                                     for k, v in self.h5_meta.items()},
         }

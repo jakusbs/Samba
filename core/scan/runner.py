@@ -123,13 +123,18 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
                 except Exception:
                     _wsa(meta, dst, str(v))
     # Sample-identity / device resistance (from MokeMetadataGroup) — recorded
-    # so the analysis can pick them up from the file's metadata.
+    # so the analysis can pick them up from the file's metadata.  The live
+    # config key is <name>_ohm (ohms); older configs used <name>_kohm.
     _wsa(meta, "device_id", str(cfg.get("device_id", "")))
-    for k in ("r_4wire_kohm", "r_2wire_kohm"):
+    for ohm_key, kohm_key in (("r_4wire_ohm", "r_4wire_kohm"),
+                              ("r_2wire_ohm", "r_2wire_kohm")):
+        v = cfg.get(ohm_key)
+        if v is None and cfg.get(kohm_key) is not None:
+            v = float(cfg.get(kohm_key) or 0.0) * 1000.0   # legacy kΩ → Ω
         try:
-            meta.attrs[k] = float(cfg.get(k, 0.0) or 0.0)
+            meta.attrs[ohm_key] = float(v or 0.0)
         except (TypeError, ValueError):
-            meta.attrs[k] = 0.0
+            meta.attrs[ohm_key] = 0.0
 
 
 # How often to flush to disk for 1D scans (every N points)
