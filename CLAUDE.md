@@ -1200,15 +1200,18 @@ A timestamped subfolder per scan keeps re-runs separated. Override with
 
 ### Calibration file
 
-`calibration.txt` (v2) lives in the sample folder; line-based, 4 data lines:
+`calibration.txt` (v3) lives in the sample folder; line-based, 5 data lines:
 
 ```
-# samba_calib v2  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / theta (deg)
+# samba_calib v3  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / t_FM (nm) / theta (deg)
 0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV λ/2 sweep at ticks 0,5,10,15,20,25
 1.4e6                            # Ms — saturation magnetization (A/m); 0 = unset
 8.0                              # t_stack — current-carrying stack thickness (nm); 0 = unset
+3.0                              # t_FM — ferromagnet thickness (nm); 0 = unset
 0.0                             # theta — 1st-harmonic phase offset (deg)
 ```
+
+(v2 files without the t_FM line are still read and upgraded on the next write.)
 
 The old R1/R2 (parallel-channel) lines were **dropped** — the SOT efficiency
 uses geometry + Ms, not a resistance ratio. `read_calibration()` builds the
@@ -1220,7 +1223,7 @@ it back so later runs are silent:
   ξ_DL then skipped; not re-prompted).
 - `theta`: never prompted (auto-detected by `get_theta`); file value or 0.
 - `t_FM` [nm]: `t_fm_nm=` arg → HDF5 `fm_thickness_nm` metadata (Samba/Cryo
-  metadata panel) → unset.
+  metadata panel) → file → prompt (blank = unset).
 Old-format (R1/R2) files are detected (no `samba_calib v2` marker) and rebuilt.
 `results.json` records `sln`, `sln_source`, `bd_calibration_mV`, `device_id`,
 `r_4wire_ohm`/`r_2wire_ohm` (Ω), and `fm_thickness_nm` from the metadata.

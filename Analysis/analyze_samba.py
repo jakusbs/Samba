@@ -362,32 +362,37 @@ def read_h5_calibration(h5_path):
     return sln, cal
 
 
-_CALIB_MARK = 'samba_calib v2'
+_CALIB_MARK = 'samba_calib'          # any versioned marker line
 
 
 def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
                      h5_sln=None, h5_cal_mV=None,
-                     Ms=None, t_stack_nm=None, theta=None):
+                     Ms=None, t_stack_nm=None, t_fm_nm=None, theta=None):
     """Resolve the per-sample calibration constants and persist them.
 
-    Line-based ``calibration.txt`` (v2) — four data lines:
+    Line-based ``calibration.txt`` (v3) — five data lines:
         line 1 : 6 space-separated mV λ/2 sweep readings (ticks 0,5,…,25)
         line 2 : Ms       — saturation magnetization (A/m); 0 = unset
         line 3 : t_stack  — current-carrying stack thickness (nm); 0 = unset
-        line 4 : theta    — 1st-harmonic phase offset (deg)
+        line 4 : t_FM     — ferromagnet thickness (nm); 0 = unset
+        line 5 : theta    — 1st-harmonic phase offset (deg)
+
+    (v2 files without the t_FM line are still read — 4 data lines →
+    mV / Ms / t_stack / theta — and upgraded on the next write.)
 
     Resolution: ``sln`` comes from the HDF5 ``/data/calibration`` (``h5_sln``)
-    when available, else from the file's 6 mV line, else a prompt.  ``Ms`` and
-    ``t_stack`` are not in the HDF5 metadata, so they come from an explicit
-    arg, the file, or a prompt.  Whatever is missing is prompted for (when
+    when available, else from the file's 6 mV line, else a prompt.  ``Ms``,
+    ``t_stack`` and ``t_FM`` come from an explicit arg (for t_FM the caller
+    passes the HDF5 ``fm_thickness_nm`` metadata when set), else the file,
+    else a prompt.  Whatever is missing is prompted for (when
     ``allow_prompt``) and the file is (re)written so later runs are silent.
-    Enter a blank/0 for Ms or t_stack to leave them unset (ξ_DL is skipped).
+    Enter a blank/0 to leave a value unset (ξ_DL is then skipped).
 
-    Returns ``(sln, Ms, t_stack_nm, theta, cal_mV)`` — values may be None.
+    Returns ``(sln, Ms, t_stack_nm, t_fm_nm, theta, cal_mV)`` — may be None.
     """
     path = os.path.join(folder, filename)
 
-    file_mV = file_Ms = file_tstack = file_theta = None
+    file_mV = file_Ms = file_tstack = file_tfm = file_theta = None
     old_format = False
     if os.path.exists(path):
         try:
@@ -407,18 +412,24 @@ def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
                 file_mV = mv if mv.size >= 2 else None
             if len(rows) >= 2: file_Ms     = _row_float(1)
             if len(rows) >= 3: file_tstack = _row_float(2)
-            if len(rows) >= 4: file_theta  = _row_float(3)
+            if len(rows) >= 5:              # v3: mV/Ms/t_stack/t_FM/theta
+                file_tfm   = _row_float(3)
+                file_theta = _row_float(4)
+            elif len(rows) >= 4:            # v2: mV/Ms/t_stack/theta
+                file_theta = _row_float(3)
         elif raw.strip():
             old_format = True
             warnings.warn(f'read_calibration: {path} is an old-format (R1/R2) '
-                          f'file — ignoring it and rebuilding as v2.')
+                          f'file — ignoring it and rebuilding.')
 
-    # explicit arg > file
+    # explicit arg (t_FM: incl. HDF5 metadata via caller) > file
     Ms_v     = Ms         if Ms         is not None else file_Ms
     tstack_v = t_stack_nm if t_stack_nm is not None else file_tstack
+    tfm_v    = t_fm_nm    if t_fm_nm    is not None else file_tfm
     theta_v  = theta      if theta      is not None else file_theta
     cal_mV   = h5_cal_mV  if h5_cal_mV  is not None else file_mV
-    dirty    = old_format or not os.path.exists(path)
+    dirty    = old_format or not os.path.exists(path) or (
+        file_tfm is None and tfm_v is not None)   # upgrade v2 → v3
 
     def _prompt_float(hint):
         # blank → None (skip); EOF (non-interactive) → None, no crash
@@ -457,6 +468,10 @@ def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
             print('\n  t_stack — current-carrying stack thickness (nm) '
                   '[blank to skip ξ_DL]:')
             tstack_v = _prompt_float('e.g. 8'); dirty = True
+        if tfm_v is None:
+            print('\n  t_FM — ferromagnet thickness (nm) [blank to skip ξ_DL; '
+                  'normally set in the Samba metadata panel]:')
+            tfm_v = _prompt_float('e.g. 3'); dirty = True
 
     # sln from the 6 mV sweep when the HDF5 didn't supply it
     sln = None
@@ -467,18 +482,21 @@ def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
         if slope and np.isfinite(slope):
             sln = (1.0 / slope) * np.pi / 180.0 * 1e6
 
-    # Persist v2 so subsequent runs are silent
-    if dirty and (cal_mV is not None or Ms_v or tstack_v):
+    # Persist v3 so subsequent runs are silent
+    if dirty and (cal_mV is not None or Ms_v or tstack_v or tfm_v):
         mv_out = (' '.join(f'{v:g}' for v in np.asarray(cal_mV, float))
                   if cal_mV is not None else '')
         content = (
-            f'# {_CALIB_MARK}  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / theta (deg)\n'
+            '# samba_calib v3  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm)'
+            ' / t_FM (nm) / theta (deg)\n'
             '# 6 calibration mV readings at micrometer ticks 0 5 10 15 20 25\n'
             f'{mv_out}\n'
             '# Ms — saturation magnetization (A/m); 0 = unset\n'
             f'{float(Ms_v) if Ms_v else 0.0!r}\n'
             '# t_stack — current-carrying stack thickness (nm); 0 = unset\n'
             f'{float(tstack_v) if tstack_v else 0.0!r}\n'
+            '# t_FM — ferromagnet thickness (nm); 0 = unset\n'
+            f'{float(tfm_v) if tfm_v else 0.0!r}\n'
             '# theta — 1st-harmonic phase offset (deg)\n'
             f'{float(theta_v) if theta_v is not None else 0.0!r}\n'
         )
@@ -492,13 +510,16 @@ def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
     # 0 in the file means "unset"
     if Ms_v == 0:     Ms_v = None
     if tstack_v == 0: tstack_v = None
+    if tfm_v == 0:    tfm_v = None
     if sln is not None:
-        print('  Calibration  : sln = {:.4g} µrad/mV{}{}{}'.format(
+        print('  Calibration  : sln = {:.4g} µrad/mV{}{}{}{}'.format(
             sln,
             f', Ms = {Ms_v:.4g} A/m' if Ms_v else '',
             f', t_stack = {tstack_v:g} nm' if tstack_v else '',
+            f', t_FM = {tfm_v:g} nm' if tfm_v else '',
             f', θ₀ = {theta_v:.4g}°' if theta_v else ''))
-    return sln, Ms_v, tstack_v, (0.0 if theta_v is None else float(theta_v)), cal_mV
+    return (sln, Ms_v, tstack_v, tfm_v,
+            (0.0 if theta_v is None else float(theta_v)), cal_mV)
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +936,45 @@ _EXPECTED_X_UNITS = {'µm', 'um', 'micrometer', 'micrometre', 'micrometers',
                      'micrometres'}
 
 
+def _iter_scanlist(scanlist_path, direction=None, ignorLines=(),
+                   data_base_dir=None, min_cols=1, warn_missing=False):
+    """Iterate a SAMBA scanlist: yields ``(filepath, parts, bname)`` per scan.
+
+    Shared by :func:`data_calculation` and :func:`intensity_mean` — handles
+    comment/blank lines, 1-based ``ignorLines``, the trace/retrace filename
+    filter, and file resolution via :func:`_resolve_path`.
+    """
+    line_counter = 0
+    with open(scanlist_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            line_counter += 1
+            if line_counter in ignorLines:
+                continue
+
+            parts = line.split('\t')
+            if len(parts) < min_cols:
+                continue
+
+            localfile = parts[0].strip()
+            bname = os.path.basename(localfile)
+
+            if direction == 'trace'   and '_trace'   not in bname:
+                continue
+            if direction == 'retrace' and '_retrace' not in bname:
+                continue
+
+            filepath = _resolve_path(localfile, data_base_dir)
+            if filepath is None:
+                if warn_missing:
+                    warnings.warn(f'_iter_scanlist: not found: {localfile}')
+                continue
+
+            yield filepath, parts, bname
+
+
 def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                            direction=None, ignorLines=(),
                            data_base_dir=None, median=False,
@@ -932,86 +992,63 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
     first_scan = first_pos = first_neg = True
     var_pos = var_neg = x = None
     n_pos = n_neg = 0
-    line_counter = 0
     x_unit_checked = False
 
-    with open(scanlist_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
+    for filepath, parts, bname in _iter_scanlist(
+            scanlist_path, direction=direction, ignorLines=ignorLines,
+            data_base_dir=data_base_dir, min_cols=3, warn_missing=True):
+
+        try:
+            relay_sign = int(parts[1].strip().replace('+', ''))
+            field_T    = float(parts[2].strip())
+        except ValueError:
+            relay_sign, field_T = 1, 0.0
+
+        pol = relay_sign * (1 if field_T >= 0.0 else -1)
+
+        if first_scan:
+            first_scan = False
+            x, x_unit = data_load(filepath, ch_x, return_unit=True)
+            if x is None or len(x) < 2:
+                x = None
+                first_scan = True
                 continue
-            line_counter += 1
-            if line_counter in ignorLines:
-                continue
+            # Sanity-check x-axis unit (warn once per call)
+            if (not x_unit_checked) and x_unit and expected_x_unit:
+                if x_unit.strip().lower() not in _EXPECTED_X_UNITS:
+                    warnings.warn(
+                        f'data_calculation: x-axis unit '
+                        f'"{x_unit}" ≠ expected "{expected_x_unit}" '
+                        f'(in {bname}). Distances and fit width may '
+                        f'be wrong.')
+                x_unit_checked = True
 
-            parts = line.split('\t')
-            if len(parts) < 3:
-                continue
+        var = data_load(filepath, ch_var)
+        if len(var) != len(x):
+            var = np.interp(np.linspace(0, 1, len(x)),
+                            np.linspace(0, 1, len(var)), var)
 
-            localfile = parts[0].strip()
-            bname = os.path.basename(localfile)
+        # Bridge NaNs (e.g. flagged spikes) only for averaging — the
+        # raw arrays are unchanged on disk.
+        nans, z = nan_helper(var)
+        if np.any(nans) and (~nans).sum() >= 2:
+            var = var.copy()
+            var[nans] = np.interp(z(nans), z(~nans), var[~nans])
 
-            if direction == 'trace'   and '_trace'   not in bname:
-                continue
-            if direction == 'retrace' and '_retrace' not in bname:
-                continue
-
-            filepath = _resolve_path(localfile, data_base_dir)
-            if filepath is None:
-                warnings.warn(f'data_calculation: not found: {localfile}')
-                continue
-
-            try:
-                relay_sign = int(parts[1].strip().replace('+', ''))
-                field_T    = float(parts[2].strip())
-            except ValueError:
-                relay_sign, field_T = 1, 0.0
-
-            pol = relay_sign * (1 if field_T >= 0.0 else -1)
-
-            if first_scan:
-                first_scan = False
-                x, x_unit = data_load(filepath, ch_x, return_unit=True)
-                if x is None or len(x) < 2:
-                    x = None
-                    first_scan = True
-                    continue
-                # Sanity-check x-axis unit (warn once per call)
-                if (not x_unit_checked) and x_unit and expected_x_unit:
-                    if x_unit.strip().lower() not in _EXPECTED_X_UNITS:
-                        warnings.warn(
-                            f'data_calculation: x-axis unit '
-                            f'"{x_unit}" ≠ expected "{expected_x_unit}" '
-                            f'(in {bname}). Distances and fit width may '
-                            f'be wrong.')
-                    x_unit_checked = True
-
-            var = data_load(filepath, ch_var)
-            if len(var) != len(x):
-                var = np.interp(np.linspace(0, 1, len(x)),
-                                np.linspace(0, 1, len(var)), var)
-
-            # Bridge NaNs (e.g. flagged spikes) only for averaging — the
-            # raw arrays are unchanged on disk.
-            nans, z = nan_helper(var)
-            if np.any(nans) and (~nans).sum() >= 2:
-                var = var.copy()
-                var[nans] = np.interp(z(nans), z(~nans), var[~nans])
-
-            if pol >= 0:
-                if first_pos:
-                    first_pos = False
-                    var_pos = var
-                else:
-                    var_pos = np.vstack((var_pos, var))
-                n_pos += 1
+        if pol >= 0:
+            if first_pos:
+                first_pos = False
+                var_pos = var
             else:
-                if first_neg:
-                    first_neg = False
-                    var_neg = var
-                else:
-                    var_neg = np.vstack((var_neg, var))
-                n_neg += 1
+                var_pos = np.vstack((var_pos, var))
+            n_pos += 1
+        else:
+            if first_neg:
+                first_neg = False
+                var_neg = var
+            else:
+                var_neg = np.vstack((var_neg, var))
+            n_neg += 1
 
     if x is None or var_pos is None or var_neg is None:
         warnings.warn(f'data_calculation: no valid data for "{ch_var}" '
@@ -1095,41 +1132,21 @@ def intensity_mean(scanlist_path, ch_var='DC', direction=None,
     Returns ``(I, var_all)`` where *I* is the per-scan mean and *var_all*
     has shape ``(n_scans, n_points)``.
     """
-    var_all    = None
-    line_counter = 0
+    var_all = None
 
-    with open(scanlist_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            line_counter += 1
-            if line_counter in ignorLines:
-                continue
-
-            parts    = line.split('\t')
-            localfile = parts[0].strip()
-            bname    = os.path.basename(localfile)
-
-            if direction == 'trace'   and '_trace'   not in bname:
-                continue
-            if direction == 'retrace' and '_retrace' not in bname:
-                continue
-
-            filepath = _resolve_path(localfile, data_base_dir)
-            if filepath is None:
-                continue
-
-            var = data_load(filepath, ch_var)
-            if var_all is None:
-                var_all = var
-            else:
-                n = var_all.shape[-1] if var_all.ndim > 1 else len(var_all)
-                if len(var) == n:
-                    try:
-                        var_all = np.vstack((var_all, var))
-                    except ValueError:
-                        pass
+    for filepath, _parts, _bname in _iter_scanlist(
+            scanlist_path, direction=direction, ignorLines=ignorLines,
+            data_base_dir=data_base_dir):
+        var = data_load(filepath, ch_var)
+        if var_all is None:
+            var_all = var
+        else:
+            n = var_all.shape[-1] if var_all.ndim > 1 else len(var_all)
+            if len(var) == n:
+                try:
+                    var_all = np.vstack((var_all, var))
+                except ValueError:
+                    pass
 
     if var_all is None:
         return np.array([]), np.zeros((0, 1))
@@ -1246,22 +1263,25 @@ class analyze_SOT:
             print(f'  Calibration from HDF5 /data/calibration: '
                   f'sln = {h5_sln:.4g} µrad/mV')
 
-        # t_FM from the HDF5 metadata (fed to the calibration resolver so it
-        # can prompt only for what's genuinely missing).
+        # t_FM: explicit arg > HDF5 metadata (fed to the calibration resolver
+        # so it can prompt only for what's genuinely missing).
         _mv = h5_meta.get('fm_thickness_nm')
         tfm_meta = float(_mv) if _mv not in (None, '', 0, 0.0) else None
+        tfm_in   = float(t_fm_nm) if t_fm_nm is not None else tfm_meta
 
-        # ── calibration.txt (v2): sln / Ms / t_stack / theta ──────────────
+        # ── calibration.txt (v3): sln / Ms / t_stack / t_FM / theta ───────
         # Reads the file, fills gaps from the HDF5 metadata / explicit args,
         # prompts for whatever is still missing, and writes it back.
-        cal_sln = cal_Ms = cal_tstack = None
+        cal_sln = cal_Ms = cal_tstack = cal_tfm = None
         cal_th  = None
         if use_calibration_file:
             try:
-                cal_sln, cal_Ms, cal_tstack, cal_th, _ = read_calibration(
-                    sample_folder, allow_prompt=True,
-                    h5_sln=h5_sln, h5_cal_mV=h5_cal_mV,
-                    Ms=Ms, t_stack_nm=t_stack_nm, theta=theta)
+                cal_sln, cal_Ms, cal_tstack, cal_tfm, cal_th, _ = \
+                    read_calibration(
+                        sample_folder, allow_prompt=True,
+                        h5_sln=h5_sln, h5_cal_mV=h5_cal_mV,
+                        Ms=Ms, t_stack_nm=t_stack_nm, t_fm_nm=tfm_in,
+                        theta=theta)
             except Exception as e:
                 warnings.warn(f'read_calibration: {e}')
 
@@ -1277,10 +1297,12 @@ class analyze_SOT:
         else:
             sln_val, sln_src = 1.0, 'default (1.0)'
 
-        # Ms / t_stack : explicit > calibration.txt.  theta : explicit >
-        # calibration.txt > 0 (get_theta auto-detects it during analysis).
+        # Ms / t_stack / t_FM : explicit (or metadata for t_FM) >
+        # calibration.txt.  theta : explicit > calibration.txt > 0
+        # (get_theta auto-detects it during analysis).
         Ms         = Ms         if Ms         is not None else cal_Ms
         t_stack_nm = t_stack_nm if t_stack_nm is not None else cal_tstack
+        tfm_final  = tfm_in     if tfm_in     is not None else cal_tfm
         if theta is not None:
             theta_val = float(theta)
         elif cal_th is not None:
@@ -1314,12 +1336,12 @@ class analyze_SOT:
                                      if 'r_2wire_kohm' in h5_meta else None)
         ci.device_id   = str(h5_meta.get('device_id', '') or '')
         # ── SOT / spin-Hall efficiency inputs ──────────────────────────────
-        # Ms [A/m] and stack thickness [nm] come from the calibration.txt
-        # (resolved above); FM thickness [nm] from the HDF5 metadata (or the
-        # t_fm_nm arg).  Device width comes from the fit (§ below).
+        # Ms [A/m], stack and FM thickness [nm] as resolved above (explicit
+        # arg / HDF5 metadata / calibration.txt / prompt).  Device width
+        # comes from the fit.
         ci.Ms         = float(Ms) if Ms is not None else None
         ci.t_stack_nm = float(t_stack_nm) if t_stack_nm is not None else None
-        ci.t_fm_nm    = float(t_fm_nm) if t_fm_nm is not None else tfm_meta
+        ci.t_fm_nm    = float(tfm_final) if tfm_final is not None else None
         ci.LI_type  = li_type
         ci.system   = sample_name
         ci.sample_id = sample_name
