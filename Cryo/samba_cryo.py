@@ -1062,6 +1062,15 @@ class CryoMainWindow(QMainWindow):
         registry = self.dev_registry.get_registry()
         self.traj_panel.populate_monitor_combo(registry)
         self.traj_panel.load_config(cfg)
+        # ── Shared (setup-level) metadata ────────────────────────────────────
+        # Metadata describes the physical sample under test, which is constant
+        # across scan types.  Stored once per setup and re-applied here, so
+        # switching between a map, a line scan, a field/temperature sweep, etc.
+        # keeps "the same sample".  Old setups fall back to the config's copy.
+        shared_meta = setup.get("metadata")
+        if shared_meta:
+            self.traj_panel.meta.load_values(shared_meta)
+            self.sl_panel.meta.load_values(shared_meta)
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -1111,6 +1120,9 @@ class CryoMainWindow(QMainWindow):
         old["colormap"]       = self.right_panel.get_colormap()
         old["geometry"]       = self._get_current_geometry()
         old["stage_type"]     = self._get_current_stage_type()
+        # Metadata is shared across all configs of this setup (same sample) —
+        # persist it at setup level so it survives config/scan-type switches.
+        self._active_setup()["metadata"] = self.traj_panel.meta.get_values()
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
         self._active_setup()["server_sync_dir"] = self.server_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
@@ -1392,6 +1404,13 @@ class CryoMainWindow(QMainWindow):
         if piezo_block.get("z_device"):
             partial.setdefault("z_device", piezo_block["z_device"])
             partial.setdefault("z_attr",   piezo_block.get("z_attr", "z"))
+
+        # ── BD calibration — injected here (the single build path shared by
+        # every start route: single scan, scanlist and the calibration time
+        # scan) so the 6 mV λ/2 values reach HDF5 for all scan types.
+        bd_panel = getattr(self, "bd_cal_panel", None)
+        if bd_panel is not None:
+            partial["bd_calibration"] = bd_panel.get_calibration()
         return partial
 
     # ── Scan geometry ────────────────────────────────────────────────────────
@@ -1547,8 +1566,7 @@ class CryoMainWindow(QMainWindow):
         if cfg.get("stage_type") == "anm200":
             self._apply_anm200_scaling(cfg)
 
-        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
 
         # ── Build direction queue ─────────────────────────────────────────────
         # Each axis can carry up to 2 [start, stop] directions.
@@ -1902,10 +1920,8 @@ class CryoMainWindow(QMainWindow):
         else:
             cfg_list = [copy.deepcopy(cfg)]
 
-        # ── BD calibration — injected into all per-cycle cfgs ────────────────
-        bd_cal = self.bd_cal_panel.get_calibration()
-        for c in cfg_list:
-            c["bd_calibration"] = bd_cal
+        # BD calibration is injected in _build_full_config() and carried into
+        # each per-cycle cfg by the copy.deepcopy(cfg) above.
 
         first_cfg = cfg_list[0]
         self._sl_cfg_list = cfg_list

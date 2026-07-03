@@ -862,6 +862,56 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
         self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
 
 
+class TestDcHystCalibration(unittest.TestCase):
+    """The DC-hyst HDF5 file must carry the BD (λ/2) calibration array under
+    /data/calibration, exactly like the spatial/field path in _open_hdf5 —
+    previously it was only written by _open_hdf5, so DC-hyst files lacked it."""
+
+    def _run(self, bd_cal):
+        import os, glob, tempfile, h5py
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "cal.h5"
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "cal",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_channels": [{"label": "MOKE", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}],
+                       "sensors": []}
+                if bd_cal is not None:
+                    cfg["bd_calibration"] = bd_cal
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()
+                r.run({"status": lambda m: None, "log": lambda m: None})
+                paths = glob.glob(os.path.join(td, "**", "cal.h5"), recursive=True)
+                self.assertTrue(paths, "DC-hyst file was not created")
+                with h5py.File(paths[0], "r") as f:
+                    if "calibration" not in f["data"]:
+                        return None
+                    ds = f["data"]["calibration"]
+                    return (ds[...], dict(ds.attrs))
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+
+    def test_calibration_written_to_hdf5(self):
+        vals = [0.05, 1.10, 2.18, 3.27, 4.40, 5.51]
+        res = self._run(vals)
+        self.assertIsNotNone(res, "/data/calibration missing from DC-hyst file")
+        arr, attrs = res
+        self.assertEqual([float(x) for x in arr], vals)
+        def _s(v): return v.decode() if isinstance(v, bytes) else str(v)
+        self.assertEqual(_s(attrs.get("unit")), "mV")
+        self.assertEqual(_s(attrs.get("role")), "calibration")
+
+    def test_no_calibration_key_writes_no_dataset(self):
+        self.assertIsNone(self._run(None),
+                          "calibration dataset must be absent when cfg has no bd_calibration")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 13. DC hysteresis — raw per-cycle data saved to /data/cycles
 # ─────────────────────────────────────────────────────────────────────────────

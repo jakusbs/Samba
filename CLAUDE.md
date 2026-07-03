@@ -2088,3 +2088,52 @@ exclude-list, **not** N checkboxes).
 - `test_runner.py` grew from 32 → 42 tests: `TestDcHystCycleSave` (4),
   `TestHystCycleRoundTrip` (4, writer↔reader via `Analysis/samba_io`),
   `TestDcHystSourceWrite` (2). Still numpy + h5py only.
+
+---
+
+## 32. Recent Changes (July 2026) — Calibration on Every Scan & Setup-Level Shared Metadata
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free (`python test_runner.py`,
+now 48 tests).
+
+### BD (λ/2) calibration now written for *every* scan type
+The 6 mV λ/2 calibration array (`/data/calibration`) was only written by
+`_open_hdf5` (SPATIAL / FIELD / TIME) **and** only injected into the config by
+`_start_scan` / `_start_scanlist`.  So two paths silently lost it:
+- **DC hysteresis** — `_run_dc_hyst` builds its own HDF5 file and never wrote the
+  calibration dataset.
+- **Calibration time scans** — `_start_calib_timescan` never injected
+  `cfg["bd_calibration"]` (only the two other start routes did).
+
+Fixes (Samba_main + Cryo):
+- Injection moved into **`_build_full_config()`** — the single build path shared by
+  `_start_scan`, `_start_scanlist` and `_start_calib_timescan` — so the panel's
+  6 mV values reach the config for *all* scan types.  The redundant per-route
+  injections were removed (Cryo's per-cycle deepcopies inherit it).
+- `_run_dc_hyst` (`core/scan/runner.py`) now writes `/data/calibration`
+  (float64, `unit=mV`, `role=calibration`) right after the channel datasets,
+  matching `_open_hdf5`.  The Analysis module's `read_h5_calibration()` reads the
+  same path, so DC-hyst files now feed SOT calibration like the others.
+
+### Setup-level shared metadata (same sample across scan types)
+Metadata (operator / sample / device / notes / incidence / polarization / mirror
+shift / R4W / R2W / FM thickness) was stored **per scan config**, so switching
+between configs of different scan types (a map vs. a line scan vs. a field sweep)
+reset the sample identity.  Metadata describes the *physical sample*, which is
+constant across scan types.
+
+Fix (both apps): the whole `MokeMetadataGroup` is now stored **once per setup**
+(`setup["metadata"]`):
+- `_save_active_config()` persists `setup["metadata"] = traj_panel.meta.get_values()`.
+- `_load_active_config()` re-applies `setup["metadata"]` into both the trajectory
+  and scanlist metadata groups **after** `load_config()`, overriding the per-config
+  copy — so switching configs keeps "the same sample".
+- Per-setup isolation is preserved: `_on_setup_changed` saves before switching, so
+  Green / IR / Cryo keep their own metadata.  Old setups without the shared block
+  fall back to the config's own metadata and populate it on the first save.
+- Per-config metadata copies are still written (via `get_config_partial`) so HDF5
+  files stay correct; the shared block just wins on load.
+
+### Tests
+- `test_runner.py` +2 → 48: `TestDcHystCalibration` (calibration written to the
+  DC-hyst HDF5; absent when no `bd_calibration` key).

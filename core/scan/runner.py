@@ -1151,6 +1151,16 @@ class ScanRunner:
                 _wsa(ds, "y_axis",          c.get("y_axis", "Y1"))
                 _wsa(ds, "role",            "sensor")
 
+            # BD calibration — 6 mV values at λ/2 tick positions 0,5,10,15,20,25
+            # (same as _open_hdf5, so DC-hyst files carry the calibration too).
+            bd_cal = cfg.get("bd_calibration")
+            if bd_cal:
+                cal_arr = np.array(bd_cal, dtype=np.float64)
+                cds = data_grp.create_dataset("calibration", data=cal_arr)
+                _wsa(cds, "label", "λ/2 calibration (mV)")
+                _wsa(cds, "unit",  "mV")
+                _wsa(cds, "role",  "calibration")
+
             hfile.flush()
         except Exception as e:
             st(f"⚠ Could not create {filename}: {e}"); return None

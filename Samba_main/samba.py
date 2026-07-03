@@ -963,6 +963,17 @@ class MainWindow(QMainWindow):
         )
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
+        # ── Shared (setup-level) metadata ────────────────────────────────────
+        # Metadata (sample / device / notes / optics / resistances) describes the
+        # physical sample under test, which is constant across scan types.  It is
+        # stored once per setup and re-applied here, overriding the per-config
+        # copy that load_config() just set, so switching between a map, a line
+        # scan, a field sweep, etc. keeps "the same sample".  Old setups without
+        # a shared block fall back to the config's own metadata.
+        shared_meta = setup.get("metadata")
+        if shared_meta:
+            self.traj_panel.meta.load_values(shared_meta)
+            self.sl_panel.meta.load_values(shared_meta)
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -995,6 +1006,9 @@ class MainWindow(QMainWindow):
         old["colormap"]       = self.right_panel.get_colormap()
         old["hyst_channels"]  = self.right_panel.get_dc_channels()
         old["hyst_sources"]   = self.right_panel.get_dc_sources()
+        # Metadata is shared across all configs of this setup (same sample) —
+        # persist it at setup level so it survives config/scan-type switches.
+        setup["metadata"] = self.traj_panel.meta.get_values()
         # Sync save_dir, server_sync_dir, and setup defaults back into setup
         setup["save_dir"] = self.save_dir.text().strip()
         setup["server_sync_dir"] = self.server_dir.text().strip()
@@ -1262,6 +1276,14 @@ class MainWindow(QMainWindow):
                     if ch.get("enabled") and ch.get("device"):
                         partial["hyst_device"] = ch["device"]
                         break
+
+        # ── BD calibration — injected here (the single build path shared by
+        # every start route: single scan, scanlist, DC-hyst and the
+        # calibration time scan) so the 6 mV λ/2 values reach HDF5 for all
+        # scan types, not just the standard SPATIAL/FIELD path.
+        bd_panel = getattr(self, "bd_cal_panel", None)
+        if bd_panel is not None:
+            partial["bd_calibration"] = bd_panel.get_calibration()
         return partial
 
     # ── Scan geometry helpers ─────────────────────────────────────────────────
@@ -1444,8 +1466,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass  # fail-open: device unreachable, proceed
 
-        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
@@ -1643,8 +1664,7 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
-        # ── BD calibration — injected into cfg for HDF5 storage ──────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
