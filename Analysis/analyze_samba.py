@@ -981,13 +981,26 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                            expected_x_unit='µm'):
     """Load one data channel from all scans in a SAMBA scanlist.
 
-    Groups scans by  effective sign = relay_sign × sign(field_T).
+    Polarity grouping follows the *original* ``data_calculation_new``
+    convention: the group is set by ``-sign(field_T)`` (the field column,
+    with the historical ``#INVERTED!!`` sign flip baked in), so field > 0
+    lands in ``res_neg`` and field < 0 in ``res_pos``. The relay column is
+    intentionally NOT folded in — matching the reference script — so the
+    absolute sign of the half-difference ``(res_pos - res_neg) / 2`` (hence
+    the DL signal / xi_DL) agrees with the old analysis.
 
     Returns ``[x, diff, sum, err, res_pos, res_neg, n_pos]`` — the same
-    7-element format as ``data_calculation_SOT`` / ``data_calculation_new``,
-    where ``err`` is the standard error of the mean of the half-difference
-    ``(res_pos - res_neg) / 2`` (i.e. uses SEM not std, properly weighted
-    by the per-group sample counts).
+    7-element format as ``data_calculation_SOT`` / ``data_calculation_new``.
+
+    NOTE on ``err``: this module uses the **standard error of the mean**
+    (SEM = std / sqrt(N), combined in quadrature over the two polarity
+    groups) rather than the plain **standard deviation** that the original
+    ``data_calculation_new`` used (``sqrt(std_pos**2 + std_neg**2) / 2``).
+    SEM is the correct uncertainty on the *averaged* value that is plotted,
+    and is ~sqrt(N) smaller than the original bars — so error bars here look
+    much tighter than in the old script. This is deliberate; if you want the
+    old (larger) STD-style bars back, drop the two ``/ sqrt(n_*)`` factors
+    below.
     """
     first_scan = first_pos = first_neg = True
     var_pos = var_neg = x = None
@@ -999,12 +1012,14 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
             data_base_dir=data_base_dir, min_cols=3, warn_missing=True):
 
         try:
-            relay_sign = int(parts[1].strip().replace('+', ''))
-            field_T    = float(parts[2].strip())
-        except ValueError:
-            relay_sign, field_T = 1, 0.0
+            field_T = float(parts[2].strip())
+        except (ValueError, IndexError):
+            field_T = 0.0
 
-        pol = relay_sign * (1 if field_T >= 0.0 else -1)
+        # Match the original data_calculation_new: group by -sign(field_T)
+        # (the "#INVERTED!!" convention). Relay column is NOT used, so the
+        # DL-signal sign agrees with the reference analysis.
+        pol = -1 if field_T >= 0.0 else 1
 
         if first_scan:
             first_scan = False
@@ -1068,6 +1083,7 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
     summation = (res_pos + res_neg) / 2.0
 
     # Standard error of the mean per group (ddof=1, capped to avoid div by 0).
+    # NOTE: SEM (std / sqrt(N)), not the original's plain STD — see docstring.
     sem_pos = (np.std(var_pos, axis=0, ddof=1) / np.sqrt(max(n_pos, 1))
                if n_pos > 1 else np.zeros_like(res_pos))
     sem_neg = (np.std(var_neg, axis=0, ddof=1) / np.sqrt(max(n_neg, 1))
