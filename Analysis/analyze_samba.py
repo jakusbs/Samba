@@ -1864,7 +1864,14 @@ class analyze_SOT:
 
     def eval_width_and_fit(self, current_coefficient2=0.99, fit_edge_offset=5,
                            nice_plot=False, use_Oe_as_edges=True):
-        """Fit Oersted (log) and DL (constant) contributions; compute SOT fields."""
+        """Fit Oersted (log) and DL (constant) contributions; compute SOT fields.
+
+        Fit-window edges: with ``use_Oe_as_edges=True`` (default) the device
+        width is taken from the raw min/max of the Oersted sum, matching the
+        original analysis so the DL-field magnitude agrees. The conversion is
+        identical to the reference: ``conconst = A·width/(2·Ic)·10`` (nrad/mT)
+        and ``conDL = const/conconst`` (mT).
+        """
         mpl.rcParams['font.size'] = 16
 
         def Log_fit(x, A, A0, width):
@@ -1892,13 +1899,12 @@ class analyze_SOT:
         # ── find fitting window edges ──────────────────────────────────────
         if use_Oe_as_edges:
             print('  Using Oersted sum to find fit edges.')
-            # Pick the extrema on a lightly median-filtered trace so a
-            # single noisy point can't set the fit window; the positions
-            # still come from the measured grid.
-            oe_smooth = (signal.medfilt(theta_Oe, 3)
-                         if len(theta_Oe) >= 3 else theta_Oe)
-            x1 = position[np.argmin(oe_smooth)]
-            x2 = position[np.argmax(oe_smooth)]
+            # Match the original analysis exactly: the fit edges are the raw
+            # min/max of the Oersted sum (no smoothing). Smoothing here would
+            # shift the picked edge by a grid point, changing the fit width
+            # and hence the DL-field magnitude — see the note below.
+            x1 = position[np.argmin(theta_Oe)]
+            x2 = position[np.argmax(theta_Oe)]
         elif self.edges:
             x1, x2 = self.edges
         else:
