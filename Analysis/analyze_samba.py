@@ -362,127 +362,143 @@ def read_h5_calibration(h5_path):
     return sln, cal
 
 
-def read_calibration(folder, filename='calibration.txt', allow_prompt=True):
-    """Read ``calibration.txt`` from ``folder``.
+_CALIB_MARK = 'samba_calib v2'
 
-    File format (one value/line, all required):
-        line 1 : 6 space-separated mV readings at ticks 0,5,10,15,20,25
-        line 2 : R1   (resistance NM/M)
-        line 3 : R2   (resistance reference M without NM)
-        line 4 : theta (1st harmonic phase offset, deg)
 
-    Returns ``(sln, R1, R2, theta)`` where ``sln`` is in µrad/mV.
-    When the file is missing and ``allow_prompt`` is False (e.g. the
-    calibration already came from the HDF5 file), returns
-    ``(None, 1.0, 1.0, 0.0)`` without prompting or writing anything.
-    If the file doesn't exist and ``allow_prompt`` is True, the user is
-    prompted interactively to enter the
-    values; the file is then written so subsequent runs skip the prompt.
+def read_calibration(folder, filename='calibration.txt', allow_prompt=True,
+                     h5_sln=None, h5_cal_mV=None,
+                     Ms=None, t_stack_nm=None, theta=None):
+    """Resolve the per-sample calibration constants and persist them.
+
+    Line-based ``calibration.txt`` (v2) — four data lines:
+        line 1 : 6 space-separated mV λ/2 sweep readings (ticks 0,5,…,25)
+        line 2 : Ms       — saturation magnetization (A/m); 0 = unset
+        line 3 : t_stack  — current-carrying stack thickness (nm); 0 = unset
+        line 4 : theta    — 1st-harmonic phase offset (deg)
+
+    Resolution: ``sln`` comes from the HDF5 ``/data/calibration`` (``h5_sln``)
+    when available, else from the file's 6 mV line, else a prompt.  ``Ms`` and
+    ``t_stack`` are not in the HDF5 metadata, so they come from an explicit
+    arg, the file, or a prompt.  Whatever is missing is prompted for (when
+    ``allow_prompt``) and the file is (re)written so later runs are silent.
+    Enter a blank/0 for Ms or t_stack to leave them unset (ξ_DL is skipped).
+
+    Returns ``(sln, Ms, t_stack_nm, theta, cal_mV)`` — values may be None.
     """
     path = os.path.join(folder, filename)
-    if not os.path.exists(path):
-        if not allow_prompt:
-            # Calibration already sourced elsewhere (e.g. the HDF5 file) —
-            # don't block on a prompt; R/theta fall back to defaults.
-            return None, 1.0, 1.0, 0.0
-        print(f'\nNo calibration file found at:\n  {path}')
-        print('Please enter the calibration values manually.\n')
 
+    file_mV = file_Ms = file_tstack = file_theta = None
+    old_format = False
+    if os.path.exists(path):
+        try:
+            raw = open(path).read()
+        except Exception as e:
+            warnings.warn(f'read_calibration: cannot read {path}: {e}')
+            raw = ''
+        if _CALIB_MARK in raw:
+            rows = [l.strip() for l in raw.splitlines()
+                    if l.strip() and not l.strip().startswith('#')]
+
+            def _row_float(i):
+                try:    return float(rows[i])
+                except Exception: return None
+            if len(rows) >= 1:
+                mv = np.fromstring(rows[0], dtype=float, sep=' ')
+                file_mV = mv if mv.size >= 2 else None
+            if len(rows) >= 2: file_Ms     = _row_float(1)
+            if len(rows) >= 3: file_tstack = _row_float(2)
+            if len(rows) >= 4: file_theta  = _row_float(3)
+        elif raw.strip():
+            old_format = True
+            warnings.warn(f'read_calibration: {path} is an old-format (R1/R2) '
+                          f'file — ignoring it and rebuilding as v2.')
+
+    # explicit arg > file
+    Ms_v     = Ms         if Ms         is not None else file_Ms
+    tstack_v = t_stack_nm if t_stack_nm is not None else file_tstack
+    theta_v  = theta      if theta      is not None else file_theta
+    cal_mV   = h5_cal_mV  if h5_cal_mV  is not None else file_mV
+    dirty    = old_format or not os.path.exists(path)
+
+    def _prompt_float(hint):
+        # blank → None (skip); EOF (non-interactive) → None, no crash
         while True:
             try:
-                raw = input('  6 mV readings at micrometer ticks 0 5 10 15 20 25'
-                            ' (space-separated):\n  > ').strip()
-                calib_mV_input = np.fromstring(raw, dtype=float, sep=' ')
-                if calib_mV_input.size != 6:
-                    print(f'  Expected 6 values, got {calib_mV_input.size}. Try again.')
-                    continue
-                break
-            except ValueError:
-                print('  Could not parse — enter 6 numbers separated by spaces.')
-
-        while True:
+                s = input(f'  {hint}\n  > ').strip()
+            except EOFError:
+                return None
+            if s == '':
+                return None
             try:
-                R1_input = float(input('\n  R1 — resistance of the NM/M system (Ω):\n  > '))
-                break
+                return float(s)
             except ValueError:
-                print('  Enter a single number.')
+                print('  Enter a single number (blank to skip).')
 
-        while True:
-            try:
-                R2_input = float(input('\n  R2 — resistance of M only (reference, Ω):\n  > '))
-                break
-            except ValueError:
-                print('  Enter a single number.')
+    # Only Ms / t_stack are ever prompted for.  sln comes from the HDF5 or the
+    # 6 mV line (prompted only if neither is available); theta is auto-detected
+    # by get_theta so it is never prompted (defaults to the file value or 0).
+    if allow_prompt:
+        if h5_sln is None and cal_mV is None:
+            print(f'\nNo calibration in the HDF5 or {path} for this sample.')
+            while True:
+                try:
+                    raw = input('  6 mV λ/2 readings at ticks 0 5 10 15 20 25 '
+                                '(space-separated):\n  > ').strip()
+                except EOFError:
+                    break
+                mv = np.fromstring(raw, dtype=float, sep=' ')
+                if mv.size == 6:
+                    cal_mV = mv; dirty = True; break
+                print(f'  Expected 6 values, got {mv.size}. Try again.')
+        if Ms_v is None:
+            print('\n  Ms — saturation magnetization (A/m) [blank to skip ξ_DL]:')
+            Ms_v = _prompt_float('e.g. 1.4e6'); dirty = True
+        if tstack_v is None:
+            print('\n  t_stack — current-carrying stack thickness (nm) '
+                  '[blank to skip ξ_DL]:')
+            tstack_v = _prompt_float('e.g. 8'); dirty = True
 
-        while True:
-            try:
-                theta_input = float(input('\n  theta — 1st-harmonic phase offset (deg):\n  > '))
-                break
-            except ValueError:
-                print('  Enter a single number.')
+    # sln from the 6 mV sweep when the HDF5 didn't supply it
+    sln = None
+    if h5_sln is not None:
+        sln = float(h5_sln)
+    elif cal_mV is not None and np.size(cal_mV) >= 2:
+        slope = _moke_calibrate(_CALIB_X_TICKS[:np.size(cal_mV)], np.asarray(cal_mV, float))
+        if slope and np.isfinite(slope):
+            sln = (1.0 / slope) * np.pi / 180.0 * 1e6
 
+    # Persist v2 so subsequent runs are silent
+    if dirty and (cal_mV is not None or Ms_v or tstack_v):
+        mv_out = (' '.join(f'{v:g}' for v in np.asarray(cal_mV, float))
+                  if cal_mV is not None else '')
         content = (
+            f'# {_CALIB_MARK}  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / theta (deg)\n'
             '# 6 calibration mV readings at micrometer ticks 0 5 10 15 20 25\n'
-            + ' '.join(f'{v}' for v in calib_mV_input) + '\n'
-            + '# R1 (NM/M)\n' + repr(R1_input) + '\n'
-            + '# R2 (M only)\n' + repr(R2_input) + '\n'
-            + '# theta (1st-harmonic phase offset, deg)\n' + repr(theta_input) + '\n'
+            f'{mv_out}\n'
+            '# Ms — saturation magnetization (A/m); 0 = unset\n'
+            f'{float(Ms_v) if Ms_v else 0.0!r}\n'
+            '# t_stack — current-carrying stack thickness (nm); 0 = unset\n'
+            f'{float(tstack_v) if tstack_v else 0.0!r}\n'
+            '# theta — 1st-harmonic phase offset (deg)\n'
+            f'{float(theta_v) if theta_v is not None else 0.0!r}\n'
         )
         try:
             with open(path, 'w') as f:
                 f.write(content)
-            print(f'\n  Calibration saved to {path}')
+            print(f'  Calibration saved to {path}')
         except Exception as e:
-            warnings.warn(f'read_calibration: could not write calibration file: {e}')
+            warnings.warn(f'read_calibration: could not write {path}: {e}')
 
-        slope = _moke_calibrate(_CALIB_X_TICKS[:calib_mV_input.size], calib_mV_input)
-        if slope == 0 or not np.isfinite(slope):
-            warnings.warn('read_calibration: zero/NaN slope from entered values — using sln=1.0')
-            sln = 1.0
-        else:
-            sln = (1.0 / slope) * np.pi / 180.0 * 1e6
-        print(f'    slope      = {slope:.4g} mV/deg  →  sln = {sln:.4g} µrad/mV')
-        print(f'    R1, R2     = {R1_input:.4g}, {R2_input:.4g}')
-        print(f'    theta (1ω) = {theta_input:.4g} deg')
-        return sln, R1_input, R2_input, theta_input
-
-    # Strip comment lines, keep first 4 data lines
-    rows = []
-    with open(path, 'r') as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith('#'):
-                continue
-            rows.append(s)
-    if len(rows) < 4:
-        warnings.warn(f'read_calibration: {path} has {len(rows)} data lines '
-                      f'(need 4) — using defaults.')
-        return 1.0, 1.0, 1.0, 0.0
-
-    try:
-        calib_mV = np.fromstring(rows[0], dtype=float, sep=' ')
-        R1       = float(rows[1])
-        R2       = float(rows[2])
-        theta    = float(rows[3])
-    except Exception as e:
-        warnings.warn(f'read_calibration: parse error in {path}: {e}')
-        return 1.0, 1.0, 1.0, 0.0
-
-    if calib_mV.size != 6:
-        warnings.warn(f'read_calibration: line 1 of {path} has '
-                      f'{calib_mV.size} values (expected 6).')
-
-    slope = _moke_calibrate(_CALIB_X_TICKS[:calib_mV.size], calib_mV)  # mV/deg
-    if slope == 0 or not np.isfinite(slope):
-        warnings.warn(f'read_calibration: zero/NaN slope — using sln=1.0')
-        sln = 1.0
-    else:
-        sln = (1.0 / slope) * np.pi / 180.0 * 1e6                       # µrad/mV
-    print(f'  Calibration  : {path}')
-    print(f'    slope      = {slope:.4g} mV/deg  →  sln = {sln:.4g} µrad/mV')
-    print(f'    R1, R2     = {R1:.4g}, {R2:.4g}')
-    print(f'    theta (1ω) = {theta:.4g} deg')
-    return sln, R1, R2, theta
+    # 0 in the file means "unset"
+    if Ms_v == 0:     Ms_v = None
+    if tstack_v == 0: tstack_v = None
+    if sln is not None:
+        print('  Calibration  : sln = {:.4g} µrad/mV{}{}{}'.format(
+            sln,
+            f', Ms = {Ms_v:.4g} A/m' if Ms_v else '',
+            f', t_stack = {tstack_v:g} nm' if tstack_v else '',
+            f', θ₀ = {theta_v:.4g}°' if theta_v else ''))
+    return sln, Ms_v, tstack_v, (0.0 if theta_v is None else float(theta_v)), cal_mV
 
 
 # ---------------------------------------------------------------------------
@@ -1230,19 +1246,26 @@ class analyze_SOT:
             print(f'  Calibration from HDF5 /data/calibration: '
                   f'sln = {h5_sln:.4g} µrad/mV')
 
-        cal_sln = None
-        cal_R   = None
+        # t_FM from the HDF5 metadata (fed to the calibration resolver so it
+        # can prompt only for what's genuinely missing).
+        _mv = h5_meta.get('fm_thickness_nm')
+        tfm_meta = float(_mv) if _mv not in (None, '', 0, 0.0) else None
+
+        # ── calibration.txt (v2): sln / Ms / t_stack / theta ──────────────
+        # Reads the file, fills gaps from the HDF5 metadata / explicit args,
+        # prompts for whatever is still missing, and writes it back.
+        cal_sln = cal_Ms = cal_tstack = None
         cal_th  = None
         if use_calibration_file:
             try:
-                # If the HDF5 already gave us sln, don't block on a prompt.
-                cal_sln, cal_R1, cal_R2, cal_th = read_calibration(
-                    sample_folder, allow_prompt=(h5_sln is None))
-                cal_R = (cal_R1, cal_R2)
+                cal_sln, cal_Ms, cal_tstack, cal_th, _ = read_calibration(
+                    sample_folder, allow_prompt=True,
+                    h5_sln=h5_sln, h5_cal_mV=h5_cal_mV,
+                    Ms=Ms, t_stack_nm=t_stack_nm, theta=theta)
             except Exception as e:
                 warnings.warn(f'read_calibration: {e}')
 
-        # Resolve sln : explicit args > HDF5 calibration > calibration.txt > default
+        # Resolve sln : explicit > HDF5 > calibration.txt > default
         if sln is not None:
             sln_val, sln_src = float(sln), 'explicit sln='
         elif calibration is not None:
@@ -1254,13 +1277,10 @@ class analyze_SOT:
         else:
             sln_val, sln_src = 1.0, 'default (1.0)'
 
-        if R is not None:
-            R_val = list(R)
-        elif cal_R is not None:
-            R_val = list(cal_R)
-        else:
-            R_val = [1.0, 1.0]
-
+        # Ms / t_stack : explicit > calibration.txt.  theta : explicit >
+        # calibration.txt > 0 (get_theta auto-detects it during analysis).
+        Ms         = Ms         if Ms         is not None else cal_Ms
+        t_stack_nm = t_stack_nm if t_stack_nm is not None else cal_tstack
         if theta is not None:
             theta_val = float(theta)
         elif cal_th is not None:
@@ -1281,7 +1301,6 @@ class analyze_SOT:
         ci.theta2     = float(theta2)
         ci.theta2_pos = float(theta2)
         ci.theta2_neg = float(theta2)
-        ci.R        = R_val
         ci.sln_source        = sln_src
         ci.bd_calibration_mV = (list(map(float, h5_cal_mV))
                                 if h5_cal_mV is not None else None)
@@ -1295,16 +1314,12 @@ class analyze_SOT:
                                      if 'r_2wire_kohm' in h5_meta else None)
         ci.device_id   = str(h5_meta.get('device_id', '') or '')
         # ── SOT / spin-Hall efficiency inputs ──────────────────────────────
-        # Ms [A/m] and stack thickness [nm] are analysis-side args; FM
-        # thickness [nm] comes from the HDF5 metadata (fm_thickness_nm) when
-        # not passed explicitly.  Device width comes from the fit (§ below).
+        # Ms [A/m] and stack thickness [nm] come from the calibration.txt
+        # (resolved above); FM thickness [nm] from the HDF5 metadata (or the
+        # t_fm_nm arg).  Device width comes from the fit (§ below).
         ci.Ms         = float(Ms) if Ms is not None else None
         ci.t_stack_nm = float(t_stack_nm) if t_stack_nm is not None else None
-        if t_fm_nm is not None:
-            ci.t_fm_nm = float(t_fm_nm)
-        else:
-            mv = h5_meta.get('fm_thickness_nm')
-            ci.t_fm_nm = float(mv) if mv not in (None, '', 0, 0.0) else None
+        ci.t_fm_nm    = float(t_fm_nm) if t_fm_nm is not None else tfm_meta
         ci.LI_type  = li_type
         ci.system   = sample_name
         ci.sample_id = sample_name
@@ -1814,9 +1829,6 @@ class analyze_SOT:
         """Fit Oersted (log) and DL (constant) contributions; compute SOT fields."""
         mpl.rcParams['font.size'] = 16
 
-        def parallel_channel(R1, R2):
-            return 1 - R1 / R2
-
         def Log_fit(x, A, A0, width):
             return A0 + A * np.log((width - x) / x)
 
@@ -1864,8 +1876,7 @@ class analyze_SOT:
         position = position - x1    # shift: left edge → 0
         width    = round(width, 1)
 
-        Ic  = self.calc_info.current * current_coefficient2
-        Ic1 = Ic * parallel_channel(*self.calc_info.R)
+        Ic  = self.calc_info.current * current_coefficient2   # actual total current (mA)
 
         # ── build mask ────────────────────────────────────────────────────
         mask = (position > 0) & (position < width)
@@ -1934,18 +1945,6 @@ class analyze_SOT:
         print(f'  Width       = {width:.2f} {self.x_unit}')
         print(f'  conconst    = {conconst:.4g} nrad/mT')
         print(f'  DL-field    = ({conDL:.4g} ± {conDL_error:.4g}) mT')
-        # NM-layer current from the parallel-channel model (R1 = NM/M stack,
-        # R2 = reference without NM).  B_DL above is a real field and stays
-        # referenced to the total current (which also generates the Oersted
-        # calibration field); B_DL per NM-layer mA is what enters an
-        # efficiency estimate.  With the default R1 = R2 = 1 the NM current
-        # is undefined (coefficient 0) and NaN is reported.
-        DL_per_NM_mA = np.nan
-        if Ic1 and np.isfinite(Ic1) and abs(Ic1) > 1e-12:
-            DL_per_NM_mA = conDL / Ic1
-            print(f'  I_NM        = {Ic1:.4g} mA  '
-                  f'(parallel-channel coeff = {Ic1 / Ic:.3g})')
-            print(f'  DL / I_NM   = {DL_per_NM_mA:.4g} mT/mA')
         self.fit_DL_mT       = conDL
         self.fit_DL_error_mT = conDL_error
         self.fit_width_um    = float(width)
@@ -2050,15 +2049,13 @@ class analyze_SOT:
             Oe_A0=float(pLog[1]), conconst_nrad_per_mT=float(conconst),
             DL_field_mT=float(conDL), DL_field_err_mT=float(conDL_error),
             current_mA=float(self.calc_info.current),
-            current_NM_mA=float(Ic1),
-            DL_field_per_NM_mA=float(DL_per_NM_mA),
             xi_DL=float(xi_DL), xi_DL_err=float(xi_DL_err),
             J_A_per_m2=float(J),
             Ms_A_per_m=(float(ci.Ms) if ci.Ms else None),
             t_stack_nm=(float(ci.t_stack_nm) if ci.t_stack_nm else None),
             t_fm_nm=(float(ci.t_fm_nm) if ci.t_fm_nm else None),
             current_coefficient2=float(current_coefficient2),
-            R=list(self.calc_info.R), sln=float(self.calc_info.sln),
+            sln=float(self.calc_info.sln),
             theta_deg=float(self.calc_info.theta),
             theta_pos_deg=float(getattr(self.calc_info, 'theta_pos',
                                         self.calc_info.theta)),

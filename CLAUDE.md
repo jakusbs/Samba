@@ -1200,37 +1200,38 @@ A timestamped subfolder per scan keeps re-runs separated. Override with
 
 ### Calibration file
 
-`calibration.txt` lives in the sample folder; 4 data lines:
+`calibration.txt` (v2) lives in the sample folder; line-based, 4 data lines:
 
 ```
-0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV at µm ticks 0,5,10,15,20,25
-1.0                              # R1 (NM/M)
-1.0                              # R2 (M only, reference)
-0.0                              # theta — 1st-harmonic phase offset (deg)
+# samba_calib v2  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / theta (deg)
+0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV λ/2 sweep at ticks 0,5,10,15,20,25
+1.4e6                            # Ms — saturation magnetization (A/m); 0 = unset
+8.0                              # t_stack — current-carrying stack thickness (nm); 0 = unset
+0.0                             # theta — 1st-harmonic phase offset (deg)
 ```
 
-`sln` resolution order: explicit `sln=`/`calibration=` → **HDF5
-`/data/calibration`** (the 6 mV λ/2 readings Samba writes on every scan,
-`read_h5_calibration()`) → `calibration.txt` → default 1.0. When the HDF5
-already supplies `sln`, the interactive `calibration.txt` prompt is skipped.
-Otherwise, when the file is missing, `read_calibration()` prompts and writes
-it. Slope → `sln = (1/slope) × π/180 × 1e6` (µrad/mV). `results.json` records
-`sln`, `sln_source`, the 6 `bd_calibration_mV`, and the device `device_id` /
-`r_4wire_ohm` / `r_2wire_ohm` (Ω) and `fm_thickness_nm` from the HDF5
-metadata (the 4-/2-wire resistances are recorded, **not** fed into the
-parallel-channel R1/R2). Pass `use_calibration_file=False` to disable the
-prompt entirely and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
+The old R1/R2 (parallel-channel) lines were **dropped** — the SOT efficiency
+uses geometry + Ms, not a resistance ratio. `read_calibration()` builds the
+file from the HDF5 metadata and prompts only for what's missing, then writes
+it back so later runs are silent:
+- `sln` (µrad/mV): explicit `sln=`/`calibration=` → **HDF5 `/data/calibration`**
+  (`read_h5_calibration()`) → the file's 6 mV line → prompt → default 1.0.
+- `Ms` [A/m] and `t_stack` [nm]: explicit arg → file → prompt (blank/0 = unset,
+  ξ_DL then skipped; not re-prompted).
+- `theta`: never prompted (auto-detected by `get_theta`); file value or 0.
+- `t_FM` [nm]: `t_fm_nm=` arg → HDF5 `fm_thickness_nm` metadata (Samba/Cryo
+  metadata panel) → unset.
+Old-format (R1/R2) files are detected (no `samba_calib v2` marker) and rebuilt.
+`results.json` records `sln`, `sln_source`, `bd_calibration_mV`, `device_id`,
+`r_4wire_ohm`/`r_2wire_ohm` (Ω), and `fm_thickness_nm` from the metadata.
 
-**SOT / spin-Hall efficiency** — pass `Ms=` (A/m) and `t_stack_nm=` to
-`import_analyze_SOT` / `import_analyze_both`; FM thickness comes from the
-HDF5 `fm_thickness_nm` metadata (set in the Samba/Cryo metadata panel) or an
-explicit `t_fm_nm=`. `eval_width_and_fit` then computes
+**SOT / spin-Hall efficiency** — with `Ms`, `t_stack` (from calibration.txt or
+args) and `t_FM` available, `eval_width_and_fit` computes
 `ξ_DL = (2e/ℏ)·μ₀·Ms·t_FM·(B_DL/μ₀) / J` with `J = Ic/(w·t_stack)` (w = the
 fitted device width, Ic = the coefficient-corrected total current) and stores
 `xi_DL`, `xi_DL_err`, `J_A_per_m2`, `Ms_A_per_m`, `t_stack_nm`, `t_fm_nm` in
-`results.json`. `import_analyze_both` runs each direction independently, so a
-failure in one (e.g. the edge-detection `min_width` guard on a bad reflection
-profile) returns `None` for that direction and a warning, keeping the other.
+`results.json`. `import_analyze_both` runs each direction independently and
+prints the full traceback on a per-direction failure, keeping the other.
 
 ### Per-channel data layout
 
