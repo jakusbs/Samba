@@ -739,9 +739,16 @@ class MokeMetadataGroup(QGroupBox):
         inc = v["incidence"]
         ms = f"{v['mirror_shift']:.2f}mm".replace(".", "p")
         notes = v["notes"].replace(" ", "-")
+        # Polarization token: s → Spol, p → Ppol, 45° → 45deg, else the custom
+        # string (sanitized). Empty polarization contributes nothing.
+        pol_raw = v.get("polarization", "")
+        pol_tok = {"s": "Spol", "p": "Ppol", "45°": "45deg"}.get(
+            pol_raw, pol_raw.replace("°", "deg").replace(" ", "-"))
         parts = [ts, sample]
         if device: parts.append(device)
-        parts += [amp_str, freq_str, cfg, inc, ms]
+        parts += [amp_str, freq_str, cfg, inc]
+        if pol_tok: parts.append(pol_tok)
+        parts.append(ms)
         if notes:  parts.append(notes)
         if v["noDC"]:  parts.append("noDC")
         if v["lam2"]:  parts.append("lam2")

@@ -31,6 +31,11 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
+from plot_interact import ClickReadout, make_fontsize_spin
+
+# Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
+# instead of any stored actuator/field/time axis. Not a real dataset name.
+INDEX_KEY = "__index__"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,7 +262,18 @@ class ScanFile:
                         x_unit = str(meas[x_key].attrs.get("unit",  ""))
                         y_unit = str(meas[y_key].attrs.get("unit",  ""))
 
-                x = x_arr.flatten(); y = y_arr.flatten()
+                y = y_arr.flatten()
+                if x_key == INDEX_KEY:
+                    # Point-by-point: ignore the stored x, plot vs. sample index
+                    # (1, 2, 3, …).  Keep every finite y sample.
+                    mask = np.isfinite(y)
+                    x = np.arange(y.size, dtype=float)[mask]
+                    return {
+                        "x": x, "y": y[mask],
+                        "x_label": "Point", "y_label": y_lbl,
+                        "x_unit":  "", "y_unit":  y_unit,
+                    }
+                x = x_arr.flatten()
                 mask = np.isfinite(x) & np.isfinite(y)
                 return {
                     "x": x[mask], "y": y[mask],
@@ -385,9 +401,14 @@ class BrowserPlotWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        self._font_pt = 9
 
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -395,12 +416,31 @@ class BrowserPlotWidget(QWidget):
         self._cb     = None
         self._is_2d  = False
         self._style()
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(self.canvas, lambda: [self.ax],
+                                     lambda: self._font_pt)
 
     def _style(self):
         self.ax.set_facecolor("#12121f")
-        self.ax.tick_params(colors="#aaaacc", labelsize=9)
+        self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values():
             sp.set_edgecolor("#3a3a5c")
+
+    def _on_fontsize(self, pt: int):
+        self._font_pt = int(pt)
+        self.ax.tick_params(labelsize=self._font_pt)
+        self.ax.xaxis.label.set_fontsize(self._font_pt)
+        self.ax.yaxis.label.set_fontsize(self._font_pt)
+        t = self.ax.get_title()
+        if t:
+            self.ax.set_title(t, color="#ccccff", fontsize=self._font_pt)
+        leg = self.ax.get_legend()
+        if leg is not None:
+            for txt in leg.get_texts():
+                txt.set_fontsize(self._font_pt)
+        if self._cb is not None:
+            self._cb.ax.tick_params(labelsize=self._font_pt)
+        self.canvas.draw_idle()
 
     def clear(self):
         if self._cb:
@@ -409,6 +449,8 @@ class BrowserPlotWidget(QWidget):
             self._cb = None
         self._is_2d = False
         self.ax.cla(); self._style()
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self.canvas.draw_idle()
 
     def plot_1d(self, datasets: List[Dict], title: str = ""):
@@ -426,13 +468,13 @@ class BrowserPlotWidget(QWidget):
         if datasets:
             self.ax.set_xlabel(
                 f"{datasets[0]['x_label']} ({datasets[0].get('x_unit','')})",
-                color="#aaaacc")
+                color="#aaaacc", fontsize=self._font_pt)
             self.ax.set_ylabel(
                 f"{datasets[0]['y_label']} ({datasets[0].get('y_unit','')})",
-                color="#aaaacc")
+                color="#aaaacc", fontsize=self._font_pt)
         if title:
-            self.ax.set_title(title, color="#ccccff", fontsize=10)
-        self.ax.legend(fontsize=8, facecolor="#313244",
+            self.ax.set_title(title, color="#ccccff", fontsize=self._font_pt)
+        self.ax.legend(fontsize=self._font_pt, facecolor="#313244",
                        edgecolor="#45475a", labelcolor="#cdd6f4",
                        loc="best")
         self.canvas.draw_idle()
@@ -451,10 +493,11 @@ class BrowserPlotWidget(QWidget):
                              vmin=vmin, vmax=vmax)
         self._is_2d = True
         self._cb = self.fig.colorbar(img, ax=self.ax)
-        self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
-        self.ax.set_xlabel(x_label, color="#aaaacc")
-        self.ax.set_ylabel(y_label, color="#aaaacc")
-        self.ax.set_title(sensor_label, color="#ccccff", fontsize=10)
+        self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc",
+                                          labelsize=self._font_pt)
+        self.ax.set_xlabel(x_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_ylabel(y_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_title(sensor_label, color="#ccccff", fontsize=self._font_pt)
         self.canvas.draw_idle()
 
 
@@ -795,6 +838,9 @@ class DataBrowserPanel(QWidget):
         for key, lbl in cols:
             self.x_combo.addItem(lbl, key)
             self.y_combo.addItem(lbl, key)
+        # Point-by-point option: plot the signal vs. sample index (1, 2, 3, …)
+        # with nothing meaningful on the x-axis.
+        self.x_combo.addItem("Index (point #)", INDEX_KEY)
 
         # Smart defaults — find the x-axis dataset key by role for new files,
         # fall back to known names for old files
@@ -863,7 +909,9 @@ class DataBrowserPanel(QWidget):
         is_dc = sf.meta.get("is_dc_hyst", False)
 
         # ── 2D colour map of the selected Y channel ───────────────────────────
-        if self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc:
+        # Index mode is inherently a 1D point-by-point plot — skip the map.
+        if (x_key != INDEX_KEY and
+                self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc):
             sensor_key = y_key or "auto"
             result = sf.read_2d(sensor_key=sensor_key)
             if result and np.asarray(result["data"]).ndim == 2:
@@ -880,7 +928,8 @@ class DataBrowserPanel(QWidget):
             self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
             return
         if is_dc:
-            result = sf.read_1d(y_key=y_key)
+            # DC plots vs. Field by default; honour Index mode if chosen.
+            result = sf.read_1d(INDEX_KEY if x_key == INDEX_KEY else "auto", y_key)
         else:
             result = sf.read_1d(x_key, y_key)
         if result:

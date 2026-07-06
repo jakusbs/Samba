@@ -241,7 +241,9 @@ class ScanlistWorker(QThread):
         else:
             sl_dir   = os.path.join(base, "ScanLists")
         os.makedirs(sl_dir, exist_ok=True)
-        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # list_name already begins with a YYYYMMDD date (from build_scan_name),
+        # so only append a time here — appending a full date again was redundant.
+        ts       = datetime.now().strftime("%H%M%S")
         txt_path = os.path.join(sl_dir, f"{self.list_name}_{ts}.txt")
 
         results = []

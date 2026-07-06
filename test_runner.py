@@ -1188,5 +1188,62 @@ class TestSampleMetadata(unittest.TestCase):
         self.assertAlmostEqual(float(b["fm_thickness_nm"]), 0.0)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Lab notebook — scanlist column + append-only in-place migration
+# ─────────────────────────────────────────────────────────────────────────────
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+import lab_notebook as _nb_mod                          # noqa: E402
+
+
+class TestLabNotebookScanlistColumn(unittest.TestCase):
+    """The new 'Scanlist' column is the LAST column; an existing notebook whose
+    header lacks it is migrated in place (old rows padded), never column-shifted."""
+
+    def _read(self, path):
+        import csv
+        with open(path, newline="", encoding="utf-8") as fh:
+            return list(csv.reader(fh))
+
+    def test_scanlist_name_recorded_and_blank_for_single(self):
+        import tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        _nb_mod.append_measurement(nb, {"name": "s1", "_scanlist_name": "list_A"})
+        _nb_mod.append_measurement(nb, {"name": "s2"})   # single scan → blank
+        rows = self._read(nb)
+        self.assertEqual(rows[0][-1], "Scanlist")
+        self.assertEqual(rows[1][-1], "list_A")
+        self.assertEqual(rows[2][-1], "")
+
+    def test_appends_column_without_shifting_old_rows(self):
+        import csv, tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        # Simulate an OLD notebook whose header is the current one minus the
+        # last (Scanlist) column — a strict prefix.
+        old_headers = _nb_mod._HEADERS[:-1]
+        with open(nb, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(old_headers)
+            w.writerow(["v"] * len(old_headers))   # one legacy row
+        # Appending a new measurement must migrate in place, not back up.
+        _nb_mod.append_measurement(nb, {"name": "new", "_scanlist_name": "L"})
+        self.assertFalse(os.path.exists(nb + ".bak"), "should migrate in place, no .bak")
+        rows = self._read(nb)
+        self.assertEqual(rows[0], _nb_mod._HEADERS)             # header upgraded
+        self.assertEqual(len(rows[1]), len(_nb_mod._HEADERS))   # old row padded
+        self.assertEqual(rows[1][-1], "")                       # padded blank
+        self.assertEqual(rows[2][-1], "L")                      # new row value
+
+    def test_non_prefix_header_change_backs_up(self):
+        import csv, tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        with open(nb, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(["Totally", "Different", "Header"])
+        _nb_mod.append_measurement(nb, {"name": "x"})
+        self.assertTrue(os.path.exists(nb + ".bak"), "reordered header → backup")
+        rows = self._read(nb)
+        self.assertEqual(rows[0], _nb_mod._HEADERS)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

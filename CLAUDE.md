@@ -2137,3 +2137,60 @@ Fix (both apps): the whole `MokeMetadataGroup` is now stored **once per setup**
 ### Tests
 - `test_runner.py` +2 → 48: `TestDcHystCalibration` (calibration written to the
   DC-hyst HDF5; absent when no `bd_calibration` key).
+
+---
+
+## 33. Recent Changes (July 2026) — Data Browser, Naming, Lab Notebook & Plot Interaction
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free
+(`python test_runner.py`, 51 tests). Batch of small UI/quality improvements.
+
+### Data browser — point-by-point (index) x-axis (`core/data_browser.py`)
+- New sentinel `INDEX_KEY = "__index__"` and an **"Index (point #)"** entry
+  appended to the X-axis combo. When selected, `read_1d` ignores the stored
+  actuator/field/time axis and plots the signal vs. its sample index
+  (`np.arange`), keeping every finite-y sample. Works for line scans and DC
+  hyst; forced to the 1D path even when the 2D-map toggle is on.
+
+### Scan/file naming
+- **Polarization token** added to `MokeMetadataGroup.build_scan_name` (both
+  `Samba_main/panels/_widgets.py` and `Cryo/panels.py`): `s → Spol`,
+  `p → Ppol`, `45° → 45deg`, else the sanitized custom string. Inserted between
+  incidence and mirror-shift; empty polarization contributes nothing.
+- **Scanlist filename** (`core/scan/workers.py`): the redundant second date was
+  dropped. `list_name` already begins with a `YYYYMMDD` date (from
+  `build_scan_name`), so the scanlist `.txt` now appends only `_HHMMSS` (was
+  `_YYYYMMDD_HHMMSS`). A time is kept so two scanlists the same day don't collide.
+
+### Lab notebook — scanlist column + in-place migration (`core/lab_notebook.py`)
+- New **"Scanlist"** column (last column, key `_scanlist_name`): records the
+  scanlist name for scanlist scans, blank for single scans. Set at the scanlist
+  append sites in `samba.py` / `samba_cryo.py` from `ScanlistWorker.list_name`.
+- `append_measurement` now **migrates an existing notebook in place** when the
+  on-disk header is a strict prefix of the current headers (columns only
+  appended): it rewrites the file with the new header and pads old rows with
+  blanks, so old measurements keep their column alignment in the same file.
+  Only a non-prefix change (reorder/rename/remove) still falls back to the
+  `.bak` backup-and-restart. **Only ever append columns at the end.**
+
+### Plot interaction — click-to-read + text size (`core/plot_interact.py`, new)
+- Shared `ClickReadout`: left-click a line plot to annotate the nearest data
+  point (label + x/y); right-click or a config change clears it. Ignores clicks
+  while a nav-toolbar tool (pan/zoom) is active; fully fail-soft.
+- Shared `make_fontsize_spin`: a 6–32 pt spinbox for on-plot text size (labels,
+  ticks, legend, readout) — so numbers are readable from across the room during
+  alignment.
+- Wired into **`Live1DWidget`** (`core/plot_widgets.py`) and the data-browser
+  **`BrowserPlotWidget`**: both gain a "Text:" spinbox and the click readout.
+  Font size flows into tick labels, axis labels, legend, title and colorbar.
+
+### Tests
+- `test_runner.py` +3 → 51: `TestLabNotebookScanlistColumn` (scanlist value +
+  blank default, append-only in-place migration, non-prefix backup). The
+  `ClickReadout` nearest-point math was sanity-checked headless with an Agg
+  canvas (matplotlib/Qt aren't in the CI env, so that check isn't committed).
+
+### Still pending (need lab input)
+- **IR SmarAct reinit button** and **LED on/off buttons in the Calibration tab**
+  were deferred pending the exact reinit command/procedure and the Lights TANGO
+  device path.

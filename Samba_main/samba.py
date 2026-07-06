@@ -1706,6 +1706,9 @@ class MainWindow(QMainWindow):
             entry = dict(self._current_scan_cfg)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
+            # Mark this row as part of the scanlist (blank for single scans).
+            if self._sl_worker is not None:
+                entry["_scanlist_name"] = getattr(self._sl_worker, "list_name", "")
             for _k in ("geometry", "stage_type",
                        "hw_temperature_K",
                        "_temp_sweep_start_K", "_temp_sweep_stop_K", "_temp_sweep_step_K"):

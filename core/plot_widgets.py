@@ -18,10 +18,11 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
 from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
+from plot_interact import ClickReadout, make_fontsize_spin
 
 REDRAW_INTERVAL_MS = 80
 
@@ -159,6 +160,7 @@ class Live1DWidget(QWidget):
         self._x_label_nat: str = ""
         self._lines: Dict[str, Tuple]   = {}
         self._dirty = False
+        self._font_pt = 9
 
         self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e")
         self.ax1    = self.fig.add_subplot(111)
@@ -167,7 +169,7 @@ class Live1DWidget(QWidget):
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
 
-        # Toolbar row: nav toolbar + auto-scale toggle
+        # Toolbar row: nav toolbar + auto-scale toggle + text-size spinbox
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
         self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
@@ -177,6 +179,14 @@ class Live1DWidget(QWidget):
         self.autoscale_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
         self.autoscale_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
         top.addWidget(self.autoscale_cb)
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
+
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(
+            self.canvas, lambda: [self.ax1, self.ax2], lambda: self._font_pt)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -191,11 +201,28 @@ class Live1DWidget(QWidget):
     def _style_axes(self):
         self.ax1.set_facecolor("#12121f")
         for ax in [self.ax1, self.ax2]:
-            ax.tick_params(colors="#aaaacc", labelsize=9)
+            ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
             for sp in ax.spines.values():
                 sp.set_edgecolor("#3a3a5c")
         self.ax1.yaxis.label.set_color("#89b4fa")
         self.ax2.yaxis.label.set_color("#f38ba8")
+
+    def _on_fontsize(self, pt: int):
+        """User picked a new on-plot text size — restyle and redraw live."""
+        self._font_pt = int(pt)
+        self._apply_font()
+        self.canvas.draw_idle()
+
+    def _apply_font(self):
+        """Push the current font size onto ticks, axis labels and legends."""
+        for ax in [self.ax1, self.ax2]:
+            ax.tick_params(labelsize=self._font_pt)
+            ax.xaxis.label.set_fontsize(self._font_pt)
+            ax.yaxis.label.set_fontsize(self._font_pt)
+            leg = ax.get_legend()
+            if leg is not None:
+                for t in leg.get_texts():
+                    t.set_fontsize(self._font_pt)
 
     def _throttled_draw(self):
         if not self._dirty:
@@ -268,7 +295,9 @@ class Live1DWidget(QWidget):
 
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._lines = {}
-        self.ax1.set_xlabel(x_lbl or "", color="#aaaacc")
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
+        self.ax1.set_xlabel(x_lbl or "", color="#aaaacc", fontsize=self._font_pt)
 
         li = ri = 0
         left_units: set = set()
@@ -288,8 +317,8 @@ class Live1DWidget(QWidget):
                             label=lbl, marker=".", markersize=4)
             self._lines[lbl] = (line, ax)
 
-        if left_units:  self.ax1.set_ylabel(", ".join(sorted(left_units)), color="#89b4fa")
-        if right_units: self.ax2.set_ylabel(", ".join(sorted(right_units)), color="#f38ba8")
+        if left_units:  self.ax1.set_ylabel(", ".join(sorted(left_units)), color="#89b4fa", fontsize=self._font_pt)
+        if right_units: self.ax2.set_ylabel(", ".join(sorted(right_units)), color="#f38ba8", fontsize=self._font_pt)
 
         self._fill_lines(x_arr)
 
@@ -312,7 +341,7 @@ class Live1DWidget(QWidget):
             if labelled:
                 ax.legend(
                     loc="upper left" if ax == self.ax1 else "upper right",
-                    fontsize=8, facecolor="#313244",
+                    fontsize=self._font_pt, facecolor="#313244",
                     edgecolor="#45475a", labelcolor="#cdd6f4")
         if all_visible:
             all_x = np.concatenate([l.get_xdata() for l, _ in all_visible])
@@ -347,11 +376,13 @@ class Live1DWidget(QWidget):
         self._dirty = True
 
     def set_xlabel(self, txt: str):
-        self.ax1.set_xlabel(txt, color="#aaaacc")
+        self.ax1.set_xlabel(txt, color="#aaaacc", fontsize=self._font_pt)
         self.canvas.draw_idle()
 
     def clear(self):
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
         self._dirty = False
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self.canvas.draw_idle()

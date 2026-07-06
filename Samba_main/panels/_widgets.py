@@ -207,7 +207,7 @@ class MokeMetadataGroup(QGroupBox):
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
         """Construct scanlist auto-name from metadata fields.
-        Format: date_sample_amplitude_frequency_config_incidence_mirror-shift[_notes][_noDC][_lam2][_lam4]
+        Format: date_sample_amplitude_frequency_config_incidence_polarization_mirror-shift[_notes][_noDC][_lam2][_lam4]
         """
         v = self.get_values()
         ts = datetime.now().strftime("%Y%m%d")
@@ -219,9 +219,16 @@ class MokeMetadataGroup(QGroupBox):
         inc = v["incidence"]
         ms = f"{v['mirror_shift']:.2f}mm".replace(".", "p")
         notes = v["notes"].replace(" ", "-")
+        # Polarization token: s → Spol, p → Ppol, 45° → 45deg, else the custom
+        # string (sanitized). Empty polarization contributes nothing.
+        pol_raw = v.get("polarization", "")
+        pol_tok = {"s": "Spol", "p": "Ppol", "45°": "45deg"}.get(
+            pol_raw, pol_raw.replace("°", "deg").replace(" ", "-"))
         parts = [ts, sample]
         if device: parts.append(device)
-        parts += [amp_str, freq_str, cfg, inc, ms]
+        parts += [amp_str, freq_str, cfg, inc]
+        if pol_tok: parts.append(pol_tok)
+        parts.append(ms)
         if notes:  parts.append(notes)
         if v["noDC"]:  parts.append("noDC")
         if v["lam2"]:  parts.append("lam2")

@@ -1985,6 +1985,9 @@ class CryoMainWindow(QMainWindow):
             entry = dict(base_cfg)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
+            # Mark this row as part of the scanlist (blank for single scans).
+            if self._sl_worker is not None:
+                entry["_scanlist_name"] = getattr(self._sl_worker, "list_name", "")
             append_measurement(nb, entry)
         except Exception:
             log.debug("Lab notebook append failed for scanlist file", exc_info=True)
