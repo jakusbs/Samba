@@ -2190,7 +2190,42 @@ Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free
   `ClickReadout` nearest-point math was sanity-checked headless with an Agg
   canvas (matplotlib/Qt aren't in the CI env, so that check isn't committed).
 
-### Still pending (need lab input)
-- **IR SmarAct reinit button** and **LED on/off buttons in the Calibration tab**
-  were deferred pending the exact reinit command/procedure and the Lights TANGO
-  device path.
+### Follow-up
+- The **IR SmarAct reinit button** and **Calibration-tab LED buttons** noted here
+  as pending are implemented in §34.
+
+---
+
+## 34. Recent Changes (July 2026) — Stage Reinit & Calibration-Tab LEDs
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (SAMBA) +
+`claude/scan-calibration-metadata-sharing-scpsvm` (TANGO_Devices).
+
+### IR SmarAct stage reinitialise
+The IR SmarAct axes occasionally wedge after manual use with the hand
+controller; the fix is to re-initialise each axis (the standard TANGO `Init`,
+which re-runs the motor's `init_device` and re-establishes the MCS2 connection
+— distinct from Home / CalibrateAxis).
+- **TANGO_Devices** (`SmarActMCS2Stage.py`): new **`Initialise`** command on the
+  stage (IR-controller) device propagates `Init` to each of the three underlying
+  motor devices (X/Y/Z), then refreshes the stage's cached proxies. All axes are
+  attempted; errors are collected and raised together. **Needs redeploy.**
+- **SAMBA** (`core/calibration.py`): a **"⟲ Reinitialise"** button in the
+  Calibration tab's Stage-positioning group calls the stage device's `Initialise`
+  command, falling back to the standard `Init` if the server predates the new
+  command. Uses the stage device from `configure_stage` (`_stage_cfg["x"]`).
+  Generic — works for the Cryo Attocube stage too (its `Init` reconnects).
+
+### Calibration-tab LED buttons
+The `Lights` TANGO server exposes `LED1ON/OFF`, `LED2ON/OFF` (LED1 = green setup,
+LED2 = IR). A compact **"LEDs" row** (1 On / 1 Off / 2 On / 2 Off) was added to
+the Calibration tab's Stage-positioning group.
+- Shown only when a Lights device is configured (`set_lights_device(path)`);
+  hidden otherwise, so Cryo (no lights_device) never shows it.
+- New setup key **`lights_device`** (`Samba_main/config.py`, Green + IR, default
+  `hpp-N42/light/lights` — a **guess**; correct it in Setup Defaults). Round-tripped
+  through the new **"Lights (LED)"** field in `setup_defaults.py` (a plain path
+  field, since the Lights device may not be in the registry). Existing setups pick
+  up the default via `load_setup`'s `setdefault`.
+- Wired in `samba.py` `_load_active_config` + `_on_defaults_changed`
+  (`set_lights_device`). LED commands are fail-soft (status line on error).

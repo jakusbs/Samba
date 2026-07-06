@@ -449,8 +449,29 @@ class CalibrationPanel(QWidget):
 
         btn_row = QHBoxLayout(); btn_row.setSpacing(6)
         read_btn = QPushButton("🔄 Read all"); read_btn.clicked.connect(self._read_all)
-        btn_row.addWidget(read_btn); btn_row.addStretch()
+        btn_row.addWidget(read_btn)
+        self.reinit_btn = QPushButton("⟲ Reinitialise")
+        self.reinit_btn.setToolTip(
+            "Re-initialise the stage motors — the fix for a wedged IR SmarAct "
+            "axis after manual use with the hand controller.\n"
+            "Sends the stage device's Initialise command (falls back to Init).")
+        self.reinit_btn.clicked.connect(self._reinit_stage)
+        btn_row.addWidget(self.reinit_btn); btn_row.addStretch()
         ctrl_l.addLayout(btn_row)
+
+        # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
+        # is configured for the setup (set via set_lights_device()).
+        self._lights_dev = ""
+        self.led_grp = QGroupBox("LEDs")
+        led_l = QHBoxLayout(self.led_grp); led_l.setSpacing(4)
+        led_l.setContentsMargins(8, 6, 8, 6)
+        for cmd, txt in [("LED1ON", "1 On"), ("LED1OFF", "1 Off"),
+                         ("LED2ON", "2 On"), ("LED2OFF", "2 Off")]:
+            b = QPushButton(txt)
+            b.clicked.connect(lambda _=False, c=cmd: self._led(c))
+            led_l.addWidget(b)
+        self.led_grp.setVisible(False)
+        ctrl_l.addWidget(self.led_grp)
 
         self._pos_status = QLabel("")
         self._pos_status.setWordWrap(True); self._pos_status.setStyleSheet("font-size:10px;")
@@ -563,6 +584,44 @@ class CalibrationPanel(QWidget):
         err = safe_write(p, attr, value_um)
         if err: self._set_pos_err(f"{attr}: {err[:60]}")
         else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} µm")
+
+    def _reinit_stage(self):
+        """Re-initialise the stage motors (fixes wedged IR SmarAct axes).
+        Calls the stage device's Initialise command; falls back to the
+        standard TANGO Init if the server doesn't expose Initialise yet."""
+        info = self._get_axis_info()
+        dev = info.get("x", ("", ""))[0]
+        if not dev:
+            self._set_pos_err("No stage device configured"); return
+        p, err = fresh_proxy(dev)
+        if err: self._set_pos_err(err); return
+        if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
+        for cmd in ("Initialise", "Init"):
+            try:
+                p.command_inout(cmd)
+                self._set_pos_ok(f"Stage {cmd} sent to {dev}")
+                return
+            except Exception as e:
+                last = str(e)
+        self._set_pos_err(f"Reinitialise failed: {last[:80]}")
+
+    # ── LED lights ────────────────────────────────────────────────────────────
+    def set_lights_device(self, path: str):
+        """Configure the Lights TANGO device path and show/hide the LED row."""
+        self._lights_dev = (path or "").strip()
+        self.led_grp.setVisible(bool(self._lights_dev))
+
+    def _led(self, cmd: str):
+        if not self._lights_dev:
+            self._set_pos_err("No Lights device configured"); return
+        p, err = fresh_proxy(self._lights_dev)
+        if err: self._set_pos_err(err); return
+        if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
+        try:
+            p.command_inout(cmd)
+            self._set_pos_ok(f"{cmd} → {self._lights_dev}")
+        except Exception as e:
+            self._set_pos_err(f"{cmd} failed: {str(e)[:70]}")
 
     def _read_all(self):
         info = self._get_axis_info()

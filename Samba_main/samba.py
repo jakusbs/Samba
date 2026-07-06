@@ -956,6 +956,7 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
+        self.calib_panel.set_lights_device(setup.get("lights_device", ""))
         self.calib_panel.configure_stage(
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
@@ -1166,6 +1167,7 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
+        self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
         self.calib_panel.configure_stage(
             defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),

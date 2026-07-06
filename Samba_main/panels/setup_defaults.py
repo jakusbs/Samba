@@ -210,6 +210,14 @@ class SetupDefaultsPanel(QWidget):
         self.focus_attr = _combo()
         cg.addWidget(self.focus_attr,          0, 3)
 
+        # Lights (LED) device — plain path field (device may not be in the
+        # registry); LED1 = green setup, LED2 = IR. Used by the Calibration tab's
+        # LED on/off buttons. Leave blank to hide those buttons.
+        cg.addWidget(QLabel("Lights (LED):"), 1, 0)
+        self.lights_dev = QLineEdit()
+        self.lights_dev.setPlaceholderText("e.g. hpp-N42/light/lights — blank to disable")
+        cg.addWidget(self.lights_dev, 1, 1, 1, 3)
+
         cl.addWidget(cal_grp)
 
         # ── TR-MOKE ───────────────────────────────────────────────────────────
@@ -280,6 +288,7 @@ class SetupDefaultsPanel(QWidget):
         ]
         for w in _all_combos:
             w.currentTextChanged.connect(self._on_changed)
+        self.lights_dev.editingFinished.connect(self._on_changed)
 
     # ── Registry ──────────────────────────────────────────────────────────────
     def set_registry(self, registry: list):
@@ -428,6 +437,7 @@ class SetupDefaultsPanel(QWidget):
 
             _set_by_path(self.focus_dev,   setup_data.get("focus_averagein",    ""))
             _set(self.focus_attr,           setup_data.get("focus_attr",         "Value"))
+            self.lights_dev.setText(        setup_data.get("lights_device",      ""))
 
             _set_by_path(self.trmoke_dg645, setup_data.get("trmoke_dg645",     "hpp-N42/delay/DG645"))
             _set_by_path(self.rtv40_dev,    setup_data.get("rtv40_device",     "hpp-N42/pulser/RTV40"))
@@ -476,6 +486,7 @@ class SetupDefaultsPanel(QWidget):
             "relay_attr":               self.relay_attr.currentText(),
             "focus_averagein":          _get_path(self.focus_dev),
             "focus_attr":               self.focus_attr.currentText(),
+            "lights_device":            self.lights_dev.text().strip(),
             "trmoke_dg645":             _get_path(self.trmoke_dg645),
             "rtv40_device":             _get_path(self.rtv40_dev),
             "zi_device":                _get_path(self.zi_dev),
