@@ -71,7 +71,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
-        "lights_device":         "hpp-N42/light/lights",
+        "lights_device":         "hpp-N42/camera/lights",
         "field_settle_rate":     2.0,    # mT — max |Δfield_polar_corr| per 0.5 s
         "field_settle_timeout":  300.0,  # seconds
     },
@@ -110,7 +110,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
-        "lights_device":         "hpp-N42/light/lights",
+        "lights_device":         "hpp-N42/camera/lights",
         "field_settle_rate":     2.0,    # mT — max |Δfield_polar_corr| per 0.5 s
         "field_settle_timeout":  300.0,  # seconds
     },

@@ -215,7 +215,7 @@ class SetupDefaultsPanel(QWidget):
         # LED on/off buttons. Leave blank to hide those buttons.
         cg.addWidget(QLabel("Lights (LED):"), 1, 0)
         self.lights_dev = QLineEdit()
-        self.lights_dev.setPlaceholderText("e.g. hpp-N42/light/lights — blank to disable")
+        self.lights_dev.setPlaceholderText("e.g. hpp-N42/camera/lights — blank to disable")
         cg.addWidget(self.lights_dev, 1, 1, 1, 3)
 
         cl.addWidget(cal_grp)
