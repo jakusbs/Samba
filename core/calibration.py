@@ -460,16 +460,27 @@ class CalibrationPanel(QWidget):
         ctrl_l.addLayout(btn_row)
 
         # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
-        # is configured for the setup (set via set_lights_device()).
+        # is configured for the setup (set via set_lights_device()).  The On/Off
+        # buttons act as a toggle pair: the active state is highlighted (On →
+        # green, Off → red), the inactive one stays grey, so you can see at a
+        # glance whether each LED is on.
         self._lights_dev = ""
+        self._led_state = {1: None, 2: None}   # None = unknown, True = on, False = off
+        self._led_btns  = {}                    # led → (on_btn, off_btn)
         self.led_grp = QGroupBox("LEDs")
         led_l = QHBoxLayout(self.led_grp); led_l.setSpacing(4)
         led_l.setContentsMargins(8, 6, 8, 6)
-        for cmd, txt in [("LED1ON", "1 On"), ("LED1OFF", "1 Off"),
-                         ("LED2ON", "2 On"), ("LED2OFF", "2 Off")]:
-            b = QPushButton(txt)
-            b.clicked.connect(lambda _=False, c=cmd: self._led(c))
-            led_l.addWidget(b)
+        for led in (1, 2):
+            led_l.addWidget(QLabel(f"{led}:"))
+            on_btn  = QPushButton("On")
+            off_btn = QPushButton("Off")
+            on_btn.clicked.connect(lambda _=False, n=led:  self._led(n, True))
+            off_btn.clicked.connect(lambda _=False, n=led: self._led(n, False))
+            led_l.addWidget(on_btn); led_l.addWidget(off_btn)
+            if led == 1:
+                led_l.addSpacing(10)
+            self._led_btns[led] = (on_btn, off_btn)
+            self._style_led(led)
         self.led_grp.setVisible(False)
         ctrl_l.addWidget(self.led_grp)
 
@@ -611,7 +622,25 @@ class CalibrationPanel(QWidget):
         self._lights_dev = (path or "").strip()
         self.led_grp.setVisible(bool(self._lights_dev))
 
-    def _led(self, cmd: str):
+    _LED_ON_STYLE  = ("QPushButton{background:#a6e3a1;color:#11111b;"
+                      "border:1px solid #45475a;border-radius:4px;padding:2px 8px;"
+                      "font-weight:bold;}")
+    _LED_OFF_STYLE = ("QPushButton{background:#f38ba8;color:#11111b;"
+                      "border:1px solid #45475a;border-radius:4px;padding:2px 8px;"
+                      "font-weight:bold;}")
+    _LED_IDLE_STYLE = ("QPushButton{background:#313244;color:#cdd6f4;"
+                       "border:1px solid #45475a;border-radius:4px;padding:2px 8px;}"
+                       "QPushButton:hover{background:#45475a;}")
+
+    def _style_led(self, led: int):
+        """Highlight whichever of the On/Off pair matches the LED's last state."""
+        on_btn, off_btn = self._led_btns[led]
+        state = self._led_state[led]
+        on_btn.setStyleSheet(self._LED_ON_STYLE  if state is True  else self._LED_IDLE_STYLE)
+        off_btn.setStyleSheet(self._LED_OFF_STYLE if state is False else self._LED_IDLE_STYLE)
+
+    def _led(self, led: int, on: bool):
+        cmd = f"LED{led}{'ON' if on else 'OFF'}"
         if not self._lights_dev:
             self._set_pos_err("No Lights device configured"); return
         p, err = fresh_proxy(self._lights_dev)
@@ -619,6 +648,8 @@ class CalibrationPanel(QWidget):
         if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
         try:
             p.command_inout(cmd)
+            self._led_state[led] = on
+            self._style_led(led)
             self._set_pos_ok(f"{cmd} → {self._lights_dev}")
         except Exception as e:
             self._set_pos_err(f"{cmd} failed: {str(e)[:70]}")

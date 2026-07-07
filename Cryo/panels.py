@@ -570,11 +570,29 @@ class MokeMetadataGroup(QGroupBox):
         left = QGridLayout(); left.setSpacing(2)
         left.setColumnStretch(1, 1); left.setColumnStretch(3, 1)
 
-        left.addWidget(QLabel("Op:"), 0, 0)
+        # Row 0: Operator + t_FM + t_Stack on one line, spanning the same width
+        # as the Notes field below so the thickness fields don't push the panel
+        # out into an extra column.
+        op_row = QHBoxLayout(); op_row.setSpacing(4)
+        op_row.addWidget(QLabel("Op:"))
         self.meta_operator = QLineEdit(); self.meta_operator.setPlaceholderText("Name")
         self.meta_operator.setMinimumWidth(50)
         _NoUnderscoreValidator.install(self.meta_operator)
-        left.addWidget(self.meta_operator, 0, 1, 1, 3)
+        op_row.addWidget(self.meta_operator, 1)   # stretches; spinboxes stay fixed
+        op_row.addWidget(QLabel("t_FM:"))
+        self.tfm_spin = NoScrollDoubleSpinBox()
+        self.tfm_spin.setRange(0, 1000); self.tfm_spin.setDecimals(2)
+        self.tfm_spin.setSuffix(" nm"); self.tfm_spin.setFixedWidth(78)
+        self.tfm_spin.setToolTip("Ferromagnet thickness (for SOT efficiency ξ_DL)")
+        op_row.addWidget(self.tfm_spin)
+        op_row.addWidget(QLabel("t_S:"))
+        self.tstack_spin = NoScrollDoubleSpinBox()
+        self.tstack_spin.setRange(0, 100000); self.tstack_spin.setDecimals(2)
+        self.tstack_spin.setSuffix(" nm"); self.tstack_spin.setFixedWidth(78)
+        self.tstack_spin.setToolTip(
+            "Full (current-carrying) stack thickness — for J = Ic/(w·t_stack)")
+        op_row.addWidget(self.tstack_spin)
+        left.addLayout(op_row, 0, 0, 1, 4)
 
         left.addWidget(QLabel("Sample:"), 1, 0)
         self.meta_sample = QLineEdit(); self.meta_sample.setPlaceholderText("Sample ID")
@@ -595,12 +613,6 @@ class MokeMetadataGroup(QGroupBox):
         self.r2w_spin.setRange(0, 10_000_000); self.r2w_spin.setDecimals(3)
         self.r2w_spin.setSuffix(" Ω"); self.r2w_spin.setMinimumWidth(80)
         left.addWidget(self.r2w_spin, 2, 3)
-        left.addWidget(QLabel("t_FM:"), 2, 4)
-        self.tfm_spin = NoScrollDoubleSpinBox()
-        self.tfm_spin.setRange(0, 1000); self.tfm_spin.setDecimals(2)
-        self.tfm_spin.setSuffix(" nm"); self.tfm_spin.setMinimumWidth(80)
-        self.tfm_spin.setToolTip("Ferromagnet thickness (for SOT efficiency ξ_DL)")
-        left.addWidget(self.tfm_spin, 2, 5)
 
         left.addWidget(QLabel("Notes:"), 3, 0)
         self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
@@ -664,6 +676,7 @@ class MokeMetadataGroup(QGroupBox):
         self.r4w_spin.valueChanged.connect(self.changed.emit)
         self.r2w_spin.valueChanged.connect(self.changed.emit)
         self.tfm_spin.valueChanged.connect(self.changed.emit)
+        self.tstack_spin.valueChanged.connect(self.changed.emit)
 
         # Trigger initial visibility
         self._on_incidence_changed(self.incidence_combo.currentText())
@@ -698,6 +711,7 @@ class MokeMetadataGroup(QGroupBox):
             "r_4wire_ohm": self.r4w_spin.value(),
             "r_2wire_ohm": self.r2w_spin.value(),
             "fm_thickness_nm": self.tfm_spin.value(),
+            "t_stack_nm": self.tstack_spin.value(),
         }
 
     def load_values(self, cfg: dict):
@@ -723,6 +737,7 @@ class MokeMetadataGroup(QGroupBox):
         self.r4w_spin.setValue(cfg.get("r_4wire_ohm", cfg.get("r_4wire_kohm", 0.0) * 1000))
         self.r2w_spin.setValue(cfg.get("r_2wire_ohm", cfg.get("r_2wire_kohm", 0.0) * 1000))
         self.tfm_spin.setValue(cfg.get("fm_thickness_nm", 0.0))
+        self.tstack_spin.setValue(cfg.get("t_stack_nm", 0.0))
 
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:

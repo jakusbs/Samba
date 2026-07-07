@@ -2229,3 +2229,48 @@ the Calibration tab's Stage-positioning group.
   up the default via `load_setup`'s `setdefault`.
 - Wired in `samba.py` `_load_active_config` + `_on_defaults_changed`
   (`set_lights_device`). LED commands are fail-soft (status line on error).
+
+---
+
+## 35. Recent Changes (July 2026) — LED Toggle, Metadata Layout, Setup-Switch Config Bug
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free
+(`python test_runner.py`, 51 tests).
+
+### Calibration-tab LED buttons show state (`core/calibration.py`)
+The LED On/Off buttons are now a toggle pair per LED: the active state is
+highlighted (On → green `#a6e3a1`, Off → red `#f38ba8`), the inactive one stays
+grey. State is tracked client-side (`_led_state`, updated on a successful
+command) since the Lights server has no read-back; `_style_led(led)` restyles.
+`_led(led, on)` builds the `LED{n}ON/OFF` command.
+
+### Metadata: t_FM + t_Stack on the operator row (`_widgets.py`, Cryo `panels.py`)
+- `t_FM` moved off its own column (it was pushing the panel out) onto the
+  **operator row** as a compact fixed-width spinbox, alongside a new **`t_S`
+  (full stack thickness)** spinbox. The row is a QHBoxLayout spanning the same
+  grid width as the Notes field, so the operator field stretches and the two
+  thickness fields stay inside the panel.
+- New metadata key **`t_stack_nm`** (round-tripped through `get_values` /
+  `load_values`; defaults 0.0 on old configs). Written to HDF5 metadata next to
+  `fm_thickness_nm` in `_write_hw_metadata` (`runner.py`) for the SOT analysis
+  (`J = Ic/(w·t_stack)`).
+
+### Setup-switch config-selection corruption (`samba.py`, config_list.py)
+**Bug:** switching setups (Green↔IR) made the *previous* setup adopt the *other*
+setup's config selection, and could surface as wrong labels/units (the wrong
+config loaded). **Cause:** `setup_tabs.currentChanged` drives two slots —
+`ConfigListPanel._on_tab_changed` (connected first) and
+`MainWindow._on_setup_changed`. On a switch `_on_tab_changed` fires first, while
+`_active_setup_name` is still the OLD setup, and emits
+`config_selected(new_row)` → `_on_config_selected` writes the new list's row into
+the **old** setup's `active_idx`.
+**Fix:** a `_switching_setup` guard set around `setup_tabs.setCurrentIndex` in
+`_action_bar_setup_clicked`; `_on_config_selected` early-returns while it's set,
+so `_on_setup_changed` is the sole authority. `_on_setup_changed` also sets the
+new setup's list row (blockSignals) so the highlight is correct.
+
+### Spatial/field axis labels authoritative from setup (`samba.py`)
+`_build_full_config` now injects `act1_label/act1_unit/act2_label/act2_unit` from
+the setup defaults for non-TR-MOKE scans (matching how device/attr are already
+injected), so a stale panel label can't leak wrong labels/units into the scan or
+the saved HDF5 axis. Cryo already injects labels via its piezo block.

@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self._dc_loop_y:   Dict[str, list] = {}
         self._last_dc_cycle: int = 0
         self._active_cfg_idx:    int                      = 0
+        self._switching_setup:   bool                     = False
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
@@ -852,6 +853,13 @@ class MainWindow(QMainWindow):
         self._save_active_config()
         self._active_setup_name = SETUP_NAMES[idx]
         self._active_cfg_idx    = self._active_setup().get("active_idx", 0)
+        # Highlight the new setup's active config (blockSignals so this doesn't
+        # re-enter _on_config_selected — the switch is already the authority).
+        lw = self.cfg_list.active_list()
+        if 0 <= self._active_cfg_idx < lw.count():
+            lw.blockSignals(True)
+            lw.setCurrentRow(self._active_cfg_idx)
+            lw.blockSignals(False)
         # Sync hidden QTabBar and pill buttons
         self._setup_tab_bar.blockSignals(True)
         self._setup_tab_bar.setCurrentIndex(idx)
@@ -884,7 +892,15 @@ class MainWindow(QMainWindow):
 
     def _action_bar_setup_clicked(self, idx):
         """Called when a setup tab (Green/IR/Cryo) is clicked in the action bar."""
-        self.cfg_list.setup_tabs.setCurrentIndex(idx)  # triggers _on_setup_changed
+        # setCurrentIndex synchronously fires _on_tab_changed (which would emit a
+        # spurious config_selected against the still-old setup) and then
+        # _on_setup_changed.  Guard the window so the former is ignored; the
+        # latter is the single authority for the switch.
+        self._switching_setup = True
+        try:
+            self.cfg_list.setup_tabs.setCurrentIndex(idx)  # triggers _on_setup_changed
+        finally:
+            self._switching_setup = False
 
     def _on_new_config(self):
         """Create a blank new config: SPATIAL scan along X, no sensors loaded."""
@@ -902,6 +918,13 @@ class MainWindow(QMainWindow):
         save_setup(self._active_setup_name, self._active_setup())
 
     def _on_config_selected(self, idx):
+        # Ignore the config-list's own currentChanged→config_selected that fires
+        # while a setup switch is in progress: at that moment _active_setup_name
+        # is still the OLD setup, so applying the NEW list's row here would
+        # overwrite the old setup's active_idx (the "switching setups keeps the
+        # other setup's selection" bug).  _on_setup_changed drives the switch.
+        if getattr(self, "_switching_setup", False):
+            return
         if idx == -1:
             self._save_active_config()
             src = copy.deepcopy(self._active_setup()["configs"][self._active_cfg_idx])
@@ -1256,11 +1279,17 @@ class MainWindow(QMainWindow):
             partial["act1_device"]  = dg_path
             partial["trmoke_dg645"] = dg_path
         else:
-            # Spatial / Field / Time: stage device+attr always from setup defaults
+            # Spatial / Field / Time: stage device+attr+label+unit are authoritative
+            # from setup defaults, so a stale panel label can't leak wrong labels/
+            # units into the scan or the saved HDF5 axis.
             partial["act1_device"] = setup.get("act1_device", "")
             partial["act1_attr"]   = setup.get("act1_attr",   "x")
             partial["act2_device"] = setup.get("act2_device", "")
             partial["act2_attr"]   = setup.get("act2_attr",   "y")
+            partial["act1_label"]  = setup.get("act1_label", partial.get("act1_label", "X"))
+            partial["act1_unit"]   = setup.get("act1_unit",  partial.get("act1_unit",  "nm"))
+            partial["act2_label"]  = setup.get("act2_label", partial.get("act2_label", "Y"))
+            partial["act2_unit"]   = setup.get("act2_unit",  partial.get("act2_unit",  "nm"))
         # DC hyst channels live in the right panel now
         if partial.get("scan_type") == "DC_HYST":
             dc_sensors = self.right_panel.get_dc_channels()
