@@ -981,13 +981,13 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
                            expected_x_unit='µm'):
     """Load one data channel from all scans in a SAMBA scanlist.
 
-    Polarity grouping follows the *original* ``data_calculation_new``
-    convention: the group is set by ``-sign(field_T)`` (the field column,
-    with the historical ``#INVERTED!!`` sign flip baked in), so field > 0
-    lands in ``res_neg`` and field < 0 in ``res_pos``. The relay column is
-    intentionally NOT folded in — matching the reference script — so the
-    absolute sign of the half-difference ``(res_pos - res_neg) / 2`` (hence
-    the DL signal / xi_DL) agrees with the old analysis.
+    Groups scans by effective sign = ``relay_sign × sign(field_T)`` (relay
+    column × field column). On data where the relay column is constant this
+    reduces to grouping by the field sign; the relay factor is kept so a
+    scanlist that toggles the relay is still handled correctly. Note this
+    convention can differ in *sign* from the legacy ``data_calculation_new``
+    (which used ``-sign(field_T)`` with its ``#INVERTED!!`` flip); the
+    absolute sign of the DL signal / xi_DL is a labelling convention.
 
     Returns ``[x, diff, sum, err, res_pos, res_neg, n_pos]`` — the same
     7-element format as ``data_calculation_SOT`` / ``data_calculation_new``.
@@ -1012,14 +1012,12 @@ def data_calculation(scanlist_path, ch_x='actuator_x', ch_var='ZI_x1',
             data_base_dir=data_base_dir, min_cols=3, warn_missing=True):
 
         try:
-            field_T = float(parts[2].strip())
+            relay_sign = int(parts[1].strip().replace('+', ''))
+            field_T    = float(parts[2].strip())
         except (ValueError, IndexError):
-            field_T = 0.0
+            relay_sign, field_T = 1, 0.0
 
-        # Match the original data_calculation_new: group by -sign(field_T)
-        # (the "#INVERTED!!" convention). Relay column is NOT used, so the
-        # DL-signal sign agrees with the reference analysis.
-        pol = -1 if field_T >= 0.0 else 1
+        pol = relay_sign * (1 if field_T >= 0.0 else -1)
 
         if first_scan:
             first_scan = False

@@ -1253,11 +1253,12 @@ prints the full traceback on a per-direction failure, keeping the other.
 The 7-element list is the standard format: half-difference `(pos−neg)/2`,
 half-sum `(pos+neg)/2`, SEM-weighted error (quadrature of per-group SEMs),
 mean of positive- and negative-polarity scans, and N for the positive group.
-Polarity grouping is `-sign(field_T)` (field column only) — matching the
-original `data_calculation_new`'s `#INVERTED!!` convention so the DL-signal
-sign agrees with the legacy analysis; the relay column is intentionally not
-used. The error is the **standard error of the mean** (SEM = std/√N combined
-in quadrature), not the original's plain STD — so bars here are ~√N tighter.
+Polarity grouping is `relay_sign × sign(field_T)` from columns 2–3 of the
+scanlist (on constant-relay data this reduces to the field sign). Note the
+absolute DL sign is a labelling convention and may differ from the legacy
+`data_calculation_new` (`-sign(field_T)` with its `#INVERTED!!` flip). The
+error is the **standard error of the mean** (SEM = std/√N combined in
+quadrature), not the original's plain STD — so bars here are ~√N tighter.
 This is deliberate; drop the `/√n` factors in `data_calculation` to restore
 STD-style bars.
 
