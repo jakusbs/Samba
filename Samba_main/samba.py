@@ -1665,6 +1665,10 @@ class MainWindow(QMainWindow):
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
+        # Drop the finished worker: _toggle_pause/_on_status pick the target via
+        # `self._worker or self._sl_worker`, so a stale finished single-scan
+        # worker would swallow Pause clicks during a later scanlist run.
+        self._worker = None
         # Auto-zero the field after every DC hysteresis scan
         if cfg_type == "DC_HYST":
             self._log_append("DC hyst complete — auto-zeroing field…", level="info")

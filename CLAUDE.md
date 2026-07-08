@@ -2337,3 +2337,30 @@ the wrong list. `load_setups` also blockSignals around its `setCurrentRow`
 
 ### Tests
 - `test_runner.py` +1 → 52: all-zero BD calibration is not written to HDF5.
+
+---
+
+## 38. Recent Changes (July 2026) — Scanlist Pause Fix (Stale Worker Reference)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (52 tests).
+
+**Bug:** the Pause button did nothing during a scanlist. **Cause:**
+`_toggle_pause` (and `_on_status`'s auto-pause detection) pick their target via
+`self._worker or self._sl_worker` — but `_on_worker_finished` never cleared
+`self._worker`, so after **any** earlier single scan the stale finished
+ScanWorker won the `or` and all pause/resume/is_paused calls went to its dead
+runner instead of the running scanlist. (A scanlist started as the first action
+of a session paused fine — which made it look intermittent.)
+
+**Fix (both apps):** `_on_worker_finished` now sets `self._worker = None` in
+its terminal path, mirroring what `_on_sl_worker_finished` already did for
+`_sl_worker`. In Cryo the clear is only in the terminal branch — the
+`_dir_queue` branch re-assigns `self._worker` for the next trace/retrace
+direction and returns early. All other `self._worker` consumers already guard
+against `None` (`_abort_scan`, closeEvent worker loop).
+
+**Note on DC hysteresis:** a running DC-hyst measurement itself cannot be
+paused — the Beckhoff PLC runs the loop autonomously and the TANGO side only
+polls it (only Abort is possible mid-loop). Pausing during a DC-hyst scanlist
+item takes effect at the next scan boundary (`_run_list`'s between-scan
+`while self.is_paused()` wait).

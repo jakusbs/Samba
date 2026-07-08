@@ -1816,6 +1816,12 @@ class CryoMainWindow(QMainWindow):
         release_lock(self._active_setup_name)
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
+        # Drop the finished worker: _toggle_pause/_on_status pick the target via
+        # `self._worker or self._sl_worker`, so a stale finished single-scan
+        # worker would swallow Pause clicks during a later scanlist run.
+        # (Only in this terminal branch — the _dir_queue branch above re-assigns
+        # self._worker for the next direction and returns early.)
+        self._worker = None
         self._calib_timescan = False
         self._interleaved_2d = False
         self.map2d_retrace.hide()
