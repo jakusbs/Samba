@@ -2275,3 +2275,19 @@ new setup's list row (blockSignals) so the highlight is correct.
 the setup defaults for non-TR-MOKE scans (matching how device/attr are already
 injected), so a stale panel label can't leak wrong labels/units into the scan or
 the saved HDF5 axis. Cryo already injects labels via its piezo block.
+
+---
+
+## 36. Recent Changes (July 2026) — Block Setup Switch During a Scan
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`.
+
+Switching the setup (Green↔IR) **while a scan or scanlist is running** reloaded
+the other setup's config into the panels and live display over the running one
+(label/unit mixing), and would retarget the setup lock that the running scan
+still holds. `_action_bar_setup_clicked` (the single choke point for both the
+pill buttons and the hidden tab bar) now refuses the switch when
+`_scan_running` and the target differs from the running setup: it bounces the
+tab-bar + pill back to the running setup via the new `_resync_setup_ui(idx)`
+and shows "Finish or abort the current scan before switching setup." in the
+status label. Same-setup clicks and all not-running switches are unaffected.

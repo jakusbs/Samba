@@ -892,6 +892,17 @@ class MainWindow(QMainWindow):
 
     def _action_bar_setup_clicked(self, idx):
         """Called when a setup tab (Green/IR/Cryo) is clicked in the action bar."""
+        cur = SETUP_NAMES.index(self._active_setup_name)
+        # Refuse a setup switch while a scan/scanlist is running: it would
+        # reload the panels/live-display config of the other setup over the
+        # running one (label/unit mixing) and, worse, retarget the setup lock
+        # that the running scan still holds.  Bounce the UI back to the running
+        # setup and tell the user.
+        if self._scan_running and idx != cur:
+            self._resync_setup_ui(cur)
+            self.status_lbl.setText(
+                "⚠ Finish or abort the current scan before switching setup.")
+            return
         # setCurrentIndex synchronously fires _on_tab_changed (which would emit a
         # spurious config_selected against the still-old setup) and then
         # _on_setup_changed.  Guard the window so the former is ignored; the
@@ -901,6 +912,17 @@ class MainWindow(QMainWindow):
             self.cfg_list.setup_tabs.setCurrentIndex(idx)  # triggers _on_setup_changed
         finally:
             self._switching_setup = False
+
+    def _resync_setup_ui(self, idx: int):
+        """Force the hidden tab-bar and pill buttons to reflect setup `idx`
+        without re-triggering a switch (used to bounce a blocked mid-scan
+        switch back to the running setup)."""
+        self._setup_tab_bar.blockSignals(True)
+        self._setup_tab_bar.setCurrentIndex(idx)
+        self._setup_tab_bar.blockSignals(False)
+        btn = self._setup_btn_grp.button(idx)
+        if btn:
+            btn.blockSignals(True); btn.setChecked(True); btn.blockSignals(False)
 
     def _on_new_config(self):
         """Create a blank new config: SPATIAL scan along X, no sensors loaded."""
