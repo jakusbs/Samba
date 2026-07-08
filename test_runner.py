@@ -911,6 +911,13 @@ class TestDcHystCalibration(unittest.TestCase):
         self.assertIsNone(self._run(None),
                           "calibration dataset must be absent when cfg has no bd_calibration")
 
+    def test_all_zero_calibration_not_written(self):
+        # All-zero = the BD panel was never filled for this setup — must not be
+        # recorded as if it were a real λ/2 sweep (analysis falls back to
+        # calibration.txt instead).
+        self.assertIsNone(self._run([0.0] * 6),
+                          "all-zero calibration must be skipped, not written")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 13. DC hysteresis — raw per-cycle data saved to /data/cycles

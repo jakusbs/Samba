@@ -936,7 +936,7 @@ class MainWindow(QMainWindow):
         new_idx = len(self._active_setup()["configs"]) - 1
         self._active_cfg_idx = new_idx
         self._active_setup()["active_idx"] = new_idx
-        self.cfg_list.add_item(new_cfg["name"])
+        self.cfg_list.add_item(new_cfg["name"], self._active_setup_name)
         save_setup(self._active_setup_name, self._active_setup())
 
     def _on_config_selected(self, idx):
@@ -955,7 +955,7 @@ class MainWindow(QMainWindow):
             new_idx = len(self._active_setup()["configs"]) - 1
             self._active_cfg_idx = new_idx
             self._active_setup()["active_idx"] = new_idx
-            self.cfg_list.add_item(src["name"])
+            self.cfg_list.add_item(src["name"], self._active_setup_name)
             save_setup(self._active_setup_name, self._active_setup()); return
         self._save_active_config()
         self._active_cfg_idx = idx
@@ -966,7 +966,7 @@ class MainWindow(QMainWindow):
     def _on_config_deleted(self, idx: int):
         configs = self._active_setup()["configs"]
         if len(configs) <= 1: return
-        configs.pop(idx); self.cfg_list.remove_item(idx)
+        configs.pop(idx); self.cfg_list.remove_item(idx, self._active_setup_name)
         new_idx = min(idx, len(configs) - 1)
         self._active_cfg_idx = new_idx
         self._active_setup()["active_idx"] = new_idx
@@ -977,7 +977,7 @@ class MainWindow(QMainWindow):
         configs = self._active_setup()["configs"]
         if 0 <= idx < len(configs):
             configs[idx]["name"] = name
-            self.cfg_list.rename_item(idx, name)
+            self.cfg_list.rename_item(idx, name, self._active_setup_name)
             save_setup(self._active_setup_name, self._active_setup())
 
     def _load_active_config(self):
@@ -1040,6 +1040,13 @@ class MainWindow(QMainWindow):
             self.bd_cal_panel.set_status(
                 f"Loaded from setup '{self._active_setup_name}'"
                 + (f" ({date_str})" if date_str else "") + ".")
+        else:
+            # No saved calibration for THIS setup — clear the panel instead of
+            # silently keeping the previous setup's values (which would be
+            # injected into every scan's HDF5 as this setup's calibration).
+            self.bd_cal_panel.load_calibration([0.0] * 6)
+            self.bd_cal_panel.set_status(
+                f"No BD calibration saved for setup '{self._active_setup_name}' yet.")
 
     def _save_active_config(self):
         setup   = self._active_setup()
@@ -1059,7 +1066,11 @@ class MainWindow(QMainWindow):
         setup["save_dir"] = self.save_dir.text().strip()
         setup["server_sync_dir"] = self.server_dir.text().strip()
         setup.update(self.setup_defaults.get_defaults())
-        self.cfg_list.sync_name(idx, old["name"])
+        # Route by the authoritative setup NAME, not the current tab: during a
+        # setup switch this save runs while the tab already shows the NEW setup
+        # but the data (and this name) belong to the OLD one — routing by tab
+        # used to transport the old config's name into the new setup's list.
+        self.cfg_list.sync_name(idx, old["name"], self._active_setup_name)
         save_setup(self._active_setup_name, setup)
         self._update_estimate()
 

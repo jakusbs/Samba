@@ -1156,7 +1156,10 @@ class ScanRunner:
             # BD calibration — 6 mV values at λ/2 tick positions 0,5,10,15,20,25
             # (same as _open_hdf5, so DC-hyst files carry the calibration too).
             bd_cal = cfg.get("bd_calibration")
-            if bd_cal:
+            # Skip an all-zero calibration (panel never filled for this setup)
+            # so the analysis falls back to calibration.txt instead of reading
+            # zeros as a real λ/2 sweep.
+            if bd_cal and any(bd_cal):
                 cal_arr = np.array(bd_cal, dtype=np.float64)
                 cds = data_grp.create_dataset("calibration", data=cal_arr)
                 _wsa(cds, "label", "λ/2 calibration (mV)")
@@ -1808,7 +1811,10 @@ class ScanRunner:
 
             # BD calibration — 6 mV values at λ/2 tick positions 0,5,10,15,20,25
             bd_cal = cfg.get("bd_calibration")
-            if bd_cal:
+            # Skip an all-zero calibration (panel never filled for this setup)
+            # so the analysis falls back to calibration.txt instead of reading
+            # zeros as a real λ/2 sweep.
+            if bd_cal and any(bd_cal):
                 cal_arr = np.array(bd_cal, dtype=np.float64)
                 _ds("calibration", cal_arr, "λ/2 calibration (mV)", "mV", "calibration")
 

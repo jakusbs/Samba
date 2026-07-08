@@ -2291,3 +2291,49 @@ pill buttons and the hidden tab bar) now refuses the switch when
 tab-bar + pill back to the running setup via the new `_resync_setup_ui(idx)`
 and shows "Finish or abort the current scan before switching setup." in the
 status label. Same-setup clicks and all not-running switches are unaffected.
+
+---
+
+## 37. Recent Changes (July 2026) — Config-List Routing by Setup Name (Name Transport Fix)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (`python test_runner.py`, 52 tests).
+
+### Config name transported into the other setup on switch
+**Bug:** with a config selected, switching Green↔IR wrote that config's *name*
+into the other setup's config list (same row). **Cause:** `_on_setup_changed`
+fires from `setup_tabs.currentChanged`, i.e. *after* the tab index already
+points at the NEW setup — and its first act is `_save_active_config()`, which
+saves the OLD setup's data but called `cfg_list.sync_name(idx, name)`, which
+routed by **tab index** (`active_list()`) → old name written into the new
+setup's list. Same class as the §35 active_idx bug (UI-derived vs.
+authoritative setup identity), different symptom.
+
+**Fix:** every ConfigListPanel mutator (`sync_name` / `add_item` /
+`remove_item` / `rename_item`) now takes an optional `setup_name` resolved via
+`_list(setup_name)`; all samba.py call sites pass the authoritative
+`_active_setup_name`, so a call landing inside the switch window can never hit
+the wrong list. `load_setups` also blockSignals around its `setCurrentRow`
+(previously only harmless due to signal-connection ordering at startup).
+
+### Audit of the same bug class (UI-derived setup identity / stale-if-absent loads)
+- **Clean:** no remaining `setup_tabs.currentIndex()`-derived identity in
+  samba.py (the one `active_list()` left is in `_on_setup_changed` *after*
+  `_active_setup_name` is updated); setup-lock, notebook, server-sync, BD
+  save/load, `maybe_prompt` are all name-based; `setup_defaults.load()` has a
+  `_loading` guard so it can't echo defaults during a switch; shared metadata
+  and sensors are unconditionally re-loaded per config (no stale panel value
+  can survive a switch).
+- **Fixed — BD calibration leak:** a setup with *no saved* `bd_calibration`
+  kept showing (and injecting into every scan's HDF5!) the previous setup's
+  6 mV values. `_load_active_config` now clears the panel to zeros with a
+  "No BD calibration saved for setup 'X' yet" status, and both HDF5 writers
+  (`_open_hdf5`, `_run_dc_hyst`) skip an **all-zero** calibration so the
+  analysis falls back to `calibration.txt` instead of reading zeros as a real
+  λ/2 sweep.
+- **Theoretical only (not changed):** `if hyst_chs:` in `_load_active_config`
+  would keep the previous DC-channel rows if a config had an empty
+  `hyst_channels` — unreachable in practice because `_migrate_config`
+  `setdefault`s a non-empty list on every config at load.
+
+### Tests
+- `test_runner.py` +1 → 52: all-zero BD calibration is not written to HDF5.

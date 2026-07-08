@@ -92,10 +92,26 @@ class ConfigListPanel(QWidget):
                 lw.addItem(QListWidgetItem(cfg["name"]))
             idx = data.get("active_idx", 0)
             if 0 <= idx < lw.count():
+                # Programmatic restore — don't emit config_selected (was only
+                # harmless before because of signal-connection ordering).
+                lw.blockSignals(True)
                 lw.setCurrentRow(idx)
+                lw.blockSignals(False)
 
     def active_setup_name(self) -> str: return SETUP_NAMES[self.setup_tabs.currentIndex()]
     def active_list(self)       -> QListWidget: return self._tab_lists[self.active_setup_name()]
+
+    def _list(self, setup_name: str = None) -> QListWidget:
+        """List widget for `setup_name`, falling back to the active tab.
+
+        MainWindow passes its authoritative `_active_setup_name` so a call
+        landing inside the setup-switch window — where the tab index already
+        points at the NEW setup while the data being saved still belongs to
+        the OLD one — can never write into the wrong setup's list (this is
+        what used to "transport" a config name across setups)."""
+        if setup_name and setup_name in self._tab_lists:
+            return self._tab_lists[setup_name]
+        return self.active_list()
 
     def _on_tab_changed(self, idx):
         lw = self._tab_lists[SETUP_NAMES[idx]]
@@ -127,15 +143,16 @@ class ConfigListPanel(QWidget):
         name, ok = QInputDialog.getText(self, "Rename", "New name:", text=it.text())
         if ok and name.strip(): self.config_renamed.emit(lw.currentRow(), name.strip())
 
-    def remove_item(self, idx: int): self.active_list().takeItem(idx)
-    def rename_item(self, idx: int, name: str):
-        lw = self.active_list()
+    def remove_item(self, idx: int, setup_name: str = None):
+        self._list(setup_name).takeItem(idx)
+    def rename_item(self, idx: int, name: str, setup_name: str = None):
+        lw = self._list(setup_name)
         if 0 <= idx < lw.count(): lw.item(idx).setText(name)
-    def sync_name(self, idx: int, name: str):
-        lw = self.active_list()
+    def sync_name(self, idx: int, name: str, setup_name: str = None):
+        lw = self._list(setup_name)
         if 0 <= idx < lw.count(): lw.item(idx).setText(name)
-    def add_item(self, name: str) -> int:
-        lw = self.active_list(); lw.addItem(QListWidgetItem(name))
+    def add_item(self, name: str, setup_name: str = None) -> int:
+        lw = self._list(setup_name); lw.addItem(QListWidgetItem(name))
         new_idx = lw.count() - 1; lw.setCurrentRow(new_idx); return new_idx
 
 
