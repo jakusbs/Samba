@@ -2364,3 +2364,39 @@ paused — the Beckhoff PLC runs the loop autonomously and the TANGO side only
 polls it (only Abort is possible mid-loop). Pausing during a DC-hyst scanlist
 item takes effect at the next scan boundary (`_run_list`'s between-scan
 `while self.is_paused()` wait).
+
+---
+
+## 39. Recent Changes (July 2026) — DC-Hyst Per-Half-Loop Drift Alignment (Analysis)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (56 tests).
+
+Long DC-hyst runs suffer slow balanced-diode drift. Measured on a real
+1000-cycle file (Pt(8)CoFe(3) ETH1, 53 min): loop amplitude ≈ 0.62 mV but the
+per-cycle baseline wanders ≈ 2 mV p2p (>3× the signal) — individual cycles look
+terrible — while *within* one ~3 s cycle drift is only ~1–2 % of amplitude,
+showing up as a small systematic offset between the up- and down-sweep branches
+of the averaged loop.
+
+### `hyst_align_cycles(cyc, tail_frac=0.10)` (`Analysis/samba_io.py`)
+For every cycle and every **half-loop independently**, the saturated tails
+(the `tail_frac` most-positive/most-negative-field points of that half) give
+the half's two saturation levels; the half is shifted so their midpoint is 0.
+Physics pins the Kerr signal at saturation to the same levels in every cycle
+and both sweep directions, so any difference there is diode drift. This
+centres all cycles on a common baseline **and** zeroes the up/down branch
+offset, while leaving each half's amplitude (→ Ms, Mr, Hc) untouched. The
+absolute signal level is discarded (meaningless for a drifting balanced
+diode). Assumes the loop saturates within the swept range.
+
+- `hyst_cycle_average(cyc, exclude=(), align=False, tail_frac=0.10)` — pass
+  `align=True` to align before averaging (combines with `exclude`).
+- `plot_hyst_cycles(..., align=True)` — aligned overlay.
+- On the real file: cycle-to-cycle spread 392 µV → 29 µV (13×); the averaged
+  loop's up/down branch offset closes; a handful of genuinely distorted cycles
+  become visible in the aligned overlay (drop via `hyst_detect_outliers` +
+  `exclude`).
+
+### Tests
+- `test_runner.py` +4 → 56: `TestHystAlign` (per-cycle offsets removed, branch
+  offset closed in average, amplitude preserved, NaN cycle passthrough).

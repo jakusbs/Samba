@@ -1104,6 +1104,77 @@ class TestHystCycleRoundTrip(unittest.TestCase):
             _os.remove(tmp)
 
 
+class TestHystAlign(unittest.TestCase):
+    """hyst_align_cycles: per-half-loop baseline alignment removes balanced-
+    diode drift (per-cycle level jumps + up/down branch offset) while leaving
+    the loop amplitude untouched."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Analysis'))
+        import samba_io as _sio
+        cls.sio = _sio
+
+    def _make_cyc(self, n_cyc=6, half=20, cyc_step=5.0, branch_off=0.3,
+                  nan_cycle=None):
+        """Synthetic loop: ±1 saturation, switching at ±2 mT; cycle c is offset
+        by c*cyc_step, and the up/down halves by ±branch_off."""
+        f_up   = np.linspace(-10, 10, half)
+        f_down = f_up[::-1]
+        y_up   = np.tanh((f_up   - 2.0) * 2.0)   # switches at +2 going up
+        y_down = np.tanh((f_down + 2.0) * 2.0)   # switches at −2 going down
+        field = np.tile(np.concatenate([f_up, f_down]), (n_cyc, 1))
+        loop  = np.concatenate([y_up + branch_off, y_down - branch_off])
+        sig   = np.stack([loop + c * cyc_step for c in range(n_cyc)])
+        cyc = {'field': field, 'valid': np.ones(n_cyc, bool),
+               'n_cycles': n_cyc}
+        for name in ('result1', 'result2', 'result3',
+                     'result4', 'result5', 'result6'):
+            cyc[name] = sig.copy()
+        if nan_cycle is not None:
+            for name in ('result1', 'result2', 'result3',
+                         'result4', 'result5', 'result6'):
+                cyc[name][nan_cycle] = np.nan
+            cyc['valid'][nan_cycle] = False
+        return cyc
+
+    def test_align_removes_cycle_offsets(self):
+        cyc = self._make_cyc()
+        ali = self.sio.hyst_align_cycles(cyc)
+        # every cycle's +saturation level must now be identical
+        sat = ali['result1'][:, 18]        # near +10 mT on the up sweep
+        self.assertLess(float(np.ptp(sat)), 1e-9)
+        self.assertTrue(ali.get('aligned'))
+        # original dict untouched (shallow copy with new arrays)
+        self.assertGreater(float(np.ptp(cyc['result1'][:, 18])), 1.0)
+
+    def test_align_closes_branch_offset_in_average(self):
+        cyc = self._make_cyc()
+        half = 20; nt = 2   # tail_frac 0.10 of 20
+        def branch_gap(avg):
+            up, dn = avg['result1'][:half], avg['result1'][half:]
+            return float(np.nanmean(up[-nt:]) - np.nanmean(dn[:nt]))  # both at +sat
+        raw = self.sio.hyst_cycle_average(cyc)
+        ali = self.sio.hyst_cycle_average(cyc, align=True)
+        self.assertGreater(abs(branch_gap(raw)), 0.5)   # 2×branch_off ≈ 0.6
+        self.assertLess(abs(branch_gap(ali)), 1e-6)
+
+    def test_align_preserves_amplitude(self):
+        cyc = self._make_cyc()
+        ali = self.sio.hyst_align_cycles(cyc)
+        up = ali['result1'][0, :20]
+        amp = up[-2:].mean() - up[:2].mean()   # +sat minus −sat on the up sweep
+        self.assertAlmostEqual(amp, 2.0, delta=0.01)
+
+    def test_invalid_cycle_passes_through(self):
+        cyc = self._make_cyc(nan_cycle=2)
+        ali = self.sio.hyst_align_cycles(cyc)
+        self.assertTrue(np.all(np.isnan(ali['result1'][2])))
+        # average with align skips it and still closes the branch offset
+        avg = self.sio.hyst_cycle_average(cyc, align=True)
+        self.assertEqual(avg['included'], [1, 2, 4, 5, 6])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. DC hysteresis — recorded-source selection written at scan start (A.4)
 # ─────────────────────────────────────────────────────────────────────────────
