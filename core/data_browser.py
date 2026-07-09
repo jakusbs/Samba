@@ -545,6 +545,7 @@ class DataBrowserPanel(QWidget):
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_selection)
         self.tree.itemSelectionChanged.connect(self._update_overlay_btn)
+        self.tree.itemExpanded.connect(self._on_date_expanded)
         left_l.addWidget(self.tree, stretch=1)
 
         # Overlay button
@@ -647,36 +648,75 @@ class DataBrowserPanel(QWidget):
                 date_label = dd
 
             date_item = QTreeWidgetItem([date_label, "", f"{len(h5_files)} files"])
-            date_item.setExpanded(dd == date_dirs[0])  # expand today
             self.tree.addTopLevelItem(date_item)
 
+            # Only the newest (expanded) folder reads HDF5 metadata eagerly.
+            # Older folders get name-only rows; their metadata is filled in on
+            # expand (_on_date_expanded).  Reading every file's metadata here
+            # froze the GUI for seconds on setup switch / post-scan refresh
+            # once the data directory held months of scans.
+            eager = (dd == date_dirs[0])
             for fp in h5_files:
-                sf = ScanFile(fp)
-                if not sf.valid:
-                    continue
-                self._loaded_files[fp] = sf
-
-                status = sf.meta["scan_status"]
-                pts    = f"{sf.meta['points_acquired']}/{sf.meta['points_planned']}"
-                item   = QTreeWidgetItem([sf.basename, status, pts])
-                item.setData(0, Qt.ItemDataRole.UserRole, fp)
-
-                # Color-code status
-                if status == "completed":
-                    item.setForeground(1, QColor("#a6e3a1"))
-                elif status == "aborted":
-                    item.setForeground(1, QColor("#fab387"))
-                elif status == "running":
-                    item.setForeground(1, QColor("#f38ba8"))
+                if eager:
+                    sf = ScanFile(fp)
+                    if not sf.valid:
+                        continue
+                    self._loaded_files[fp] = sf
+                    item = QTreeWidgetItem([sf.basename, "", ""])
+                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
+                    self._fill_item_meta(item, sf)
                 else:
+                    item = QTreeWidgetItem([os.path.basename(fp), "…", ""])
+                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
                     item.setForeground(1, QColor("#6c7086"))
-
                 date_item.addChild(item)
+            date_item.setExpanded(eager)   # after children exist
 
         if self.tree.topLevelItemCount() == 0:
             placeholder = QTreeWidgetItem(["No scans found", "", ""])
             placeholder.setForeground(0, QColor("#6c7086"))
             self.tree.addTopLevelItem(placeholder)
+
+    @staticmethod
+    def _fill_item_meta(item, sf: "ScanFile"):
+        """Set the status/points columns + colour coding from a loaded ScanFile."""
+        status = sf.meta["scan_status"]
+        pts    = f"{sf.meta['points_acquired']}/{sf.meta['points_planned']}"
+        item.setText(1, status); item.setText(2, pts)
+        if status == "completed":
+            item.setForeground(1, QColor("#a6e3a1"))
+        elif status == "aborted":
+            item.setForeground(1, QColor("#fab387"))
+        elif status == "running":
+            item.setForeground(1, QColor("#f38ba8"))
+        else:
+            item.setForeground(1, QColor("#6c7086"))
+
+    def _get_scanfile(self, fp: str):
+        """Return the cached ScanFile for `fp`, loading it lazily on first use.
+        Returns None when the file can't be read."""
+        sf = self._loaded_files.get(fp)
+        if sf is None:
+            sf = ScanFile(fp)
+            if not sf.valid:
+                return None
+            self._loaded_files[fp] = sf
+        return sf
+
+    def _on_date_expanded(self, date_item):
+        """Fill in metadata for a lazily-added date folder on first expand."""
+        for i in range(date_item.childCount()):
+            item = date_item.child(i)
+            if item.text(1) != "…":
+                continue                       # already populated
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            sf = self._get_scanfile(fp) if fp else None
+            if sf is None:
+                item.setText(1, "?")
+                item.setForeground(0, QColor("#6c7086"))
+                item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
+                continue
+            self._fill_item_meta(item, sf)
 
     def _update_overlay_btn(self):
         """Enable overlay button only when at least one file is selected."""

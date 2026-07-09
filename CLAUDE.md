@@ -2400,3 +2400,23 @@ diode). Assumes the loop saturates within the swept range.
 ### Tests
 - `test_runner.py` +4 → 56: `TestHystAlign` (per-cycle offsets removed, branch
   offset closed in average, amplitude preserved, NaN cycle passthrough).
+
+---
+
+## 40. Recent Changes (July 2026) — Lazy Data-Browser Refresh (Setup-Switch Freeze)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (56 tests).
+
+`DataBrowserPanel.refresh()` constructed a `ScanFile` — which opens the HDF5
+and reads all metadata — for **every file in every date folder**, synchronously
+on the GUI thread. It runs on every setup switch (when the browser tab has
+been shown) and after every scan, so with months of data the switch froze for
+~2 s.
+
+Now only the **newest (auto-expanded) date folder** reads metadata eagerly;
+older folders get name-only rows (status column "…") whose metadata is filled
+on first expand (`itemExpanded` → `_on_date_expanded`). `ScanFile`s are also
+created lazily on selection via the new `_get_scanfile(fp)` cache helper, so
+selecting a file in a not-yet-populated folder still works; unreadable files
+are greyed out with their click target removed. Shared column/colour logic
+extracted into `_fill_item_meta`.
