@@ -193,6 +193,18 @@ def load_hyst_cycles(path: str) -> dict:
     return out
 
 
+def _require_cycles(cyc):
+    """Raise a clear error when load_hyst_cycles() returned None (bad path or
+    a non-DC_HYST file) instead of letting callers crash on NoneType."""
+    if cyc is None:
+        raise ValueError(
+            "no per-cycle data: load_hyst_cycles() returned None. Check that "
+            "the path is correct (use the FULL path including the YYYYMMDD "
+            "date folder) and that the file is a DC_HYST scan containing "
+            "/data/cycles (TIME/SPATIAL/FIELD scans have no cycles).")
+    return cyc
+
+
 def _included_mask(cyc: dict, exclude=()):
     """Boolean [n_cycles] mask of valid, non-excluded cycles (1-based exclude)."""
     valid = cyc['valid'].copy()
@@ -229,6 +241,7 @@ def hyst_align_cycles(cyc: dict, tail_frac: float = 0.10) -> dict:
     Returns a shallow copy of ``cyc`` with aligned ``result1``..``result6``
     (``field`` and metadata unchanged) plus ``aligned = True``.
     """
+    cyc = _require_cycles(cyc)
     out = dict(cyc)
     n_cyc, n_loop = cyc['field'].shape
     half = n_loop // 2
@@ -269,6 +282,7 @@ def hyst_cycle_average(cyc: dict, exclude=(), align: bool = False,
     :func:`hyst_align_cycles` (see there), so slow balanced-diode drift no
     longer smears the average or offsets the up- vs down-sweep branches.
     """
+    cyc = _require_cycles(cyc)
     if align and not cyc.get('aligned'):
         cyc = hyst_align_cycles(cyc, tail_frac=tail_frac)
     mask = _included_mask(cyc, exclude)
@@ -292,6 +306,7 @@ def hyst_detect_outliers(cyc: dict, channel: str = 'result1',
     sorted list of 1-based cycle numbers.  With < 3 valid cycles there is no
     robust baseline, so an empty list is returned.
     """
+    cyc = _require_cycles(cyc)
     if channel not in cyc:
         raise KeyError(f"hyst_detect_outliers: unknown channel {channel!r}")
     valid = cyc['valid']
@@ -321,6 +336,7 @@ def plot_hyst_cycles(cyc: dict, channel: str = 'result1', exclude=(),
     ``matplotlib`` is imported lazily so the rest of this module stays usable
     without it.  Returns the matplotlib Axes.
     """
+    cyc = _require_cycles(cyc)
     import matplotlib.pyplot as plt
     if ax is None:
         _, ax = plt.subplots()
