@@ -121,7 +121,7 @@ class HardwarePanel(QGroupBox):
         frg.addWidget(self.field_spin, row, 1)
         self.zero_field_btn = QPushButton("Zero field")
         self.zero_field_btn.setToolTip("Demagnetize: alternating decay to 0 A")
-        self.zero_field_btn.clicked.connect(self._demagnetize)
+        self.zero_field_btn.clicked.connect(self._on_zero_field_clicked)
         frg.addWidget(self.zero_field_btn, row, 2); row += 1
 
         frg.addWidget(QLabel("Field:"), row, 0)
@@ -410,6 +410,16 @@ class HardwarePanel(QGroupBox):
             self._set_ok(self.mag_status,
                          f"Sent {attr} = {val:.4f} A (scan start)")
         return val, err
+
+    def _on_zero_field_clicked(self):
+        """Manual Zero-field button: also reset the write spinbox to 0 so a
+        later scan start (apply_field_setpoint) doesn't re-apply the old
+        setpoint. setValue does NOT write to hardware (only Return/Enter
+        does) — the demagnetization below is the actual zeroing. Automatic
+        zero procedures (post-DC-hyst via demagnetize()) deliberately leave
+        the spinbox untouched."""
+        self.field_spin.setValue(0.0)
+        self._demagnetize()
 
     def _demagnetize(self):
         """Run demagnetization in a background thread."""

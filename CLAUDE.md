@@ -2457,6 +2457,10 @@ calls it at the start of `_start_scan`, `_start_scanlist` (which uses the
 Scanlist tab's own hw panel) and `_start_calib_timescan`, **skipping FIELD and
 DC_HYST scans** (those own the magnet themselves). Success/failure is logged to
 the status line. Samba_main only (Cryo's AttoDRY field control is separate).
+The manual **Zero field** button also resets the write spinbox to 0 (via
+`_on_zero_field_clicked`; `setValue` doesn't write to hardware — the demag
+does the zeroing) so a later scan start doesn't re-apply the old setpoint.
+Automatic zeroes (post-DC-hyst `demagnetize()`) leave the spinbox untouched.
 
 ### LED state readback (`TANGO_Devices Lights.py` + `core/calibration.py`)
 - **Lights server**: new read-only bool attributes `led1` / `led2` returning
