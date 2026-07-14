@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
         self._trmoke_x_factor:   Optional[float]          = None
         self._meta_syncing:      bool                     = False
         self._timing_syncing:    bool                     = False
+        self._last_sample_id:    str                      = ""
 
         # ── Bottom status-bar state (live scan progress) ────────────────────
         self._run_start_time:     float = 0.0   # set once per run, NOT reset per direction
@@ -811,6 +812,12 @@ class MainWindow(QMainWindow):
         self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
         self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
 
+        # New-sample popup: offer a fresh BD calibration when the sample ID is
+        # edited by hand (programmatic setText — config loads, meta sync — does
+        # not emit editingFinished, so only genuine user edits trigger this).
+        self.traj_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+        self.sl_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+
         # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
         self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
         self.traj_panel.settle.valueChanged.connect(self._sync_traj_timing_to_sl)
@@ -1020,6 +1027,7 @@ class MainWindow(QMainWindow):
         if shared_meta:
             self.traj_panel.meta.load_values(shared_meta)
             self.sl_panel.meta.load_values(shared_meta)
+        self._last_sample_id = self.traj_panel.meta.meta_sample.text().strip()
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -1155,6 +1163,36 @@ class MainWindow(QMainWindow):
             self.sl_panel.meta.load_values(self.traj_panel.meta.get_values())
         finally:
             self._meta_syncing = False
+
+    def _on_sample_id_edited(self):
+        """User finished editing the Sample field. If the name actually
+        changed, offer to start a fresh BD calibration for the new sample:
+        Yes → empty the 6 mV values and jump to the BD Calibration tab
+        (the tab's first-open reload prompt is suppressed — it would offer
+        the OLD sample's calibration right back)."""
+        sender = self.sender()
+        new_id = sender.text().strip() if sender is not None else \
+            self.traj_panel.meta.meta_sample.text().strip()
+        if new_id == self._last_sample_id:
+            return
+        old_id = self._last_sample_id
+        self._last_sample_id = new_id
+        if not new_id:
+            return
+        ans = QMessageBox.question(
+            self, "New sample",
+            f"Sample changed to '{new_id}'"
+            + (f" (was '{old_id}')" if old_id else "")
+            + ".\n\nStart a new BD calibration for it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.bd_cal_panel.suppress_prompt(self._active_setup_name)
+        self.bd_cal_panel.load_calibration([0.0] * 6)
+        self.bd_cal_panel.set_status(
+            f"New calibration for sample '{new_id}' — enter the 6 mV values and Save.")
+        self.bottom_tabs.setCurrentWidget(self.bd_cal_panel)
 
     def _sync_sl_meta_to_traj(self):
         if self._meta_syncing: return
@@ -1438,6 +1476,28 @@ class MainWindow(QMainWindow):
                 return None
         return active
 
+    def _apply_field_setpoint_for_scan(self, cfg: dict, hw_panel):
+        """Push the hardware panel's magnet-current setpoint to the magnet at
+        scan start, so the measurement runs at the field shown in the write
+        window (an aborted scanlist auto-zeroes the magnet while the window
+        still displays the old setpoint).  FIELD sweeps and DC hysteresis
+        drive the magnet themselves and are skipped."""
+        if cfg.get("scan_type") in ("FIELD", "DC_HYST"):
+            return
+        try:
+            val, err = hw_panel.apply_field_setpoint()
+        except Exception as e:
+            self._log_append(f"⚠ Field setpoint apply failed: {e}", level="warning")
+            return
+        if err in ("simulation", "no magnet device configured"):
+            return
+        if err:
+            self._log_append(f"⚠ Could not apply field setpoint {val:.4g} A "
+                             f"at scan start: {err}", level="warning")
+        else:
+            self._log_append(f"Field setpoint {val:.4g} A applied to magnet "
+                             f"(scan start)", level="info")
+
     def _wire_worker(self, worker: ScanWorker):
         """Connect the standard signals shared by all scan workers."""
         worker.point_done.connect(self._on_point)
@@ -1532,6 +1592,10 @@ class MainWindow(QMainWindow):
 
         # BD calibration is injected in _build_full_config() (shared path).
 
+        # Apply the displayed field setpoint so the scan runs at the field the
+        # write window shows (an aborted scanlist may have auto-zeroed it).
+        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
+
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
 
@@ -1580,6 +1644,8 @@ class MainWindow(QMainWindow):
         # Also set up the main live display for the Log tab
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
+
+        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
 
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)
@@ -1733,6 +1799,10 @@ class MainWindow(QMainWindow):
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         # BD calibration is injected in _build_full_config() (shared path).
+
+        # Apply the displayed field setpoint so the scanlist starts at the
+        # field the write window shows (a previous abort auto-zeroed it).
+        self._apply_field_setpoint_for_scan(cfg, self.sl_panel.hw)
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))

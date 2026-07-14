@@ -26,6 +26,10 @@ _COLUMNS = [
     ("Operator",                 "operator"),
     ("Sample ID",                "sample_id"),
     ("Notes",                    "notes"),
+    # Scanlist membership (blank for single scans) — 8th column by request.
+    # Moving it here from the end was a deliberate one-time reorder: existing
+    # notebooks get backed up to .bak and restarted (non-prefix header change).
+    ("Scanlist",                 "_scanlist_name"),
     ("Incidence",                "incidence"),
     ("Polarization",             "polarization"),
     ("lam2",                     "lam2"),
@@ -69,12 +73,11 @@ _COLUMNS = [
     ("Stage type",               "stage_type"),
     ("File path",                "_hdf5_path"),
     ("Duration (s)",             "_duration_s"),
-    # NOTE: only ever APPEND new columns at the end.  append_measurement()
+    # NOTE: prefer to only APPEND new columns at the end.  append_measurement()
     # migrates an existing notebook in place (padding old rows with blanks)
     # when the on-disk header is a prefix of this list, so old measurements
-    # keep their column alignment.  Inserting/renaming a column instead would
-    # force a fresh file (old data preserved as a .bak).
-    ("Scanlist",                 "_scanlist_name"),
+    # keep their column alignment.  Inserting/renaming a column instead
+    # forces a fresh file (old data preserved as a .bak).
 ]
 
 _HEADERS = [h for h, _ in _COLUMNS]

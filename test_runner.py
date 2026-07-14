@@ -1289,28 +1289,28 @@ class TestLabNotebookScanlistColumn(unittest.TestCase):
         _nb_mod.append_measurement(nb, {"name": "s1", "_scanlist_name": "list_A"})
         _nb_mod.append_measurement(nb, {"name": "s2"})   # single scan → blank
         rows = self._read(nb)
-        self.assertEqual(rows[0][-1], "Scanlist")
-        self.assertEqual(rows[1][-1], "list_A")
-        self.assertEqual(rows[2][-1], "")
+        col = rows[0].index("Scanlist")
+        self.assertEqual(col, 7, "Scanlist must be the 8th CSV column")
+        self.assertEqual(rows[1][col], "list_A")
+        self.assertEqual(rows[2][col], "")
 
     def test_appends_column_without_shifting_old_rows(self):
         import csv, tempfile
         nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
         # Simulate an OLD notebook whose header is the current one minus the
-        # last (Scanlist) column — a strict prefix.
+        # last column — a strict prefix (append-only schema growth).
         old_headers = _nb_mod._HEADERS[:-1]
         with open(nb, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(old_headers)
             w.writerow(["v"] * len(old_headers))   # one legacy row
         # Appending a new measurement must migrate in place, not back up.
-        _nb_mod.append_measurement(nb, {"name": "new", "_scanlist_name": "L"})
+        _nb_mod.append_measurement(nb, {"name": "new"})
         self.assertFalse(os.path.exists(nb + ".bak"), "should migrate in place, no .bak")
         rows = self._read(nb)
         self.assertEqual(rows[0], _nb_mod._HEADERS)             # header upgraded
         self.assertEqual(len(rows[1]), len(_nb_mod._HEADERS))   # old row padded
         self.assertEqual(rows[1][-1], "")                       # padded blank
-        self.assertEqual(rows[2][-1], "L")                      # new row value
 
     def test_non_prefix_header_change_backs_up(self):
         import csv, tempfile

@@ -621,6 +621,41 @@ class CalibrationPanel(QWidget):
         """Configure the Lights TANGO device path and show/hide the LED row."""
         self._lights_dev = (path or "").strip()
         self.led_grp.setVisible(bool(self._lights_dev))
+        if self._lights_dev:
+            self._refresh_led_state()
+
+    def _refresh_led_state(self):
+        """Read the actual LED states from the Lights device (led1/led2 attrs)
+        in a background thread and recolour the buttons. Servers predating the
+        read-back attributes (or unreachable devices) leave the state unknown
+        (grey) — fully fail-soft."""
+        dev = self._lights_dev
+        if not dev:
+            return
+
+        def _do():
+            states = {}
+            try:
+                p, err = fresh_proxy(dev)
+                if err or is_sim_proxy(p):
+                    return
+                for led, attr in ((1, "led1"), (2, "led2")):
+                    v, e = safe_read(p, attr)
+                    if e is None and v is not None:
+                        states[led] = bool(v)
+            except Exception:
+                return
+            if not states:
+                return
+
+            def _apply():
+                for led, on in states.items():
+                    self._led_state[led] = on
+                    self._style_led(led)
+
+            QTimer.singleShot(0, _apply)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     _LED_ON_STYLE  = ("QPushButton{background:#a6e3a1;color:#11111b;"
                       "border:1px solid #45475a;border-radius:4px;padding:2px 8px;"
@@ -655,6 +690,7 @@ class CalibrationPanel(QWidget):
             self._set_pos_err(f"{cmd} failed: {str(e)[:70]}")
 
     def _read_all(self):
+        self._refresh_led_state()
         info = self._get_axis_info()
         if not info: self._set_pos_err("No config available"); return
         self._set_pos_ok("Reading…")

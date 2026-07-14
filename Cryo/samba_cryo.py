@@ -347,6 +347,7 @@ class CryoMainWindow(QMainWindow):
         self._scan_running:        bool                     = False
         self._meta_syncing:        bool                     = False
         self._timing_syncing:      bool                     = False
+        self._last_sample_id:      str                      = ""
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -967,6 +968,12 @@ class CryoMainWindow(QMainWindow):
         self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
         self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
 
+        # New-sample popup: offer a fresh BD calibration when the sample ID is
+        # edited by hand (programmatic setText — config loads, meta sync — does
+        # not emit editingFinished, so only genuine user edits trigger this).
+        self.traj_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+        self.sl_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+
         # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
         self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
         self.traj_panel.settle.valueChanged.connect(self._sync_traj_timing_to_sl)
@@ -1071,6 +1078,7 @@ class CryoMainWindow(QMainWindow):
         if shared_meta:
             self.traj_panel.meta.load_values(shared_meta)
             self.sl_panel.meta.load_values(shared_meta)
+        self._last_sample_id = self.traj_panel.meta.meta_sample.text().strip()
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -1202,6 +1210,36 @@ class CryoMainWindow(QMainWindow):
             self.sl_panel.meta.load_values(self.traj_panel.meta.get_values())
         finally:
             self._meta_syncing = False
+
+    def _on_sample_id_edited(self):
+        """User finished editing the Sample field. If the name actually
+        changed, offer to start a fresh BD calibration for the new sample:
+        Yes → empty the 6 mV values and jump to the BD Calibration tab
+        (the tab's first-open reload prompt is suppressed — it would offer
+        the OLD sample's calibration right back)."""
+        sender = self.sender()
+        new_id = sender.text().strip() if sender is not None else \
+            self.traj_panel.meta.meta_sample.text().strip()
+        if new_id == self._last_sample_id:
+            return
+        old_id = self._last_sample_id
+        self._last_sample_id = new_id
+        if not new_id:
+            return
+        ans = QMessageBox.question(
+            self, "New sample",
+            f"Sample changed to '{new_id}'"
+            + (f" (was '{old_id}')" if old_id else "")
+            + ".\n\nStart a new BD calibration for it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.bd_cal_panel.suppress_prompt(self._active_setup_name)
+        self.bd_cal_panel.load_calibration([0.0] * 6)
+        self.bd_cal_panel.set_status(
+            f"New calibration for sample '{new_id}' — enter the 6 mV values and Save.")
+        self.bottom_tabs.setCurrentWidget(self.bd_cal_panel)
 
     def _sync_sl_meta_to_traj(self):
         if self._meta_syncing: return

@@ -2420,3 +2420,63 @@ created lazily on selection via the new `_get_scanfile(fp)` cache helper, so
 selecting a file in a not-yet-populated folder still works; unreadable files
 are greyed out with their click target removed. Shared column/colour logic
 extracted into `_fill_item_meta`.
+
+---
+
+## 41. Recent Changes (July 2026) — Scanlist Hygiene, Field Re-Apply, LED Readback & New-Sample Popup
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (SAMBA, 56 tests) +
+`claude/scan-calibration-metadata-sharing-scpsvm` (TANGO_Devices). Six-item
+user batch.
+
+### Lab notebook — Scanlist column moved to 8th position (`core/lab_notebook.py`)
+`("Scanlist", "_scanlist_name")` moved from the last column to position 8
+(index 7, after "Notes", before "Incidence"). This is a deliberate one-time
+**reorder** — existing notebooks whose header doesn't match are backed up to
+`.bak` and restarted (the append-only in-place migration only covers appended
+columns). The user planned to delete the old lab book anyway.
+
+### Scanlist txt — aborted scans excluded (`core/scan/workers.py`)
+`ScanlistWorker._run_list` no longer records a scan in `results` (and no longer
+emits `scan_done`) when `self._abort` is set — an aborted scan's partial HDF5
+file stays on disk but never enters the scanlist `.txt`, so the analysis never
+averages a truncated line scan.
+
+### Scanlist txt — no trailing timestamp (`core/scan/workers.py`)
+The `.txt` filename is now just `{list_name}.txt` (the `_HHMMSS` suffix from
+§33 removed as well). Same-day name collisions are handled with a `_2`, `_3`, …
+dedupe loop instead.
+
+### Field setpoint re-applied at scan start (`hardware_panel.py`, `samba.py`)
+After an aborted scanlist zeroes the magnet, the hardware panel's field-write
+spinbox still shows the old setpoint — but starting a new scan didn't re-apply
+it, so scans silently ran at 0 field. New `HardwarePanel.apply_field_setpoint()`
+writes the spinbox value to the magnet current attr (returns `(value, err)`;
+"simulation" / no-device are non-errors). `MainWindow._apply_field_setpoint_for_scan`
+calls it at the start of `_start_scan`, `_start_scanlist` (which uses the
+Scanlist tab's own hw panel) and `_start_calib_timescan`, **skipping FIELD and
+DC_HYST scans** (those own the magnet themselves). Success/failure is logged to
+the status line. Samba_main only (Cryo's AttoDRY field control is separate).
+
+### LED state readback (`TANGO_Devices Lights.py` + `core/calibration.py`)
+- **Lights server**: new read-only bool attributes `led1` / `led2` returning
+  the live Beckhoff output state via AdsBridge2 `ReadBool`. **Needs redeploy.**
+- **SAMBA**: `CalibrationPanel._refresh_led_state()` reads both attrs in a
+  daemon thread and recolours the toggle buttons via `QTimer.singleShot`;
+  called from `set_lights_device()` (setup load / defaults change) and
+  `_read_all()` (Calibration tab opened). Fail-soft: an old server without the
+  attributes, a sim proxy, or an unreachable device just leaves the buttons
+  grey (state unknown) as before.
+
+### New-sample popup → fresh BD calibration (both apps)
+Editing the **Sample** field (Trajectory or Scanlist metadata group) to a new
+non-empty value pops "Sample changed to 'X' — start a new BD calibration?".
+Yes → the BD panel's 6 mV values are cleared to zeros, a status hint is shown,
+and the app jumps to the BD Calibration tab with its first-open reload prompt
+suppressed (new `BDCalibrationPanel.suppress_prompt(setup)` — the prompt would
+offer the old sample's calibration right back). `_last_sample_id` is
+initialised on every config load from the (shared) metadata, and programmatic
+`setText` (config load, meta sync between tabs) doesn't emit
+`editingFinished`, so only genuine user edits trigger the popup. All-zero
+calibrations are already skipped by the HDF5 writers (§37), so a scan started
+before entering the new values falls back to `calibration.txt` in the analysis.
