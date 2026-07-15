@@ -339,67 +339,139 @@ class AutofocusWorker(QThread):
             self.status_msg.emit(f"Moved {self._scan_attr} → {self._focus_pos:.3f}")
             time.sleep(1)
 
-        # Read initial FL
-        try: fl_p.command_inout("Start")
-        except Exception: pass
-        time.sleep(0.5)
-        Int0, e = safe_read(fl_p, "Value")
-        if e or Int0 is None:
-            self.error_msg.emit(f"Cannot read FL: {e}"); return
+        # Sweep-based autofocus: coarse sweep over the full ±range, fine
+        # sweep around the coarse peak, parabolic refinement, then move to
+        # the best Z.  (Replaces the old hill-climb, which always started
+        # downward and — when the intensity change per step stayed below its
+        # noise threshold — never reversed direction, so it just crawled
+        # down and left the stage at the last position instead of the best.)
+        try:
+            best = self._sweep_focus(p, fl_p, pos0_z)
+        finally:
+            # Always restore the scan axis, even on error/abort
+            if pos_scan is not None:
+                safe_write(p, self._scan_attr, pos_scan)
+                time.sleep(0.5)
 
-        self.point_measured.emit(pos0_z, Int0)
-        dInt = Int0 / 50.0
-        dz = self._dz
-        sign = -1
-        delta = 0.0
-        Int_old = Int0
-        best_z = pos0_z; best_fl = Int0
+        if best is None:
+            # Aborted or no valid FL data — return Z to where we started
+            safe_write(p, self._focus_attr, float(pos0_z))
+            self.status_msg.emit("Autofocus stopped — returned to Z₀ "
+                                 f"({pos0_z:.3f} µm)")
+            return
+        best_z, best_fl = best
 
-        for tries in range(self._maxtries):
-            if self._abort:
-                self.status_msg.emit("Autofocus aborted")
-                break
-
-            delta += sign * dz
-            new_z = pos0_z + delta
-
-            if abs(delta) > self._d_zmax:
-                safe_write(p, self._focus_attr, pos0_z)
-                self.status_msg.emit(f"Out of range (Δz={delta:.3f}), returning to Z₀")
-                break
-
-            safe_write(p, self._focus_attr, new_z)
-            time.sleep(0.75)
-
-            try: fl_p.command_inout("Start")
-            except Exception: pass
-            time.sleep(0.3)
-            Int_new, e = safe_read(fl_p, "Value")
-            if e or Int_new is None:
-                continue
-
-            self.point_measured.emit(new_z, Int_new)
-
-            if Int_new > best_fl:
-                best_z = new_z; best_fl = Int_new
-
-            deltaI = Int_new - Int_old
-            if deltaI > dInt:
-                pass  # keep direction
-            elif deltaI < -dInt:
-                sign *= -1
-            else:
-                dz /= 1.5; dInt /= 1.5
-
-            Int_old = Int_new
-
-        # Move scan axis back to original position
-        if pos_scan is not None:
-            safe_write(p, self._scan_attr, pos_scan)
-            time.sleep(0.5)
+        # Move to the found focus (the old code never did this final move)
+        safe_write(p, self._focus_attr, float(best_z))
+        time.sleep(self._MOVE_SETTLE_S)
+        fl_conf, e = self._measure_fl(fl_p)
+        if e is None and fl_conf is not None:
+            self.point_measured.emit(best_z, fl_conf)
+            best_fl = fl_conf
 
         self.focus_found.emit(best_z, best_fl)
-        self.status_msg.emit(f"Focus found at Z = {best_z:.3f} µm  (FL = {best_fl:.4g})")
+        self.status_msg.emit(f"Focus found at Z = {best_z:.3f} µm  "
+                             f"(FL = {best_fl:.4g}) — stage moved there")
+
+    _MOVE_SETTLE_S = 0.5   # settle after each Z step
+    _FL_TIMEOUT_S  = 2.0   # max wait for the FL device to finish averaging
+
+    def _measure_fl(self, fl_p):
+        """Trigger one FL acquisition and read the averaged Value.
+
+        Waits for the device to leave RUNNING (BeckhoffAverage handshake)
+        instead of a fixed sleep; falls back gracefully for devices without
+        a Start command or state feedback.  Returns (value, err).
+        """
+        try: fl_p.command_inout("Start")
+        except Exception: pass
+        t0 = time.time()
+        time.sleep(0.05)
+        while time.time() - t0 < self._FL_TIMEOUT_S:
+            try:
+                if str(fl_p.state()) != "RUNNING":
+                    break
+            except Exception:
+                break
+            time.sleep(0.02)
+        time.sleep(0.05)
+        return safe_read(fl_p, "Value")
+
+    def _sweep_z(self, p, fl_p, z_values):
+        """Move through z_values in order, measuring FL at each.
+
+        Emits point_measured per point; skips failed reads.  Returns a list
+        of (z, fl) or None if aborted.
+        """
+        out = []
+        for z in z_values:
+            if self._abort:
+                return None
+            safe_write(p, self._focus_attr, float(z))
+            time.sleep(self._MOVE_SETTLE_S)
+            fl, e = self._measure_fl(fl_p)
+            if e or fl is None:
+                continue
+            self.point_measured.emit(float(z), float(fl))
+            out.append((float(z), float(fl)))
+        return out
+
+    def _sweep_focus(self, p, fl_p, z0):
+        """Coarse sweep ± d_zmax → fine sweep around the peak → parabola.
+
+        Returns (best_z, best_fl) or None on abort / no valid data.
+        The coarse sweep is capped at `maxtries` points — when the full
+        range needs more, the step widens and the fine sweep recovers the
+        resolution around the peak.
+        """
+        lo, hi = z0 - self._d_zmax, z0 + self._d_zmax
+
+        n = int(round(2 * self._d_zmax / max(self._dz, 1e-9))) + 1
+        n = max(5, min(n, max(5, self._maxtries)))
+        coarse = np.linspace(lo, hi, n)
+        step = coarse[1] - coarse[0]
+
+        self.status_msg.emit(f"Coarse sweep: {n} pts, "
+                             f"{lo:.3f} → {hi:.3f} µm (step {step:.3f})")
+        pts = self._sweep_z(p, fl_p, coarse)
+        if pts is None:
+            return None
+        if not pts:
+            self.error_msg.emit("No valid FL readings during coarse sweep")
+            return None
+        best_z, best_fl = max(pts, key=lambda t: t[1])
+
+        # Fine sweep: ± one coarse step around the peak (clamped to range)
+        flo = max(lo, best_z - step)
+        fhi = min(hi, best_z + step)
+        fine = np.linspace(flo, fhi, 9)
+        self.status_msg.emit(f"Fine sweep around {best_z:.3f} µm "
+                             f"({flo:.3f} → {fhi:.3f})")
+        fpts = self._sweep_z(p, fl_p, fine)
+        if fpts is None:
+            return None
+        if fpts:
+            fz  = np.array([t[0] for t in fpts])
+            ffl = np.array([t[1] for t in fpts])
+            i = int(np.argmax(ffl))
+            if ffl[i] > best_fl:
+                best_z, best_fl = float(fz[i]), float(ffl[i])
+            # Parabolic vertex through the max and its neighbours for
+            # sub-step accuracy (only when curvature is a real maximum)
+            if 0 < i < len(fz) - 1:
+                x1, x2, x3 = fz[i - 1], fz[i], fz[i + 1]
+                y1, y2, y3 = ffl[i - 1], ffl[i], ffl[i + 1]
+                denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
+                if abs(denom) > 1e-12:
+                    a = (x3 * (y2 - y1) + x2 * (y1 - y3)
+                         + x1 * (y3 - y2)) / denom
+                    b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1)
+                         + x1 * x1 * (y2 - y3)) / denom
+                    if a < 0:
+                        zv = -b / (2 * a)
+                        if x1 <= zv <= x3:
+                            best_z = float(zv)
+        return best_z, best_fl
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,9 +594,14 @@ class CalibrationPanel(QWidget):
         self.dzmax_spin.setValue(2.0); self.dzmax_spin.setSuffix(" µm")
         af_l.addWidget(self.dzmax_spin, 3, 1)
 
-        af_l.addWidget(QLabel("Max tries:"), 4, 0)
+        af_l.addWidget(QLabel("Max points:"), 4, 0)
         self.tries_spin = QSpinBox()
-        self.tries_spin.setRange(1, 200); self.tries_spin.setValue(20)
+        self.tries_spin.setRange(5, 200); self.tries_spin.setValue(20)
+        self.tries_spin.setToolTip(
+            "Point budget for the coarse sweep over ±max range.\n"
+            "If the range needs more points than this at the given step,\n"
+            "the coarse step widens — the fine sweep around the peak\n"
+            "recovers the resolution.")
         af_l.addWidget(self.tries_spin, 4, 1)
 
         af_btn_row = QHBoxLayout()

@@ -2533,3 +2533,47 @@ the failing point and that Resume retries the same point.
   `trigger_devs`, every attempt returns ok=False + NaN).
 - New `test_state_poll_failure_fails_point` (trigger OK, `state()` raising →
   ok=False + NaN). Suite: 57 tests.
+
+---
+
+## 43. Recent Changes (July 2026) — Autofocus Rework (Sweep Instead of Hill-Climb)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: autofocus
+"only sweeps down the z position" and behaves erratically.
+
+### Root causes (old `AutofocusWorker` hill-climb, `core/calibration.py`)
+1. The climb always started downward (`sign = -1`) and only reversed on an
+   intensity **drop sharper than `Int0/50`**. On a flat or noisy focus curve
+   the change never crossed that threshold, so the branch that shrinks the
+   step fired every time and the sign **never flipped** — the stage just
+   crawled downward with ever-smaller steps.
+2. The stage was **never moved to the best Z found** — the loop ended and
+   left the stage at the last (usually worst) position; `focus_found` only
+   updated the plot and the jog display.
+3. Each step compared against the *previous* point, not the best, making the
+   walk noise-driven.
+
+### New algorithm (same UI knobs)
+1. **Coarse sweep**: Z₀ ± `Max range`, step `dz`, capped at `Max points`
+   (label renamed from "Max tries"; if the range needs more points the
+   coarse step widens — the fine sweep restores resolution). Single-direction
+   traversal (low → high) minimises backlash.
+2. **Fine sweep**: 9 points over ± one coarse step around the coarse peak
+   (clamped to the range).
+3. **Parabolic vertex** through the fine maximum and its neighbours for
+   sub-step accuracy (only used when curvature is a true maximum and the
+   vertex lies between the neighbours).
+4. **Final move to the found focus** + one confirmation measurement (emitted
+   to the plot; its value reported as the focus FL).
+- `_measure_fl()` waits for the FL device to leave RUNNING (BeckhoffAverage
+  `Start` handshake, 2 s timeout) instead of a fixed 0.3 s sleep; falls back
+  cleanly for devices without state feedback.
+- Abort or an all-failed sweep returns Z to Z₀ and always restores the scan
+  axis (`try/finally`).
+
+### Verification
+Headless simulation (Qt/matplotlib/hardware stubbed, synthetic Gaussian
+focus curve + noise): finds the true focus starting above/below/near it
+(±0.02 µm quiet, ±0.06 µm at 2 % rms noise), point budget respected, stage
+moved to the result, abort restores Z₀ + scan axis. Not committed (needs the
+stub scaffolding); `python test_runner.py` (57) unaffected.
