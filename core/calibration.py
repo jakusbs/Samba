@@ -480,12 +480,19 @@ class AutofocusWorker(QThread):
 class CalibrationPanel(QWidget):
     """Calibration tab: 1D focus plot, digit-jog stage controls, autofocus."""
 
+    # Cross-thread GUI marshal: background reader threads emit a callable,
+    # the queued connection runs it on the GUI thread.  (More reliable than
+    # QTimer.singleShot(0, …) from a plain Python thread, whose delivery is
+    # Qt/PyQt-version dependent.)
+    _gui_apply = pyqtSignal(object)
+
     def __init__(self, setup_getter, config_getter=None, parent=None):
         super().__init__(parent)
         self._setup_getter  = setup_getter
         self._config_getter = config_getter
         self._af_worker = None
         self._stage_cfg: dict = {}   # populated by configure_stage()
+        self._gui_apply.connect(lambda fn: fn())
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(6)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -705,32 +712,44 @@ class CalibrationPanel(QWidget):
         """Read the actual LED states from the Lights device (led1/led2 attrs)
         in a background thread and recolour the buttons. Servers predating the
         read-back attributes (or unreachable devices) leave the state unknown
-        (grey) — fully fail-soft."""
+        (grey); the reason is shown in the status line so a grey pair is
+        diagnosable instead of silent."""
         dev = self._lights_dev
         if not dev:
             return
 
         def _do():
             states = {}
+            fail = ""
             try:
                 p, err = fresh_proxy(dev)
                 if err or is_sim_proxy(p):
-                    return
-                for led, attr in ((1, "led1"), (2, "led2")):
-                    v, e = safe_read(p, attr)
-                    if e is None and v is not None:
-                        states[led] = bool(v)
-            except Exception:
-                return
-            if not states:
-                return
+                    fail = err or "simulation proxy"
+                else:
+                    for led, attr in ((1, "led1"), (2, "led2")):
+                        v, e = safe_read(p, attr)
+                        if not e and v is not None:
+                            states[led] = bool(v)
+                        elif not fail:
+                            fail = e or f"{attr} returned nothing"
+            except Exception as exc:
+                fail = str(exc)
 
             def _apply():
                 for led, on in states.items():
                     self._led_state[led] = on
                     self._style_led(led)
+                tip = ""
+                if not states and fail:
+                    tip = (f"State read failed: {str(fail)[:120]}\n"
+                           "(old Lights server without led1/led2, or device "
+                           "unreachable)")
+                    self._set_pos_err(
+                        f"LED state unavailable ({str(fail)[:60]})")
+                for on_btn, off_btn in self._led_btns.values():
+                    on_btn.setToolTip(tip); off_btn.setToolTip(tip)
 
-            QTimer.singleShot(0, _apply)
+            self._gui_apply.emit(_apply)
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -794,7 +813,7 @@ class CalibrationPanel(QWidget):
                     w.set_value(val); w.update_readback(val)
                 self._set_pos_ok("Read: " + "  ".join(results))
 
-            QTimer.singleShot(0, _apply)
+            self._gui_apply.emit(_apply)
 
         threading.Thread(target=_do, daemon=True).start()
 

@@ -2577,3 +2577,28 @@ focus curve + noise): finds the true focus starting above/below/near it
 (±0.02 µm quiet, ±0.06 µm at 2 % rms noise), point budget respected, stage
 moved to the result, abort restores Z₀ + scan axis. Not committed (needs the
 stub scaffolding); `python test_runner.py` (57) unaffected.
+
+---
+
+## 44. Recent Changes (July 2026) — LED Readback Delivery & Diagnosability
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: Lights
+server redeployed with working led1/led2 attributes, but the Calibration-tab
+buttons still start grey.
+
+### `core/calibration.py`
+- **Guaranteed GUI delivery**: `CalibrationPanel` gains a `_gui_apply`
+  pyqtSignal(object) connected to `lambda fn: fn()`; background reader
+  threads emit their apply-callable through it. Replaces
+  `QTimer.singleShot(0, …)` in `_refresh_led_state` **and** `_read_all` —
+  singleShot from a plain Python thread has Qt/PyQt-version-dependent
+  delivery; a queued signal is delivered to the GUI thread unconditionally.
+- **Grey is now diagnosable**: when the led1/led2 read fails, the reason is
+  shown in the status line ("LED state unavailable (…)") and set as the
+  LED buttons' tooltip ("State read failed: … old Lights server without
+  led1/led2, or device unreachable"). Success clears the tooltip. Verified
+  headlessly (stubbed Qt/hardware): live server → correct colors;
+  old server → grey + visible reason.
+- Note: the SAMBA side of the readback shipped in §41 commit `97ebf12` —
+  a lab installation must be pulled to at least that commit (plus this one)
+  for the buttons to reflect the device state.
