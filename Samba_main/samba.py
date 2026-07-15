@@ -798,6 +798,7 @@ class MainWindow(QMainWindow):
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         # When setup defaults are edited, save them and update trajectory labels
         self.setup_defaults.defaults_changed.connect(self._on_defaults_changed)
+        self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
         # When scan mode changes, swap right panel between normal/DC
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
 
@@ -1011,6 +1012,7 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(setup.get("lights_device", ""))
+        self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
         self.calib_panel.configure_stage(
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
@@ -1248,6 +1250,12 @@ class MainWindow(QMainWindow):
         self.traj_panel.populate_monitor_combo(registry)
         self.setup_defaults.set_registry(registry)
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _on_calib_timescan_changed(self):
+        """Persist the calibration tab's own time-scan settings per setup."""
+        setup = self._active_setup()
+        setup["calib_timescan"] = self.calib_panel.get_timescan_settings()
+        save_setup(self._active_setup_name, setup)
 
     def _on_defaults_changed(self):
         """Called when Setup Defaults are edited — save to setup dict immediately."""
@@ -1628,6 +1636,13 @@ class MainWindow(QMainWindow):
         cfg["scan_x"] = False
         cfg["scan_y"] = False
 
+        # The calibration tab has its own hidden config: points + integration
+        # time come from its Time-scan settings group, not the scan config
+        # selected in the left panel.
+        ts = self.calib_panel.get_timescan_settings()
+        cfg["act1_npts"]        = int(ts["npts"])
+        cfg["integration_time"] = float(ts["int_time"])
+
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
             QMessageBox.warning(self, "No sensors",
@@ -1637,11 +1652,16 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg
         self._calib_timescan = True
 
-        # For the calibration plot, only show sensors that aren't hidden
-        plot_sensors = [s for s in active
-                        if s.get("plot_visible", True)
-                        and s.get("y_axis", s.get("plot_axis", "Y1")) not in ("hidden", "—", "X")]
-        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors if plot_sensors else active)
+        # Plot every enabled sensor; hidden ones start unchecked but can be
+        # revealed live via the checkboxes above the calibration plot.
+        plot_sensors = [dict(s, visible=(
+                            s.get("plot_visible", True)
+                            and s.get("y_axis", s.get("plot_axis", "Y1"))
+                                not in ("hidden", "—", "X")))
+                        for s in active]
+        if not any(s["visible"] for s in plot_sensors):
+            for s in plot_sensors: s["visible"] = True
+        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors)
 
         # Also set up the main live display for the Log tab
         self._setup_live_display(cfg, active)

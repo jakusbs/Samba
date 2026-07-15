@@ -206,11 +206,38 @@ class Live1DWidget(QWidget):
                 sp.set_edgecolor("#3a3a5c")
         self.ax1.yaxis.label.set_color("#89b4fa")
         self.ax2.yaxis.label.set_color("#f38ba8")
+        # Y2 belongs on the right-hand axis — cla() can reset a twinx back
+        # to left-side ticks/label, which then overlap Y1's.
+        self.ax2.yaxis.set_label_position("right")
+        self.ax2.yaxis.tick_right()
+        self.ax1.yaxis.set_label_position("left")
+        self.ax1.yaxis.tick_left()
 
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
         self._font_pt = int(pt)
         self._apply_font()
+        self._layout()
+
+    def _layout(self):
+        """tight_layout (keeps axis titles clear of the tick numbers), then
+        reserve a strip above the axes for the legends so they never sit on
+        the data.  Legend heights are measured from a real draw, so the
+        reserved space follows the current font size and row count."""
+        try:
+            self.fig.tight_layout()
+            legs = [ax.get_legend() for ax in (self.ax1, self.ax2)]
+            legs = [l for l in legs if l is not None]
+            if legs:
+                self.canvas.draw()          # renderer needed for extents
+                renderer = self.canvas.get_renderer()
+                fig_h = float(self.fig.bbox.height) or 1.0
+                h = max(l.get_window_extent(renderer).height
+                        for l in legs) / fig_h
+                top = self.fig.subplotpars.top
+                self.fig.subplots_adjust(top=max(0.4, top - h - 0.01))
+        except Exception:
+            pass
         self.canvas.draw_idle()
 
     def _apply_font(self):
@@ -300,8 +327,8 @@ class Live1DWidget(QWidget):
         self.ax1.set_xlabel(x_lbl or "", color="#aaaacc", fontsize=self._font_pt)
 
         li = ri = 0
-        left_units: set = set()
-        right_units: set = set()
+        left_meta:  list = []   # (label, unit, curve color) per Y1 sensor
+        right_meta: list = []
 
         for s in sensors_meta:
             lbl  = s["label"]; axis = s.get("axis", "Y1"); unit = s.get("unit", "")
@@ -309,16 +336,28 @@ class Live1DWidget(QWidget):
                 continue
             if axis == "Y2":
                 c  = RIGHT_COLORS[ri % len(RIGHT_COLORS)]; ri += 1; ax = self.ax2
-                if unit: right_units.add(unit)
+                right_meta.append((lbl, unit, c))
             else:
                 c  = LEFT_COLORS[li % len(LEFT_COLORS)];  li += 1; ax = self.ax1
-                if unit: left_units.add(unit)
+                left_meta.append((lbl, unit, c))
             line, = ax.plot([], [], color=c, linewidth=1.8,
                             label=lbl, marker=".", markersize=4)
             self._lines[lbl] = (line, ax)
 
-        if left_units:  self.ax1.set_ylabel(", ".join(sorted(left_units)), color="#89b4fa", fontsize=self._font_pt)
-        if right_units: self.ax2.set_ylabel(", ".join(sorted(right_units)), color="#f38ba8", fontsize=self._font_pt)
+        # Axis titles carry the sensor name(s) + unit, not just the unit.
+        # A single sensor on an axis colors the title like its curve; with
+        # several the title keeps the axis color and the legend maps
+        # name → color.
+        def _ylabel(entries):
+            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
+        if left_meta:
+            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
+            self.ax1.set_ylabel(_ylabel(left_meta), color=col,
+                                fontsize=self._font_pt)
+        if right_meta:
+            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
+            self.ax2.set_ylabel(_ylabel(right_meta), color=col,
+                                fontsize=self._font_pt)
 
         self._fill_lines(x_arr)
 
@@ -337,10 +376,17 @@ class Live1DWidget(QWidget):
                     ax.set_ylim(ylo - pad, yhi + pad)
             # Legend appears as soon as the axis has any labelled line — even
             # before the first point arrives — so it shows from scan start
-            # without needing a manual refresh.
+            # without needing a manual refresh.  Anchored ABOVE the axes
+            # (Y1 left, Y2 right) so it can never sit on the data; _layout()
+            # reserves the vertical strip it needs.
             if labelled:
+                if ax is self.ax1:
+                    loc, anchor = "lower left",  (0.0, 1.005)
+                else:
+                    loc, anchor = "lower right", (1.0, 1.005)
                 ax.legend(
-                    loc="upper left" if ax == self.ax1 else "upper right",
+                    loc=loc, bbox_to_anchor=anchor, borderaxespad=0.0,
+                    ncol=min(len(labelled), 3),
                     fontsize=self._font_pt, facecolor="#313244",
                     edgecolor="#45475a", labelcolor="#cdd6f4")
         if all_visible:
@@ -351,7 +397,7 @@ class Live1DWidget(QWidget):
                 pad = max(abs(xhi - xlo) * 0.02, 1e-12)
                 self.ax1.set_xlim(xlo - pad, xhi + pad)
 
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self._layout()
 
     def _fill_lines(self, x_arr: Optional[np.ndarray]):
         for lbl, (line, _) in self._lines.items():

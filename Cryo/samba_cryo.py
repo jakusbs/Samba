@@ -955,6 +955,7 @@ class CryoMainWindow(QMainWindow):
         self.right_panel.plot_config_changed.connect(self._on_plot_config_changed)
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         self.defaults_panel.defaults_changed.connect(self._on_defaults_changed)
+        self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
         self._geo_btn_grp.buttonClicked.connect(self._on_geometry_changed)
         self._piezo_btn_grp.buttonClicked.connect(self._on_stage_type_changed)
@@ -1295,6 +1296,12 @@ class CryoMainWindow(QMainWindow):
         self.defaults_panel.set_registry(registry)
         self.status_lbl.setText("Device registry saved ✓")
 
+    def _on_calib_timescan_changed(self):
+        """Persist the calibration tab's own time-scan settings per setup."""
+        setup = self._active_setup()
+        setup["calib_timescan"] = self.calib_panel.get_timescan_settings()
+        save_setup(self._active_setup_name, setup)
+
     def _on_defaults_changed(self):
         """Called when Setup Defaults panel values change — persist and apply."""
         vals = self.defaults_panel.get_values()
@@ -1345,6 +1352,8 @@ class CryoMainWindow(QMainWindow):
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
             self.calib_panel.set_fl_device(fl_dev)
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         # ANC300 device — same device regardless of geometry, take from any piezo block
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
@@ -1745,6 +1754,13 @@ class CryoMainWindow(QMainWindow):
         cfg["scan_type"] = "SPATIAL"
         cfg["scan_x"] = False; cfg["scan_y"] = False
 
+        # The calibration tab has its own hidden config: points + integration
+        # time come from its Time-scan settings group, not the scan config
+        # selected in the left panel.
+        ts = self.calib_panel.get_timescan_settings()
+        cfg["act1_npts"]        = int(ts["npts"])
+        cfg["integration_time"] = float(ts["int_time"])
+
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
             QMessageBox.warning(self, "No sensors", "Enable at least one sensor."); return
@@ -1753,10 +1769,16 @@ class CryoMainWindow(QMainWindow):
         self._current_scan_cfg = cfg
         self._calib_timescan = True
 
-        plot_sensors = [s for s in active
-                        if s.get("plot_visible", True)
-                        and s.get("y_axis", s.get("plot_axis", "Y1")) not in ("hidden", "—", "X")]
-        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors if plot_sensors else active)
+        # Plot every enabled sensor; hidden ones start unchecked but can be
+        # revealed live via the checkboxes above the calibration plot.
+        plot_sensors = [dict(s, visible=(
+                            s.get("plot_visible", True)
+                            and s.get("y_axis", s.get("plot_axis", "Y1"))
+                                not in ("hidden", "—", "X")))
+                        for s in active]
+        if not any(s["visible"] for s in plot_sensors):
+            for s in plot_sensors: s["visible"] = True
+        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors)
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
 

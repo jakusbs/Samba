@@ -19,9 +19,11 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QSplitter,
-    QSizePolicy, QDoubleSpinBox, QSpinBox
+    QSizePolicy, QDoubleSpinBox, QSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+
+from plot_interact import ClickReadout, make_fontsize_spin
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
 
@@ -161,8 +163,32 @@ class FocusPlotWidget(QWidget):
                                    QSizePolicy.Policy.Expanding)
         self.bar = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        self._font_pt = 9
+
+        # Toolbar row: nav toolbar + text-size spinbox (matches Live1DWidget)
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
+
+        # Sensor visibility row (populated per time scan, hidden otherwise):
+        # one colored checkbox per plotted sensor — toggles the curve live.
+        self._vis_w = QWidget(); self._vis_w.setVisible(False)
+        self._vis_lay = QHBoxLayout(self._vis_w)
+        self._vis_lay.setContentsMargins(4, 0, 4, 0); self._vis_lay.setSpacing(10)
+        _sl = QLabel("Show:"); _sl.setStyleSheet("color:#a6adc8;font-size:10px;")
+        self._vis_lay.addWidget(_sl)
+        self._vis_lay.addStretch(1)
+
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(
+            self.canvas, lambda: [self.ax], lambda: self._font_pt)
+
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(self.bar)
+        lay.addLayout(top)
+        lay.addWidget(self._vis_w)
         lay.addWidget(self.canvas, stretch=1)
         self._z_data = []; self._fl_data = []
         self._line = None; self._best_dot = None
@@ -172,11 +198,34 @@ class FocusPlotWidget(QWidget):
 
     def _style(self):
         self.ax.set_facecolor("#12121f")
-        self.ax.tick_params(colors="#aaaacc", labelsize=8)
+        self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values(): sp.set_edgecolor("#3a3a5c")
-        self.ax.set_xlabel("Z position (µm)", color="#aaaacc", fontsize=9)
-        self.ax.set_ylabel("Focus signal (V)", color="#aaaacc", fontsize=9)
-        self.ax.set_title("Autofocus", color="#6c7086", fontsize=9)
+        self.ax.set_xlabel("Z position (µm)", color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_ylabel("Focus signal (V)", color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_title("Autofocus", color="#6c7086", fontsize=self._font_pt)
+
+    def _on_fontsize(self, pt: int):
+        """User picked a new on-plot text size — restyle and redraw live."""
+        self._font_pt = int(pt)
+        self.ax.tick_params(labelsize=self._font_pt)
+        self.ax.xaxis.label.set_fontsize(self._font_pt)
+        self.ax.yaxis.label.set_fontsize(self._font_pt)
+        self.ax.title.set_fontsize(self._font_pt)
+        leg = self.ax.get_legend()
+        if leg is not None:
+            for t in leg.get_texts():
+                t.set_fontsize(self._font_pt)
+        try: self.fig.tight_layout()
+        except Exception: pass
+        self.canvas.draw_idle()
+
+    def _clear_vis_boxes(self):
+        """Remove the per-sensor visibility checkboxes (keep label + stretch)."""
+        while self._vis_lay.count() > 2:
+            item = self._vis_lay.takeAt(1)
+            w = item.widget()
+            if w is not None: w.deleteLater()
+        self._vis_w.setVisible(False)
 
     def clear(self):
         self._z_data = []; self._fl_data = []
@@ -185,6 +234,9 @@ class FocusPlotWidget(QWidget):
         # Also clear time scan state
         self._ts_xd = None; self._ts_yd = {}; self._ts_lines = {}
         self._ts_dirty = False
+        self._clear_vis_boxes()
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self.canvas.draw_idle()
 
     def add_point(self, z: float, fl: float):
@@ -211,27 +263,40 @@ class FocusPlotWidget(QWidget):
     _TS_COLORS = ['#89b4fa','#74c7ec','#a6e3a1','#f38ba8','#fab387','#cba6f7']
 
     def setup_timescan(self, n_pts: int, sensors: list):
-        """Prepare the plot for a time scan: point index on X, sensor values on Y."""
+        """Prepare the plot for a time scan: point index on X, sensor values on Y.
+
+        Every sensor gets a line + a colored visibility checkbox above the
+        plot, so what is displayed can be changed while the scan runs.  A
+        sensor dict may carry "visible": False to start hidden (data is
+        still collected — checking the box later reveals it).
+        """
         self.ax.cla()
         self.ax.set_facecolor("#12121f")
-        self.ax.tick_params(colors="#aaaacc", labelsize=8)
+        self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values(): sp.set_edgecolor("#3a3a5c")
-        self.ax.set_xlabel("Point", color="#aaaacc", fontsize=9)
-        self.ax.set_ylabel("Signal (V)", color="#aaaacc", fontsize=9)
-        self.ax.set_title("Time scan", color="#6c7086", fontsize=9)
+        self.ax.set_xlabel("Point", color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_ylabel("Signal (V)", color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_title("Time scan", color="#6c7086", fontsize=self._font_pt)
         self._line = None; self._best_dot = None
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self._ts_xd = np.full(n_pts, np.nan)
         self._ts_yd = {}; self._ts_lines = {}
+        self._clear_vis_boxes()
         for i, s in enumerate(sensors):
             lbl = s["label"]
             c = self._TS_COLORS[i % len(self._TS_COLORS)]
             line, = self.ax.plot([], [], color=c, linewidth=1.5,
                                   marker=".", markersize=4, label=lbl)
+            line.set_visible(bool(s.get("visible", True)))
             self._ts_lines[lbl] = line
             self._ts_yd[lbl] = np.full(n_pts, np.nan)
-        if self._ts_lines:
-            self.ax.legend(fontsize=7, facecolor="#313244",
-                           edgecolor="#45475a", labelcolor="#cdd6f4", loc="best")
+            cb = QCheckBox(lbl); cb.setChecked(line.get_visible())
+            cb.setStyleSheet(f"QCheckBox{{color:{c};font-size:10px;spacing:3px;}}")
+            cb.toggled.connect(lambda on, l=lbl: self._set_line_visible(l, on))
+            self._vis_lay.insertWidget(self._vis_lay.count() - 1, cb)
+        self._vis_w.setVisible(bool(sensors))
+        self._rebuild_ts_legend()
         self.ax.axhline(0, color="#45475a", linewidth=0.6, linestyle="--")
         self.fig.tight_layout(); self.canvas.draw_idle()
         self._ts_dirty = False
@@ -241,6 +306,25 @@ class FocusPlotWidget(QWidget):
             self._ts_timer.setInterval(80)
             self._ts_timer.timeout.connect(self._ts_throttled_draw)
             self._ts_timer.start()
+
+    def _rebuild_ts_legend(self):
+        """Legend shows only the currently visible curves."""
+        handles = [l for l in self._ts_lines.values() if l.get_visible()]
+        leg = self.ax.get_legend()
+        if handles:
+            self.ax.legend(handles=handles, fontsize=self._font_pt,
+                           facecolor="#313244", edgecolor="#45475a",
+                           labelcolor="#cdd6f4", loc="best")
+        elif leg is not None:
+            leg.remove()
+
+    def _set_line_visible(self, lbl: str, on: bool):
+        line = self._ts_lines.get(lbl)
+        if line is None: return
+        line.set_visible(bool(on))
+        self._rebuild_ts_legend()
+        self._ts_dirty = True
+        self.canvas.draw_idle()
 
     def update_timescan_point(self, ix: int, x_val: float, vals: dict):
         """Update one point in the time scan plot."""
@@ -261,8 +345,10 @@ class FocusPlotWidget(QWidget):
             if y is None: continue
             m = np.isfinite(x) & np.isfinite(y)
             if m.any(): line.set_data(x[m], y[m])
-        # Manual limits
-        all_lines = [l for l in self._ts_lines.values() if len(l.get_xdata()) > 0]
+        # Manual limits — visible curves only, so hiding a large signal
+        # rescales the plot onto the ones still shown
+        all_lines = [l for l in self._ts_lines.values()
+                     if l.get_visible() and len(l.get_xdata()) > 0]
         if all_lines:
             ax = np.concatenate([l.get_xdata() for l in all_lines])
             ay = np.concatenate([l.get_ydata() for l in all_lines])
@@ -485,6 +571,8 @@ class CalibrationPanel(QWidget):
     # QTimer.singleShot(0, …) from a plain Python thread, whose delivery is
     # Qt/PyQt-version dependent.)
     _gui_apply = pyqtSignal(object)
+    # Emitted when the tab's own time-scan settings are edited (persist them)
+    timescan_changed = pyqtSignal()
 
     def __init__(self, setup_getter, config_getter=None, parent=None):
         super().__init__(parent)
@@ -627,10 +715,47 @@ class CalibrationPanel(QWidget):
         af_l.addWidget(self._af_status, 6, 0, 1, 3)
 
         rl.addWidget(af_grp)
+
+        # ── Time scan settings (the calibration tab's own hidden config) ─────
+        # Used by the ▶ Start time scan instead of the scan config selected in
+        # the left panel; persisted per setup, never shown in the config list.
+        ts_grp = QGroupBox("Time scan (this tab's own settings)")
+        ts_l = QGridLayout(ts_grp); ts_l.setSpacing(4)
+        ts_l.addWidget(QLabel("Points:"), 0, 0)
+        self.ts_npts_spin = QSpinBox()
+        self.ts_npts_spin.setRange(2, 1_000_000); self.ts_npts_spin.setValue(300)
+        ts_l.addWidget(self.ts_npts_spin, 0, 1)
+        ts_l.addWidget(QLabel("Int time:"), 0, 2)
+        self.ts_int_spin = QDoubleSpinBox()
+        self.ts_int_spin.setRange(0.001, 30.0); self.ts_int_spin.setDecimals(3)
+        self.ts_int_spin.setValue(0.1); self.ts_int_spin.setSuffix(" s")
+        ts_l.addWidget(self.ts_int_spin, 0, 3)
+        ts_grp.setToolTip(
+            "Parameters for the calibration time scan (▶ Start while this tab\n"
+            "is open). Independent of the scan config selected on the left —\n"
+            "saved per setup as a hidden calibration config.")
+        self.ts_npts_spin.valueChanged.connect(lambda _: self.timescan_changed.emit())
+        self.ts_int_spin.valueChanged.connect(lambda _: self.timescan_changed.emit())
+        rl.addWidget(ts_grp)
+
         splitter.addWidget(right)
 
         splitter.setSizes([400, 500]); splitter.setStretchFactor(0, 1)
         root.addWidget(splitter)
+
+    # ── Time-scan settings (hidden calibration config) ────────────────────────
+    def get_timescan_settings(self) -> dict:
+        return {"npts":     int(self.ts_npts_spin.value()),
+                "int_time": float(self.ts_int_spin.value())}
+
+    def load_timescan_settings(self, d: dict):
+        """Restore the per-setup time-scan settings without re-emitting."""
+        for spin, key, default in ((self.ts_npts_spin, "npts", 300),
+                                   (self.ts_int_spin, "int_time", 0.1)):
+            spin.blockSignals(True)
+            try:    spin.setValue(type(default)((d or {}).get(key, default)))
+            except Exception: spin.setValue(default)
+            finally: spin.blockSignals(False)
 
     # ── Axis info from config ─────────────────────────────────────────────────
     def _get_axis_info(self) -> dict:

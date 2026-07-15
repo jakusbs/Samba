@@ -2602,3 +2602,55 @@ buttons still start grey.
 - Note: the SAMBA side of the readback shipped in §41 commit `97ebf12` —
   a lab installation must be pulled to at least that commit (plus this one)
   for the buttons to reflect the device state.
+
+---
+
+## 45. Recent Changes (July 2026) — Calibration-Tab Config & Plot, 1D Plot Layout
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). Four-item user batch.
+
+### Calibration tab — its own hidden time-scan config (`core/calibration.py` + both apps)
+The calibration time scan (▶ Start while the Calibration tab is open) used the
+scan config selected in the left panel (its `act1_npts` / integration time).
+Now the tab carries its **own** settings — a "Time scan (this tab's own
+settings)" group with Points + Int time spinboxes:
+- `_start_calib_timescan` (both apps) overrides `act1_npts` and
+  `integration_time` from `calib_panel.get_timescan_settings()`.
+- Persisted per setup under `setup["calib_timescan"]` (a hidden config —
+  never in the config list): `timescan_changed` →
+  `_on_calib_timescan_changed` saves; `load_timescan_settings` restores on
+  setup/config load (blockSignals). Old setups default to 300 pts / 0.1 s.
+- Sensors still come from the right panel (needed for multi-sensor plotting).
+
+### Calibration plot — text size + click readout (`FocusPlotWidget`)
+The §33 plot-interaction upgrade never reached the calibration plot. Its
+toolbar row now has the same "Text:" spinbox (ticks, axis labels, title,
+legend) and the left-click nearest-point readout.
+
+### Calibration plot — all sensors, switchable live
+`setup_timescan` now receives **every enabled sensor** (each dict carries
+`visible` from its right-panel plot visibility; if all would start hidden,
+all start shown). A "Show:" row of per-sensor colored checkboxes above the
+plot toggles curves **while the scan runs**; hidden sensors still collect
+data, the legend rebuilds from visible curves only, and autoscale ignores
+hidden curves (hiding a large signal rescales onto the rest).
+
+### Live 1D plot — legend & axis-title layout (`core/plot_widgets.py`)
+- **Legends can no longer sit on the data**: anchored *above* the axes
+  (Y1's above-left, Y2's above-right, `ncol≤3`). New `_layout()` runs
+  `tight_layout`, then measures the real legend heights from a draw and
+  `subplots_adjust(top=…)` to reserve exactly the strip they need — correct
+  at any font size. Called from `apply_config` and on font-size change
+  (which previously never re-solved the layout → axis titles overlapping
+  tick numbers at larger fonts).
+- **Y-axis titles show sensor name + unit** (e.g. "ZI2 x1 (µV)"), not just
+  the unit. One sensor on an axis → title takes the **curve's color**;
+  several → joined "name (unit)" list in the axis color (legend maps
+  name → color). Rebuilt on every `apply_config`, so it follows what is
+  plotted.
+- **Y2 title/ticks forced to the right side** (`set_label_position("right")`
+  + `tick_right()` in `_style_axes`) — `cla()` on a twinx can reset them to
+  the left where they collide with Y1's.
+- Verified with a real Agg render (mpl 3.11) across 9/14/20 pt and 1–6
+  sensors per axis: legends fully above the data area and inside the
+  figure, labels on the correct sides, y-titles clear of tick numbers.
