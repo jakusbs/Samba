@@ -2484,3 +2484,52 @@ initialised on every config load from the (shared) metadata, and programmatic
 `editingFinished`, so only genuine user edits trigger the popup. All-zero
 calibrations are already skipped by the HDF5 writers (§37), so a scan started
 before entering the new values falls back to `calibration.txt` in the analysis.
+
+---
+
+## 42. Recent Changes (July 2026) — Stale-Value Auto-Pause + Error Popup
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: a failing
+TANGO device no longer paused the measurement — the scan continued, logged
+errors, and the data file contained incorrect values.
+
+### Root cause — two engine paths recorded stale values with `ok=True`
+Only an outright **read** failure (NaN) fed the per-point retry/auto-pause
+machinery. Two other failure modes slipped through `_do_acquire`:
+1. **Trigger failures**: a device whose `Start` command failed (e.g. server
+   in FAULT — commands rejected, attribute reads still fine) was still read
+   afterwards; the read succeeded and returned the **previous point's stale
+   values** → point recorded, scan continued. After `AUTO_PAUSE_THRESHOLD`
+   (5) consecutive failures the device was **permanently removed** from
+   `trigger_devs` (§23 behaviour) — the whole rest of the scan silently
+   recorded stale data.
+2. **Phase B state-poll give-up**: after 5 failed `state()` calls the device
+   was treated as done and read anyway → same stale-value recording.
+
+### Fix (`core/scan/runner.py`)
+- `_recover_trigger` now reports **every** unrecovered dispatch failure via
+  `trigger_failed` (not only at the 5-fail threshold) and devices are **never
+  removed** from `trigger_devs`.
+- `_do_acquire` collects `bad_devs` = unrecovered trigger failures ∪ Phase B
+  state-poll give-ups; after the batch read, sensors of those devices are
+  **forced to NaN** and `ok=False` — so a "successful" stale read can never
+  be recorded. The existing `_acquire_point_retry` machinery then retries the
+  point (with proxy refresh) up to 5× and **auto-pauses on the same point**;
+  Resume retries it from scratch. Phase B *timeout* (device slow, not
+  unreachable) keeps its historical log-and-proceed behaviour.
+
+### Error popup on auto-pause (both apps)
+`_on_status` shows a `QMessageBox.warning` ("Measurement paused") when a
+status message carrying the engine's **"AUTO-PAUSED"** marker arrives — all
+engine auto-pause paths (acquire failure, HDF5 write failure, scanlist field
+flip) emit it; a manual Pause never does. `_autopause_notified` fires it once
+per pause event (reset on resume via the not-paused status branch and re-armed
+in `_status_bar_run_start`). The popup states that no data was recorded for
+the failing point and that Resume retries the same point.
+
+### Tests
+- `test_persistent_trigger_failure_removes_device` →
+  `test_persistent_trigger_failure_fails_point_not_removed` (device stays in
+  `trigger_devs`, every attempt returns ok=False + NaN).
+- New `test_state_poll_failure_fails_point` (trigger OK, `state()` raising →
+  ok=False + NaN). Suite: 57 tests.

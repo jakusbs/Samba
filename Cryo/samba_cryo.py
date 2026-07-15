@@ -348,6 +348,7 @@ class CryoMainWindow(QMainWindow):
         self._meta_syncing:        bool                     = False
         self._timing_syncing:      bool                     = False
         self._last_sample_id:      str                      = ""
+        self._autopause_notified:  bool                     = False
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -900,6 +901,7 @@ class CryoMainWindow(QMainWindow):
 
     def _status_bar_run_start(self, cfg: dict, n_scans_total: int):
         """Reset status-bar state at the start of a scan run."""
+        self._autopause_notified = False   # re-arm the auto-pause popup
         self._run_start_time     = _time.time()
         self._run_scans_done     = 0
         self._run_scans_total    = max(1, int(n_scans_total))
@@ -1815,6 +1817,18 @@ class CryoMainWindow(QMainWindow):
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            # Error popup — once per auto-pause event ("AUTO-PAUSED" marker is
+            # emitted by every engine auto-pause path; a manual Pause never
+            # carries it, so the popup only appears for real failures).
+            if "AUTO-PAUSED" in msg and not self._autopause_notified:
+                self._autopause_notified = True
+                QMessageBox.warning(
+                    self, "Measurement paused",
+                    f"{msg}\n\nThe scan is holding at the failing point — no "
+                    "data has been recorded for it. Fix the device, then "
+                    "press Resume to retry the same point (or Abort to stop).")
+        elif worker:
+            self._autopause_notified = False
 
     def _on_progress(self, done: int, total: int):
         """Record scan progress for the bottom status bar."""

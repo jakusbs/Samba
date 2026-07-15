@@ -260,10 +260,13 @@ class TestTriggerRecovery(unittest.TestCase):
         self.assertIs(devp[dev], good_proxy, "devp must point to the refreshed proxy")
         self.assertAlmostEqual(vals['ZI x1'], 3.14)
 
-    def test_persistent_trigger_failure_removes_device(self):
+    def test_persistent_trigger_failure_fails_point_not_removed(self):
         """
-        After AUTO_PAUSE_THRESHOLD consecutive failures (across calls) the
-        device is permanently removed from trigger_devs.
+        A device whose trigger keeps failing must NOT be removed from
+        trigger_devs (removal let the scan continue forever, silently
+        recording the device's stale attribute values).  Instead every
+        attempt returns ok=False with the device's sensors forced to NaN,
+        so the per-point retry loop auto-pauses the scan.
         """
         r = _make_runner()
         dev = 'dev://zi1'
@@ -282,10 +285,37 @@ class TestTriggerRecovery(unittest.TestCase):
         cfg          = {'move_timeout': 5.0}
 
         for _ in range(AUTO_PAUSE_THRESHOLD):
-            _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+            vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+            self.assertFalse(ok,
+                             "Untriggered device must fail the point")
+            self.assertTrue(np.isnan(vals['ZI x1']),
+                            "Stale read must be replaced by NaN")
 
-        self.assertNotIn(dev, trigger_devs,
-                         "Persistently failing device must be removed")
+        self.assertIn(dev, trigger_devs,
+                      "Failing device must stay triggered (retried on Resume)")
+
+    def test_state_poll_failure_fails_point(self):
+        """
+        A device that triggers fine but whose state() cannot be polled in
+        Phase B (5 consecutive failures) must fail the point with NaN —
+        a successful read after an unverified acquisition may be stale.
+        """
+        r = _make_runner()
+        dev = 'dev://zi1'
+
+        class NoState(InstantProxy):
+            def state(self):
+                raise Exception("state poll failure — simulated")
+
+        devp         = {dev: NoState(read_val=3.14)}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 5.0}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertFalse(ok, "Unverifiable acquisition must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']),
+                        "Possibly-stale read must be replaced by NaN")
 
     def test_consec_fail_counter_resets_on_recovery(self):
         """

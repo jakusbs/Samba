@@ -1344,9 +1344,10 @@ class ScanRunner:
                          zi_timeout_ms, trigger_failed, lg):
         """Handle one failed trigger: refresh the proxy and retry once.
 
-        Updates the consecutive-failure counter; once it reaches
-        AUTO_PAUSE_THRESHOLD the device is queued for permanent removal via
-        trigger_failed (modified in place).
+        If the retry also fails the device is added to trigger_failed
+        (modified in place) — the point is then marked bad so the per-point
+        retry/auto-pause machinery engages, instead of silently reading the
+        device's stale previous values.
         """
         fails = self._trigger_consec_fails.get(dev_path, 0) + 1
         self._trigger_consec_fails[dev_path] = fails
@@ -1369,8 +1370,7 @@ class ScanRunner:
             except Exception as e2:
                 lg(f"  ✗ {dev_path}: still failing after refresh: "
                    f"{type(e2).__name__}")
-        if fails >= AUTO_PAUSE_THRESHOLD:
-            trigger_failed.append(dev_path)
+        trigger_failed.append(dev_path)
 
     # ── Single-point acquire: trigger → Phase A+B → guard → read ────────────
     def _do_acquire(self, devp, dev_sensors, trigger_devs,
@@ -1378,8 +1378,12 @@ class ScanRunner:
         """Fire triggers, wait for completion, read all sensors.
 
         Returns (vals, t_trigger, ok).
-        ok is False when any sensor returned NaN (read error after retries).
-        trigger_devs is modified in-place: devices that fail repeatedly are removed.
+        ok is False when any sensor could not deliver a fresh value this
+        point: a read error after retries, a trigger that could not be
+        dispatched (the device would only return its stale previous values),
+        or a device whose state could not be polled in Phase B.  Sensors of
+        such devices are forced to NaN so stale data can never be recorded —
+        the caller's retry/auto-pause machinery handles the failure.
         """
         trigger_failed = []
         t_trigger = time.time() - t0
@@ -1408,10 +1412,11 @@ class ScanRunner:
                                               _zi_timeout_ms, trigger_failed, lg)
                 t_trigger = time.time() - t0
 
-        for dp in trigger_failed:
-            lg(f"  → Permanently removing {dp} from triggered devices "
-               f"after {AUTO_PAUSE_THRESHOLD} consecutive failures")
-            trigger_devs.pop(dp, None)
+        # Devices whose trigger could not be dispatched this point stay in
+        # trigger_devs (they are retried on the next attempt — the per-point
+        # retry loop pauses the scan if they keep failing) but are excluded
+        # from the Phase A/B waits and their readout is invalidated below.
+        bad_devs = set(trigger_failed)
 
         # Phase A — wait for every triggered device to enter RUNNING
         if trigger_devs:
@@ -1448,8 +1453,9 @@ class ScanRunner:
                         streak = _phase_b_fails[dp]
                         if streak >= 5:
                             lg(f"⚠ State poll failed {streak}× for {dp}: "
-                               f"{type(e).__name__} — giving up")
+                               f"{type(e).__name__} — marking point bad")
                             done.add(dp)
+                            bad_devs.add(dp)
                         else:
                             lg(f"⚠ State poll error for {dp} (attempt {streak}/5): "
                                f"{type(e).__name__} — retrying in 50 ms")
@@ -1495,6 +1501,16 @@ class ScanRunner:
                             vals[s["label"]] = np.nan
                     else:
                         time.sleep(RETRY_DELAY)
+
+        # A device whose trigger never fired (or whose state could not be
+        # polled) may still answer attribute reads — with the STALE values of
+        # the previous point.  Force those sensors to NaN and fail the point
+        # so the retry/auto-pause machinery engages instead of silently
+        # recording wrong data.
+        for dev_path in bad_devs:
+            for s in dev_sensors.get(dev_path, []):
+                vals[s["label"]] = np.nan
+            ok = False
 
         return vals, t_trigger, ok
 
