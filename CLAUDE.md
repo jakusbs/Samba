@@ -2627,13 +2627,20 @@ The §33 plot-interaction upgrade never reached the calibration plot. Its
 toolbar row now has the same "Text:" spinbox (ticks, axis labels, title,
 legend) and the left-click nearest-point readout.
 
-### Calibration plot — all sensors, switchable live
-`setup_timescan` now receives **every enabled sensor** (each dict carries
-`visible` from its right-panel plot visibility; if all would start hidden,
-all start shown). A "Show:" row of per-sensor colored checkboxes above the
-plot toggles curves **while the scan runs**; hidden sensors still collect
-data, the legend rebuilds from visible curves only, and autoscale ignores
-hidden curves (hiding a large signal rescales onto the rest).
+### Calibration plot — Y1/Y2 twin axis (corrected per user feedback)
+The real complaint was "select focus line on Y1 + balanced diode on Y2 and
+only one gets plotted": the calibration plot had a **single y-axis**, so both
+sensors were drawn on one scale and the small signal flattened into an
+invisible line — the Y1/Y2 assignment was ignored. (A first attempt added
+all-sensors + visibility checkboxes; reverted — not what was asked.)
+`setup_timescan` now honours the sensor panel: Y1 sensors on the left axis,
+Y2 sensors on a **right twin axis** (`_ts_ax2`, created per scan, removed in
+`clear()`), each autoscaled independently (X shared). Cool palette left /
+warm right; axis titles carry "name (unit)" (curve color when single,
+axis color when several); one combined legend on the top axes. Verified
+headlessly with real Agg rendering: a 5 V Y1 signal and a 1 mV Y2 signal
+each fill their own scale; Y1-only scans create no right axis; autofocus
+plotting is unaffected after `clear()`.
 
 ### Live 1D plot — legend & axis-title layout (`core/plot_widgets.py`)
 - **Legends can no longer sit on the data**: anchored *above* the axes

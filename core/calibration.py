@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QSplitter,
-    QSizePolicy, QDoubleSpinBox, QSpinBox, QCheckBox
+    QSizePolicy, QDoubleSpinBox, QSpinBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
@@ -173,26 +173,19 @@ class FocusPlotWidget(QWidget):
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
         top.addWidget(self.fs_spin)
 
-        # Sensor visibility row (populated per time scan, hidden otherwise):
-        # one colored checkbox per plotted sensor — toggles the curve live.
-        self._vis_w = QWidget(); self._vis_w.setVisible(False)
-        self._vis_lay = QHBoxLayout(self._vis_w)
-        self._vis_lay.setContentsMargins(4, 0, 4, 0); self._vis_lay.setSpacing(10)
-        _sl = QLabel("Show:"); _sl.setStyleSheet("color:#a6adc8;font-size:10px;")
-        self._vis_lay.addWidget(_sl)
-        self._vis_lay.addStretch(1)
-
         # Left-click a curve to read off the nearest point's value.
         self._readout = ClickReadout(
-            self.canvas, lambda: [self.ax], lambda: self._font_pt)
+            self.canvas,
+            lambda: [a for a in (self.ax, self._ts_ax2) if a is not None],
+            lambda: self._font_pt)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
-        lay.addWidget(self._vis_w)
         lay.addWidget(self.canvas, stretch=1)
         self._z_data = []; self._fl_data = []
         self._line = None; self._best_dot = None
         self._ts_xd = None; self._ts_yd = {}; self._ts_lines = {}
+        self._ts_ax2 = None      # right (Y2) axis, created per time scan
         self._ts_dirty = False
         self._style()
 
@@ -207,34 +200,35 @@ class FocusPlotWidget(QWidget):
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
         self._font_pt = int(pt)
-        self.ax.tick_params(labelsize=self._font_pt)
-        self.ax.xaxis.label.set_fontsize(self._font_pt)
-        self.ax.yaxis.label.set_fontsize(self._font_pt)
-        self.ax.title.set_fontsize(self._font_pt)
-        leg = self.ax.get_legend()
-        if leg is not None:
-            for t in leg.get_texts():
-                t.set_fontsize(self._font_pt)
+        axes = [a for a in (self.ax, self._ts_ax2) if a is not None]
+        for ax in axes:
+            ax.tick_params(labelsize=self._font_pt)
+            ax.xaxis.label.set_fontsize(self._font_pt)
+            ax.yaxis.label.set_fontsize(self._font_pt)
+            ax.title.set_fontsize(self._font_pt)
+            leg = ax.get_legend()
+            if leg is not None:
+                for t in leg.get_texts():
+                    t.set_fontsize(self._font_pt)
         try: self.fig.tight_layout()
         except Exception: pass
         self.canvas.draw_idle()
 
-    def _clear_vis_boxes(self):
-        """Remove the per-sensor visibility checkboxes (keep label + stretch)."""
-        while self._vis_lay.count() > 2:
-            item = self._vis_lay.takeAt(1)
-            w = item.widget()
-            if w is not None: w.deleteLater()
-        self._vis_w.setVisible(False)
+    def _drop_ts_ax2(self):
+        """Remove the right (Y2) time-scan axis if it exists."""
+        if self._ts_ax2 is not None:
+            try: self._ts_ax2.remove()
+            except Exception: pass
+            self._ts_ax2 = None
 
     def clear(self):
         self._z_data = []; self._fl_data = []
+        self._drop_ts_ax2()
         self.ax.cla(); self._style()
         self._line = None; self._best_dot = None
         # Also clear time scan state
         self._ts_xd = None; self._ts_yd = {}; self._ts_lines = {}
         self._ts_dirty = False
-        self._clear_vis_boxes()
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()
         self.canvas.draw_idle()
@@ -260,43 +254,74 @@ class FocusPlotWidget(QWidget):
         self.canvas.draw_idle()
 
     # ── Time scan mode ────────────────────────────────────────────────────────
-    _TS_COLORS = ['#89b4fa','#74c7ec','#a6e3a1','#f38ba8','#fab387','#cba6f7']
+    _TS_LEFT_COLORS  = ['#89b4fa', '#74c7ec', '#a6e3a1', '#cba6f7']
+    _TS_RIGHT_COLORS = ['#f38ba8', '#fab387', '#f9e2af']
 
     def setup_timescan(self, n_pts: int, sensors: list):
         """Prepare the plot for a time scan: point index on X, sensor values on Y.
 
-        Every sensor gets a line + a colored visibility checkbox above the
-        plot, so what is displayed can be changed while the scan runs.  A
-        sensor dict may carry "visible": False to start hidden (data is
-        still collected — checking the box later reveals it).
+        Sensors keep their Y1/Y2 assignment from the sensor panel: Y1 curves
+        go on the left axis, Y2 curves on a right twin axis with its own
+        scale — so a large signal (focus diode) and a small one (balanced
+        diode) are both visible instead of the small one flattening out.
         """
+        self._drop_ts_ax2()
         self.ax.cla()
         self.ax.set_facecolor("#12121f")
         self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values(): sp.set_edgecolor("#3a3a5c")
         self.ax.set_xlabel("Point", color="#aaaacc", fontsize=self._font_pt)
-        self.ax.set_ylabel("Signal (V)", color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_title("Time scan", color="#6c7086", fontsize=self._font_pt)
         self._line = None; self._best_dot = None
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()
         self._ts_xd = np.full(n_pts, np.nan)
         self._ts_yd = {}; self._ts_lines = {}
-        self._clear_vis_boxes()
-        for i, s in enumerate(sensors):
-            lbl = s["label"]
-            c = self._TS_COLORS[i % len(self._TS_COLORS)]
-            line, = self.ax.plot([], [], color=c, linewidth=1.5,
-                                  marker=".", markersize=4, label=lbl)
-            line.set_visible(bool(s.get("visible", True)))
+
+        y2_sensors = [s for s in sensors
+                      if s.get("y_axis", s.get("plot_axis", "Y1")) == "Y2"]
+        if y2_sensors:
+            self._ts_ax2 = self.ax.twinx()
+            self._ts_ax2.tick_params(colors="#aaaacc", labelsize=self._font_pt)
+            for sp in self._ts_ax2.spines.values(): sp.set_edgecolor("#3a3a5c")
+            self._ts_ax2.yaxis.set_label_position("right")
+            self._ts_ax2.yaxis.tick_right()
+
+        li = ri = 0
+        left_meta, right_meta = [], []   # (label, unit, color)
+        for s in sensors:
+            lbl  = s["label"]; unit = s.get("unit", "")
+            if s in y2_sensors:
+                c = self._TS_RIGHT_COLORS[ri % len(self._TS_RIGHT_COLORS)]; ri += 1
+                ax = self._ts_ax2
+                right_meta.append((lbl, unit, c))
+            else:
+                c = self._TS_LEFT_COLORS[li % len(self._TS_LEFT_COLORS)]; li += 1
+                ax = self.ax
+                left_meta.append((lbl, unit, c))
+            line, = ax.plot([], [], color=c, linewidth=1.5,
+                            marker=".", markersize=4, label=lbl)
             self._ts_lines[lbl] = line
             self._ts_yd[lbl] = np.full(n_pts, np.nan)
-            cb = QCheckBox(lbl); cb.setChecked(line.get_visible())
-            cb.setStyleSheet(f"QCheckBox{{color:{c};font-size:10px;spacing:3px;}}")
-            cb.toggled.connect(lambda on, l=lbl: self._set_line_visible(l, on))
-            self._vis_lay.insertWidget(self._vis_lay.count() - 1, cb)
-        self._vis_w.setVisible(bool(sensors))
-        self._rebuild_ts_legend()
+
+        def _ylabel(entries):
+            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
+        if left_meta:
+            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
+            self.ax.set_ylabel(_ylabel(left_meta), color=col,
+                               fontsize=self._font_pt)
+        if right_meta:
+            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
+            self._ts_ax2.set_ylabel(_ylabel(right_meta), color=col,
+                                    fontsize=self._font_pt)
+
+        # Combined legend (both axes) on the topmost axes
+        handles = list(self._ts_lines.values())
+        if handles:
+            leg_ax = self._ts_ax2 if self._ts_ax2 is not None else self.ax
+            leg_ax.legend(handles=handles, fontsize=self._font_pt,
+                          facecolor="#313244", edgecolor="#45475a",
+                          labelcolor="#cdd6f4", loc="best")
         self.ax.axhline(0, color="#45475a", linewidth=0.6, linestyle="--")
         self.fig.tight_layout(); self.canvas.draw_idle()
         self._ts_dirty = False
@@ -306,25 +331,6 @@ class FocusPlotWidget(QWidget):
             self._ts_timer.setInterval(80)
             self._ts_timer.timeout.connect(self._ts_throttled_draw)
             self._ts_timer.start()
-
-    def _rebuild_ts_legend(self):
-        """Legend shows only the currently visible curves."""
-        handles = [l for l in self._ts_lines.values() if l.get_visible()]
-        leg = self.ax.get_legend()
-        if handles:
-            self.ax.legend(handles=handles, fontsize=self._font_pt,
-                           facecolor="#313244", edgecolor="#45475a",
-                           labelcolor="#cdd6f4", loc="best")
-        elif leg is not None:
-            leg.remove()
-
-    def _set_line_visible(self, lbl: str, on: bool):
-        line = self._ts_lines.get(lbl)
-        if line is None: return
-        line.set_visible(bool(on))
-        self._rebuild_ts_legend()
-        self._ts_dirty = True
-        self.canvas.draw_idle()
 
     def update_timescan_point(self, ix: int, x_val: float, vals: dict):
         """Update one point in the time scan plot."""
@@ -345,22 +351,28 @@ class FocusPlotWidget(QWidget):
             if y is None: continue
             m = np.isfinite(x) & np.isfinite(y)
             if m.any(): line.set_data(x[m], y[m])
-        # Manual limits — visible curves only, so hiding a large signal
-        # rescales the plot onto the ones still shown
+        # Manual limits — X shared across both axes, Y independent per axis
+        # (relim() is unreliable with twinx, and the axhline(0) reference
+        # line must not enter the limit computation)
         all_lines = [l for l in self._ts_lines.values()
-                     if l.get_visible() and len(l.get_xdata()) > 0]
+                     if len(l.get_xdata()) > 0]
         if all_lines:
-            ax = np.concatenate([l.get_xdata() for l in all_lines])
-            ay = np.concatenate([l.get_ydata() for l in all_lines])
-            mx = np.isfinite(ax); my = np.isfinite(ay)
+            ax_x = np.concatenate([l.get_xdata() for l in all_lines])
+            mx = np.isfinite(ax_x)
             if mx.any():
-                xlo, xhi = ax[mx].min(), ax[mx].max()
+                xlo, xhi = ax_x[mx].min(), ax_x[mx].max()
                 pad = max(abs(xhi - xlo) * 0.02, 1e-12)
                 self.ax.set_xlim(xlo - pad, xhi + pad)
-            if my.any():
-                ylo, yhi = ay[my].min(), ay[my].max()
-                pad = max(abs(yhi - ylo) * 0.05, 1e-12)
-                self.ax.set_ylim(ylo - pad, yhi + pad)
+            for axis in (self.ax, self._ts_ax2):
+                if axis is None: continue
+                ys = [l.get_ydata() for l in all_lines if l.axes is axis]
+                if not ys: continue
+                ay = np.concatenate(ys)
+                my = np.isfinite(ay)
+                if my.any():
+                    ylo, yhi = ay[my].min(), ay[my].max()
+                    pad = max(abs(yhi - ylo) * 0.05, 1e-12)
+                    axis.set_ylim(ylo - pad, yhi + pad)
         self.canvas.draw_idle()
 
 

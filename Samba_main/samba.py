@@ -1652,16 +1652,13 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg
         self._calib_timescan = True
 
-        # Plot every enabled sensor; hidden ones start unchecked but can be
-        # revealed live via the checkboxes above the calibration plot.
-        plot_sensors = [dict(s, visible=(
-                            s.get("plot_visible", True)
-                            and s.get("y_axis", s.get("plot_axis", "Y1"))
-                                not in ("hidden", "—", "X")))
-                        for s in active]
-        if not any(s["visible"] for s in plot_sensors):
-            for s in plot_sensors: s["visible"] = True
-        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors)
+        # Plot the sensors marked visible in the right panel; they keep their
+        # Y1/Y2 assignment (the calibration plot has a twin right axis).
+        plot_sensors = [s for s in active
+                        if s.get("plot_visible", True)
+                        and s.get("y_axis", s.get("plot_axis", "Y1")) not in ("hidden", "—", "X")]
+        self.calib_panel.focus_plot.setup_timescan(
+            n_pts, plot_sensors if plot_sensors else active)
 
         # Also set up the main live display for the Log tab
         self._setup_live_display(cfg, active)
