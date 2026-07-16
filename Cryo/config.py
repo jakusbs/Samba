@@ -484,10 +484,24 @@ def load_setup(name: str) -> dict:
             d.setdefault("active_idx", 0)
             for cfg in d["configs"]:
                 _migrate_config(cfg)
+            d["_load_status"] = "ok"
             return d
         except Exception as e:
             print(f"Config load error ({path}): {e}")
-    return make_default_setup(name)
+            # Preserve the unreadable file BEFORE any auto-save can overwrite
+            # it with defaults, and surface the failure to the caller.
+            try:
+                bak = path.with_name(path.name + ".bad")
+                shutil.copyfile(path, bak)
+                print(f"Unreadable setup file backed up to {bak}")
+            except Exception:
+                pass
+            d = make_default_setup(name)
+            d["_load_status"] = f"error: {e}"
+            return d
+    d = make_default_setup(name)
+    d["_load_status"] = "missing"
+    return d
 
 def save_setup(name: str, data: dict):
     """Save setup config to JSON atomically (write-to-tmp, then rename).
@@ -501,7 +515,7 @@ def save_setup(name: str, data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     path = CONFIG_DIR / f"{name}.json"
     tmp_path = CONFIG_DIR / f"{name}.json.tmp"
-    clean = _sanitize(data)
+    clean = _sanitize({k: v for k, v in data.items() if k != "_load_status"})
     try:
         with open(tmp_path, "w") as f:
             json.dump(clean, f, indent=2)

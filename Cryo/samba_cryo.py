@@ -375,6 +375,16 @@ class CryoMainWindow(QMainWindow):
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
+        # Surface load problems once the event loop runs (a silently-defaulted
+        # setup after an unreadable file would be overwritten on the next save).
+        _st = self._setups[CRYO_SETUP].pop("_load_status", "ok")
+        if _st.startswith("error"):
+            _msg = (f"The saved Cryo configuration could not be read "
+                    f"({_st[7:][:150]}).\nThe unreadable file was backed up to "
+                    f"~/.config/moke_scan/{CRYO_SETUP}.json.bad — default "
+                    f"configs are shown, and saving will overwrite it.")
+            QTimer.singleShot(0, lambda m=_msg: QMessageBox.warning(
+                self, "Setup configuration", m))
 
         self.setStyleSheet(CRYO_STYLE)
         self._build_ui()

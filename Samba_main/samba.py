@@ -260,6 +260,12 @@ class MainWindow(QMainWindow):
 
         for n in SETUP_NAMES:
             self._setups[n] = load_setup(n)
+        # Surface load problems once the event loop runs (silent defaults hid
+        # unreadable/missing setup files — e.g. after copying ~/.config to a
+        # new machine — and the next auto-save then overwrote the real file).
+        self._setup_load_warnings = self._collect_setup_load_warnings()
+        if self._setup_load_warnings:
+            QTimer.singleShot(0, self._show_setup_load_warnings)
 
         self.setStyleSheet(DARK_STYLE)
         self._build_ui()
@@ -1267,6 +1273,34 @@ class MainWindow(QMainWindow):
         self.traj_panel.populate_monitor_combo(registry)
         self.setup_defaults.set_registry(registry)
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _collect_setup_load_warnings(self) -> list:
+        """Inspect each setup's _load_status (set by load_setup) and build
+        user-facing warnings.  'missing' is only reported when at least one
+        OTHER setup loaded fine — all-missing is a normal first run."""
+        statuses = {n: s.pop("_load_status", "ok")
+                    for n, s in self._setups.items()}
+        msgs = []
+        for n, st in statuses.items():
+            if st.startswith("error"):
+                msgs.append(
+                    f"Setup '{n}': the saved configuration could not be read "
+                    f"({st[7:][:150]}).\nThe unreadable file was backed up to "
+                    f"~/.config/moke_scan/{n}.json.bad — default configs are "
+                    f"shown, and saving will overwrite {n}.json.")
+        missing = [n for n, st in statuses.items() if st == "missing"]
+        if missing and len(missing) < len(statuses):
+            msgs.append(
+                "No saved configuration file found for setup(s): "
+                + ", ".join(missing)
+                + "\n(expected in ~/.config/moke_scan/) — started with "
+                  "default configs. If you copied configs from another "
+                  "machine, check that every <Setup>.json arrived.")
+        return msgs
+
+    def _show_setup_load_warnings(self):
+        QMessageBox.warning(self, "Setup configuration",
+                            "\n\n".join(self._setup_load_warnings))
 
     def _on_calib_timescan_changed(self):
         """Persist the calibration tab's own time-scan settings per setup."""

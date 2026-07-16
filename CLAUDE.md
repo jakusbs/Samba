@@ -2734,3 +2734,41 @@ zero-centre.
   (browser + live widget); light export maps #89b4fa→#1e66f5 / #f38ba8→#d20f39,
   leaves the original figure untouched, and saves a valid PNG.
 - Twin-axis timescan + LED checks re-run clean; `python test_runner.py` 57 OK.
+
+---
+
+## 47. Recent Changes (July 2026) — Setup-File Load Failures Made Visible & Non-Destructive
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (61 tests). User report: after
+copying `~/.config/moke_scan/` to a new computer, Samba_main started with
+only the Green setup's scan configs.
+
+### Root cause class
+`load_setup()` fell back to `make_default_setup()` **silently** in both
+failure modes — file unreadable (partial copy, permissions, encoding) and
+file missing. Worse, the next auto-save then **overwrote the real
+`<Setup>.json` with the defaults**, destroying the copied data. There was no
+visible signal, so the user couldn't tell whether IR.json was missing,
+unreadable, or clobbered.
+
+### Fix (`Samba_main/config.py` + `Cryo/config.py`)
+- **Unreadable file** → backed up to `<name>.json.bad` *before* any save can
+  overwrite it (original left in place), and the returned default setup
+  carries `_load_status = "error: …"`.
+- **Missing file** → `_load_status = "missing"`; a healthy load → `"ok"`.
+- `save_setup()` strips the transient `_load_status` key.
+
+### Startup warnings (both apps)
+- **Samba_main** (`_collect_setup_load_warnings` / `_show_setup_load_warnings`):
+  a QMessageBox at startup lists (a) setups whose file could not be read
+  (with the `.json.bad` backup path and the note that saving overwrites), and
+  (b) setups whose file is **missing while other setups loaded fine** — the
+  partial-copy case; all-missing is a normal first run and stays silent.
+- **Cryo**: single setup — popup only for the unreadable case (missing =
+  first run).
+
+### Tests
+- `test_runner.py` +4 → 61: `TestSetupLoadStatus` imports the real
+  `Samba_main/config.py` against a temp CONFIG_DIR — valid file → "ok";
+  corrupt file → "error", `.bad` backup byte-identical, original untouched;
+  missing → "missing"; `save_setup` strips the key.

@@ -1353,5 +1353,72 @@ class TestLabNotebookScanlistColumn(unittest.TestCase):
         self.assertEqual(rows[0], _nb_mod._HEADERS)
 
 
+class TestSetupLoadStatus(unittest.TestCase):
+    """load_setup must never silently swallow an unreadable setup file:
+    it backs the file up to <name>.json.bad and reports _load_status so the
+    app can warn instead of quietly overwriting the file with defaults
+    (the 'copied .config to a new machine, IR configs gone' report)."""
+
+    def _fresh_config(self, tmpdir):
+        """Import the real Samba_main/config.py against a temp CONFIG_DIR."""
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.CONFIG_DIR = Path(tmpdir)
+        return mod
+
+    def test_valid_file_status_ok(self):
+        import json, tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        good = cfgmod.make_default_setup("Green")
+        good.pop("_load_status", None)
+        with open(os.path.join(tmp, "Green.json"), "w") as f:
+            json.dump(good, f)
+        d = cfgmod.load_setup("Green")
+        self.assertEqual(d.get("_load_status"), "ok")
+
+    def test_corrupt_file_backed_up_and_reported(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        p = os.path.join(tmp, "IR.json")
+        with open(p, "w") as f:
+            f.write("{ this is not json")
+        d = cfgmod.load_setup("IR")
+        self.assertTrue(d.get("_load_status", "").startswith("error"),
+                        d.get("_load_status"))
+        self.assertTrue(os.path.exists(p + ".bad"),
+                        "unreadable file must be backed up")
+        with open(p + ".bad") as f:
+            self.assertEqual(f.read(), "{ this is not json",
+                             "backup must preserve the original bytes")
+        with open(p) as f:
+            self.assertEqual(f.read(), "{ this is not json",
+                             "original must not be touched by load")
+
+    def test_missing_file_reported(self):
+        import tempfile
+        cfgmod = self._fresh_config(tempfile.mkdtemp())
+        d = cfgmod.load_setup("IR")
+        self.assertEqual(d.get("_load_status"), "missing")
+
+    def test_save_strips_load_status(self):
+        import json, tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        d = cfgmod.make_default_setup("Green")
+        d["_load_status"] = "missing"
+        cfgmod.save_setup("Green", d)
+        with open(os.path.join(tmp, "Green.json")) as f:
+            saved = json.load(f)
+        self.assertNotIn("_load_status", saved)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

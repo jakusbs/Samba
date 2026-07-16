@@ -2,7 +2,7 @@
 config.py — Samba v3
 Constants, hardware defaults, scan config schema, and JSON persistence.
 """
-import copy, json, logging
+import copy, json, logging, shutil
 from pathlib import Path
 from typing import Dict, List, TypedDict, Optional
 
@@ -408,13 +408,28 @@ def load_setup(name: str) -> dict:
             d.setdefault("active_idx", 0)
             for cfg in d["configs"]:
                 _migrate_config(cfg)
+            d["_load_status"] = "ok"
             return d
         except Exception as e:
             log.error("Config load error (%s): %s", path, e)
-    return make_default_setup(name)
+            # Preserve the unreadable file BEFORE any auto-save can overwrite
+            # it with defaults, and surface the failure to the caller.
+            try:
+                bak = path.with_name(path.name + ".bad")
+                shutil.copyfile(path, bak)
+                log.error("Unreadable setup file backed up to %s", bak)
+            except Exception:
+                pass
+            d = make_default_setup(name)
+            d["_load_status"] = f"error: {e}"
+            return d
+    d = make_default_setup(name)
+    d["_load_status"] = "missing"
+    return d
 
 def save_setup(name: str, data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    data = {k: v for k, v in data.items() if k != "_load_status"}
     try:
         with open(CONFIG_DIR / f"{name}.json", "w") as f:
             json.dump(data, f, indent=2)
