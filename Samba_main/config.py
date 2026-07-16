@@ -20,12 +20,13 @@ SCHEMA_VERSION = 5
 LEFT_COLORS  = ['#89b4fa','#a6e3a1','#b4befe','#94e2d5','#89dceb']
 RIGHT_COLORS = ['#f38ba8','#f9e2af','#cba6f7','#fab387','#eba0ac']
 COLORMAPS    = [
-    # Diverging (signed MOKE data) — listed first
-    'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',
-    # Sequential
-    'viridis','plasma','inferno','magma','cividis','turbo',
-    # Classic / misc
-    'gray','hot','cool','copper','jet','rainbow','nipy_spectral',
+    # Curated set (trimmed from 24 — the combo had become unusable).
+    # Diverging (signed MOKE data) — the colour range auto-centres on zero:
+    'RdBu_r', 'seismic', 'coolwarm', 'PuOr_r',
+    # Sequential (unsigned data: reflectivity, intensity):
+    'viridis', 'inferno',
+    # Grayscale:
+    'gray',
 ]
 SETUP_NAMES  = ["Green", "IR"]
 

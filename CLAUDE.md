@@ -2719,6 +2719,14 @@ dark-green tint while RUNNING, peach while PAUSED (manual or auto), neutral
 when idle — machine state readable from across the room. Driven from
 `_set_running`, `_toggle_pause`, and `_on_status`'s pause detection.
 
+### Colormap list trimmed 24 → 7 (both `config.py`, follow-up)
+The Cmap combo had grown to 24 entries. Curated set: `RdBu_r, seismic,
+coolwarm, PuOr_r` (diverging, zero-centred) + `viridis, inferno` (sequential)
++ `gray`. Configs storing a removed name still render (matplotlib knows the
+name; combo falls back to RdBu_r and migrates on next save), and
+`theme.DIVERGING_CMAPS` keeps the removed diverging names so old scans still
+zero-centre.
+
 ### Verification
 - Palettes: dataviz validator (CVD + normal-vision separation) on #12121f.
 - Headless real-Agg checks: eng ticks render "10µ…" with no offset text;
