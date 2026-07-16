@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
-from plot_interact import ClickReadout, make_fontsize_spin
+from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn)
+from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
 
@@ -163,11 +165,13 @@ class FocusPlotWidget(QWidget):
                                    QSizePolicy.Policy.Expanding)
         self.bar = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
         self._font_pt = 9
 
         # Toolbar row: nav toolbar + text-size spinbox (matches Live1DWidget)
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -196,6 +200,8 @@ class FocusPlotWidget(QWidget):
         self.ax.set_xlabel("Z position (µm)", color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_ylabel("Focus signal (V)", color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_title("Autofocus", color="#6c7086", fontsize=self._font_pt)
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax.yaxis)
 
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
@@ -254,8 +260,9 @@ class FocusPlotWidget(QWidget):
         self.canvas.draw_idle()
 
     # ── Time scan mode ────────────────────────────────────────────────────────
-    _TS_LEFT_COLORS  = ['#89b4fa', '#74c7ec', '#a6e3a1', '#cba6f7']
-    _TS_RIGHT_COLORS = ['#f38ba8', '#fab387', '#f9e2af']
+    # Same validated palettes as the main 1D plot (see core/theme.py)
+    _TS_LEFT_COLORS  = PLOT_LEFT_COLORS
+    _TS_RIGHT_COLORS = PLOT_RIGHT_COLORS
 
     def setup_timescan(self, n_pts: int, sensors: list):
         """Prepare the plot for a time scan: point index on X, sensor values on Y.
@@ -272,6 +279,7 @@ class FocusPlotWidget(QWidget):
         for sp in self.ax.spines.values(): sp.set_edgecolor("#3a3a5c")
         self.ax.set_xlabel("Point", color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_title("Time scan", color="#6c7086", fontsize=self._font_pt)
+        eng_axis(self.ax.yaxis)
         self._line = None; self._best_dot = None
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()
@@ -286,6 +294,7 @@ class FocusPlotWidget(QWidget):
             for sp in self._ts_ax2.spines.values(): sp.set_edgecolor("#3a3a5c")
             self._ts_ax2.yaxis.set_label_position("right")
             self._ts_ax2.yaxis.tick_right()
+            eng_axis(self._ts_ax2.yaxis)
 
         li = ri = 0
         left_meta, right_meta = [], []   # (label, unit, color)

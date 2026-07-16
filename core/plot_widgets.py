@@ -22,7 +22,9 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
 from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
-from plot_interact import ClickReadout, make_fontsize_spin
+from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn)
+from theme import DIVERGING_CMAPS
 
 REDRAW_INTERVAL_MS = 80
 
@@ -50,10 +52,12 @@ class Live2DWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
 
         # Toolbar row: nav toolbar + per-view toggles
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         self.autocolor_cb = QCheckBox("Auto color"); self.autocolor_cb.setChecked(True)
         self.autocolor_cb.setToolTip("Rescale the colour range to the data as points arrive.")
         self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
@@ -86,6 +90,11 @@ class Live2DWidget(QWidget):
                 if len(v) > 1:
                     lo, hi = v.min(), v.max()
                     if lo == hi: hi = lo + 1e-12
+                    # Diverging colormap + signed data → centre the colour
+                    # range on zero so the neutral midpoint means "no signal"
+                    if self._cmap in DIVERGING_CMAPS and lo < 0.0 < hi:
+                        m = max(abs(lo), abs(hi))
+                        lo, hi = -m, m
                     self._img.set_clim(lo, hi)
             self._img.set_data(self._data)
         self.canvas.draw_idle()
@@ -109,6 +118,7 @@ class Live2DWidget(QWidget):
             except Exception: pass
         self._cb = self.fig.colorbar(self._img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
+        eng_axis(self._cb.ax.yaxis)
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
         self.ax.set_title(self._sensor, color="#ccccff", fontsize=10)
@@ -168,10 +178,12 @@ class Live1DWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
 
         # Toolbar row: nav toolbar + auto-scale toggle + text-size spinbox
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
         self.autoscale_cb.setToolTip(
             "Rescale axes to the data on every update.\n"
@@ -212,6 +224,9 @@ class Live1DWidget(QWidget):
         self.ax2.yaxis.tick_right()
         self.ax1.yaxis.set_label_position("left")
         self.ax1.yaxis.tick_left()
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax1.yaxis)
+        eng_axis(self.ax2.yaxis)
 
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""

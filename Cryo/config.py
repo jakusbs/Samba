@@ -127,8 +127,11 @@ def _sanitize(obj):
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
 # ─────────────────────────────────────────────────────────────────────────────
-LEFT_COLORS  = ['#89b4fa','#74c7ec','#89dceb','#a6e3a1','#94e2d5']
-RIGHT_COLORS = ['#f38ba8','#fab387','#f9e2af','#cba6f7','#eba0ac']
+# Curve palettes — order is validated for colour-vision + normal-vision
+# separation between ADJACENT entries on the dark plot surface; see
+# core/theme.py (the values here must match PLOT_LEFT/RIGHT_COLORS there).
+LEFT_COLORS  = ['#89b4fa','#a6e3a1','#b4befe','#94e2d5','#89dceb']
+RIGHT_COLORS = ['#f38ba8','#f9e2af','#cba6f7','#fab387','#eba0ac']
 COLORMAPS    = [
     # Diverging (signed MOKE data) — listed first
     'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',

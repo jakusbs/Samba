@@ -31,7 +31,9 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
-from plot_interact import ClickReadout, make_fontsize_spin
+from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn)
+from theme import DIVERGING_CMAPS
 
 # Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
 # instead of any stored actuator/field/time axis. Not a real dataset name.
@@ -401,10 +403,12 @@ class BrowserPlotWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
         self._font_pt = 9
 
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -425,6 +429,8 @@ class BrowserPlotWidget(QWidget):
         self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values():
             sp.set_edgecolor("#3a3a5c")
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax.yaxis)
 
     def _on_fontsize(self, pt: int):
         self._font_pt = int(pt)
@@ -488,6 +494,11 @@ class BrowserPlotWidget(QWidget):
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
         if vmin == vmax: vmax = vmin + 1e-12
+        # Diverging colormap + signed data → centre the colour range on zero
+        # so the neutral midpoint means "no signal"
+        if cmap in DIVERGING_CMAPS and vmin < 0.0 < vmax:
+            m = max(abs(vmin), abs(vmax))
+            vmin, vmax = -m, m
         img = self.ax.imshow(data, origin="lower", aspect="auto",
                              extent=ext, cmap=cmap, interpolation="nearest",
                              vmin=vmin, vmax=vmax)
@@ -495,6 +506,7 @@ class BrowserPlotWidget(QWidget):
         self._cb = self.fig.colorbar(img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc",
                                           labelsize=self._font_pt)
+        eng_axis(self._cb.ax.yaxis)
         self.ax.set_xlabel(x_label, color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_ylabel(y_label, color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_title(sensor_label, color="#ccccff", fontsize=self._font_pt)

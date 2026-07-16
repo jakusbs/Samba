@@ -640,10 +640,27 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
     # ── Bottom status bar ─────────────────────────────────────────────────────
+
+    # ── Status-bar state tint (visible from across the room) ─────────────────
+    _SB_TINTS = {
+        "idle":    "QStatusBar{background:#181825;border-top:2px solid #313244;}",
+        "running": "QStatusBar{background:#16241b;border-top:2px solid #a6e3a1;}",
+        "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
+    }
+
+    def _tint_status_bar(self, state: str):
+        """Tint the bottom status bar by scan state: green while running,
+        peach while paused (manual or auto), neutral when idle."""
+        sb = getattr(self, "_sb", None)
+        if sb is not None:
+            sb.setStyleSheet(self._SB_TINTS.get(state, self._SB_TINTS["idle"]))
+
     def _build_status_bar(self):
         """Seven-field QStatusBar showing live scan-run progress."""
         sb = QStatusBar()
         self.setStatusBar(sb)
+        self._sb = sb
+        sb.setStyleSheet(self._SB_TINTS["idle"])
         container = QWidget()
         row = QHBoxLayout(container)
         row.setContentsMargins(8, 0, 8, 0); row.setSpacing(0)
@@ -1339,6 +1356,7 @@ class MainWindow(QMainWindow):
         # Disable hardware Read buttons during scan to prevent concurrent TANGO
         # access on the ZI device (Device_4Impl is single-threaded; simultaneous
         # state() + read_attribute() calls cause IMP_LIMIT CORBA exceptions).
+        self._tint_status_bar("running" if running else "idle")
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
@@ -1738,6 +1756,7 @@ class MainWindow(QMainWindow):
             # Error popup — once per auto-pause event ("AUTO-PAUSED" marker is
             # emitted by every engine auto-pause path; a manual Pause never
             # carries it, so the popup only appears for real failures).
+            self._tint_status_bar("paused")
             if "AUTO-PAUSED" in msg and not self._autopause_notified:
                 self._autopause_notified = True
                 QMessageBox.warning(
@@ -1747,6 +1766,7 @@ class MainWindow(QMainWindow):
                     "press Resume to retry the same point (or Abort to stop).")
         elif _active_worker:
             self._autopause_notified = False
+            self._tint_status_bar("running")
 
     def _on_progress(self, done: int, total: int):
         """Record scan progress for the bottom status bar."""
@@ -1807,10 +1827,12 @@ class MainWindow(QMainWindow):
             worker.resume()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
+            self._tint_status_bar("running")
         else:
             worker.pause()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            self._tint_status_bar("paused")
 
     def _abort_scan(self):
         if not self._scan_running: return

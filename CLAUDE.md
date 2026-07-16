@@ -2661,3 +2661,68 @@ plotting is unaffected after `clear()`.
 - Verified with a real Agg render (mpl 3.11) across 9/14/20 pt and 1–6
   sensors per axis: legends fully above the data area and inside the
   figure, labels on the correct sides, y-titles clear of tick numbers.
+
+---
+
+## 46. Recent Changes (July 2026) — Style Batch: Palettes, Zero-Centred Maps, Eng Ticks, Light Export, State Tint
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). Style-review batch;
+user opted out of gridlines and a global UI font size.
+
+### `core/theme.py` (new)
+Central home for the Catppuccin Mocha tokens, plot surfaces, the validated
+curve palettes, `DIVERGING_CMAPS`, and the Mocha→Latte mapping used by the
+light export. New code imports from here; scattered hex values migrate
+opportunistically.
+
+### Curve palettes reordered (validated) — both `config.py` + calibration plot
+The old Y1 order put blue `#89b4fa` next to sapphire `#74c7ec` (ΔE ≈ 6 normal
+vision, 4.5 deutan — nearly indistinguishable) and sky/teal similarly. New
+orders validated on the dark surface with the dataviz palette checker:
+- `LEFT_COLORS  = blue, green, lavender, teal, sky`
+- `RIGHT_COLORS = red, yellow, mauve, peach, maroon`
+`FocusPlotWidget._TS_*_COLORS` now alias `theme.PLOT_*_COLORS`. Order is part
+of the validation — do not reshuffle.
+
+### Zero-centred diverging colormaps (`Live2DWidget`, `BrowserPlotWidget`)
+A diverging map (RdBu_r…) scaled min→max puts its neutral midpoint at the
+middle of the data range, not at zero — "no signal" showed as light red.
+When the selected cmap is in `theme.DIVERGING_CMAPS` **and** the data spans
+zero, the colour range is made symmetric (±max|data|), so white = 0 exactly.
+Single-signed data keeps min→max (aesthetic use of RdBu stays contrasty).
+Applied in the live map's autocolor path and the browser's `plot_2d`.
+
+### SI engineering ticks (`plot_interact.eng_axis`)
+All signal y-axes + both colorbars now use `EngFormatter(unit="", sep="")` —
+ticks read "24µ" instead of nice-looking numbers with a `1e-5` offset hiding
+at the axis top (classic misreading source; an additive offset is worse).
+Applied: Live1D (both axes), calibration plot (autofocus + time scan, both
+axes), browser 1D, Live2D + browser colorbars. X-axes unchanged.
+
+### Light-mode figure export (`plot_interact.render_light_figure` + button)
+"⬇ Light" button in the toolbar row of all four plot widgets (Live1D, Live2D,
+calibration, browser): exports the CURRENT plot restyled for white paper —
+white surfaces, dark ink for ticks/labels/legend, and every curve colour
+mapped Mocha→Latte (pastels are unreadable on white; Latte is the saturated
+counterpart). Implementation pickles the figure (deep copy — the on-screen
+plot is untouched), restyles the copy, saves via file dialog (PNG/PDF/SVG,
+200 dpi, bbox_inches tight).
+
+### Nav-toolbar icons visible (`plot_interact.fix_toolbar_icons`)
+matplotlib's dark-gray toolbar icons were nearly invisible on the dark
+toolbar. The helper inverts each action icon's RGB (alpha preserved) →
+light gray. Fail-soft; applied in all four plot widgets.
+
+### Scan-state status-bar tint (both apps)
+`_tint_status_bar(state)` styles the bottom QStatusBar: green top border +
+dark-green tint while RUNNING, peach while PAUSED (manual or auto), neutral
+when idle — machine state readable from across the room. Driven from
+`_set_running`, `_toggle_pause`, and `_on_status`'s pause detection.
+
+### Verification
+- Palettes: dataviz validator (CVD + normal-vision separation) on #12121f.
+- Headless real-Agg checks: eng ticks render "10µ…" with no offset text;
+  RdBu_r map with data −1…5 gets clim (−5, 5) while viridis keeps (−1, 5)
+  (browser + live widget); light export maps #89b4fa→#1e66f5 / #f38ba8→#d20f39,
+  leaves the original figure untouched, and saves a valid PNG.
+- Twin-axis timescan + LED checks re-run clean; `python test_runner.py` 57 OK.
