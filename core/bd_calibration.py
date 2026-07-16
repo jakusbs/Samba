@@ -142,6 +142,12 @@ class BDCalibrationPanel(QWidget):
     def set_status(self, text: str):
         self._status_lbl.setText(text)
 
+    def suppress_prompt(self, setup_name: str):
+        """Mark the first-open reload prompt as already handled for a setup —
+        used when the tab is opened programmatically (e.g. the new-sample
+        popup) and the reload offer would be confusing."""
+        self._prompted_setups.add(setup_name)
+
     def maybe_prompt(self, setup_name: str):
         """Called the first time this tab is shown per setup per session.
         If a saved calibration exists, ask the user whether to load it."""

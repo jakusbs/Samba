@@ -31,6 +31,13 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
+from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn)
+from theme import DIVERGING_CMAPS
+
+# Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
+# instead of any stored actuator/field/time axis. Not a real dataset name.
+INDEX_KEY = "__index__"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,7 +264,18 @@ class ScanFile:
                         x_unit = str(meas[x_key].attrs.get("unit",  ""))
                         y_unit = str(meas[y_key].attrs.get("unit",  ""))
 
-                x = x_arr.flatten(); y = y_arr.flatten()
+                y = y_arr.flatten()
+                if x_key == INDEX_KEY:
+                    # Point-by-point: ignore the stored x, plot vs. sample index
+                    # (1, 2, 3, …).  Keep every finite y sample.
+                    mask = np.isfinite(y)
+                    x = np.arange(y.size, dtype=float)[mask]
+                    return {
+                        "x": x, "y": y[mask],
+                        "x_label": "Point", "y_label": y_lbl,
+                        "x_unit":  "", "y_unit":  y_unit,
+                    }
+                x = x_arr.flatten()
                 mask = np.isfinite(x) & np.isfinite(y)
                 return {
                     "x": x[mask], "y": y[mask],
@@ -385,9 +403,16 @@ class BrowserPlotWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
+        self._font_pt = 9
 
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -395,12 +420,33 @@ class BrowserPlotWidget(QWidget):
         self._cb     = None
         self._is_2d  = False
         self._style()
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(self.canvas, lambda: [self.ax],
+                                     lambda: self._font_pt)
 
     def _style(self):
         self.ax.set_facecolor("#12121f")
-        self.ax.tick_params(colors="#aaaacc", labelsize=9)
+        self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
         for sp in self.ax.spines.values():
             sp.set_edgecolor("#3a3a5c")
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax.yaxis)
+
+    def _on_fontsize(self, pt: int):
+        self._font_pt = int(pt)
+        self.ax.tick_params(labelsize=self._font_pt)
+        self.ax.xaxis.label.set_fontsize(self._font_pt)
+        self.ax.yaxis.label.set_fontsize(self._font_pt)
+        t = self.ax.get_title()
+        if t:
+            self.ax.set_title(t, color="#ccccff", fontsize=self._font_pt)
+        leg = self.ax.get_legend()
+        if leg is not None:
+            for txt in leg.get_texts():
+                txt.set_fontsize(self._font_pt)
+        if self._cb is not None:
+            self._cb.ax.tick_params(labelsize=self._font_pt)
+        self.canvas.draw_idle()
 
     def clear(self):
         if self._cb:
@@ -409,6 +455,8 @@ class BrowserPlotWidget(QWidget):
             self._cb = None
         self._is_2d = False
         self.ax.cla(); self._style()
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self.canvas.draw_idle()
 
     def plot_1d(self, datasets: List[Dict], title: str = ""):
@@ -426,13 +474,13 @@ class BrowserPlotWidget(QWidget):
         if datasets:
             self.ax.set_xlabel(
                 f"{datasets[0]['x_label']} ({datasets[0].get('x_unit','')})",
-                color="#aaaacc")
+                color="#aaaacc", fontsize=self._font_pt)
             self.ax.set_ylabel(
                 f"{datasets[0]['y_label']} ({datasets[0].get('y_unit','')})",
-                color="#aaaacc")
+                color="#aaaacc", fontsize=self._font_pt)
         if title:
-            self.ax.set_title(title, color="#ccccff", fontsize=10)
-        self.ax.legend(fontsize=8, facecolor="#313244",
+            self.ax.set_title(title, color="#ccccff", fontsize=self._font_pt)
+        self.ax.legend(fontsize=self._font_pt, facecolor="#313244",
                        edgecolor="#45475a", labelcolor="#cdd6f4",
                        loc="best")
         self.canvas.draw_idle()
@@ -446,15 +494,22 @@ class BrowserPlotWidget(QWidget):
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
         if vmin == vmax: vmax = vmin + 1e-12
+        # Diverging colormap + signed data → centre the colour range on zero
+        # so the neutral midpoint means "no signal"
+        if cmap in DIVERGING_CMAPS and vmin < 0.0 < vmax:
+            m = max(abs(vmin), abs(vmax))
+            vmin, vmax = -m, m
         img = self.ax.imshow(data, origin="lower", aspect="auto",
                              extent=ext, cmap=cmap, interpolation="nearest",
                              vmin=vmin, vmax=vmax)
         self._is_2d = True
         self._cb = self.fig.colorbar(img, ax=self.ax)
-        self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
-        self.ax.set_xlabel(x_label, color="#aaaacc")
-        self.ax.set_ylabel(y_label, color="#aaaacc")
-        self.ax.set_title(sensor_label, color="#ccccff", fontsize=10)
+        self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc",
+                                          labelsize=self._font_pt)
+        eng_axis(self._cb.ax.yaxis)
+        self.ax.set_xlabel(x_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_ylabel(y_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_title(sensor_label, color="#ccccff", fontsize=self._font_pt)
         self.canvas.draw_idle()
 
 
@@ -502,6 +557,7 @@ class DataBrowserPanel(QWidget):
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_selection)
         self.tree.itemSelectionChanged.connect(self._update_overlay_btn)
+        self.tree.itemExpanded.connect(self._on_date_expanded)
         left_l.addWidget(self.tree, stretch=1)
 
         # Overlay button
@@ -604,36 +660,75 @@ class DataBrowserPanel(QWidget):
                 date_label = dd
 
             date_item = QTreeWidgetItem([date_label, "", f"{len(h5_files)} files"])
-            date_item.setExpanded(dd == date_dirs[0])  # expand today
             self.tree.addTopLevelItem(date_item)
 
+            # Only the newest (expanded) folder reads HDF5 metadata eagerly.
+            # Older folders get name-only rows; their metadata is filled in on
+            # expand (_on_date_expanded).  Reading every file's metadata here
+            # froze the GUI for seconds on setup switch / post-scan refresh
+            # once the data directory held months of scans.
+            eager = (dd == date_dirs[0])
             for fp in h5_files:
-                sf = ScanFile(fp)
-                if not sf.valid:
-                    continue
-                self._loaded_files[fp] = sf
-
-                status = sf.meta["scan_status"]
-                pts    = f"{sf.meta['points_acquired']}/{sf.meta['points_planned']}"
-                item   = QTreeWidgetItem([sf.basename, status, pts])
-                item.setData(0, Qt.ItemDataRole.UserRole, fp)
-
-                # Color-code status
-                if status == "completed":
-                    item.setForeground(1, QColor("#a6e3a1"))
-                elif status == "aborted":
-                    item.setForeground(1, QColor("#fab387"))
-                elif status == "running":
-                    item.setForeground(1, QColor("#f38ba8"))
+                if eager:
+                    sf = ScanFile(fp)
+                    if not sf.valid:
+                        continue
+                    self._loaded_files[fp] = sf
+                    item = QTreeWidgetItem([sf.basename, "", ""])
+                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
+                    self._fill_item_meta(item, sf)
                 else:
+                    item = QTreeWidgetItem([os.path.basename(fp), "…", ""])
+                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
                     item.setForeground(1, QColor("#6c7086"))
-
                 date_item.addChild(item)
+            date_item.setExpanded(eager)   # after children exist
 
         if self.tree.topLevelItemCount() == 0:
             placeholder = QTreeWidgetItem(["No scans found", "", ""])
             placeholder.setForeground(0, QColor("#6c7086"))
             self.tree.addTopLevelItem(placeholder)
+
+    @staticmethod
+    def _fill_item_meta(item, sf: "ScanFile"):
+        """Set the status/points columns + colour coding from a loaded ScanFile."""
+        status = sf.meta["scan_status"]
+        pts    = f"{sf.meta['points_acquired']}/{sf.meta['points_planned']}"
+        item.setText(1, status); item.setText(2, pts)
+        if status == "completed":
+            item.setForeground(1, QColor("#a6e3a1"))
+        elif status == "aborted":
+            item.setForeground(1, QColor("#fab387"))
+        elif status == "running":
+            item.setForeground(1, QColor("#f38ba8"))
+        else:
+            item.setForeground(1, QColor("#6c7086"))
+
+    def _get_scanfile(self, fp: str):
+        """Return the cached ScanFile for `fp`, loading it lazily on first use.
+        Returns None when the file can't be read."""
+        sf = self._loaded_files.get(fp)
+        if sf is None:
+            sf = ScanFile(fp)
+            if not sf.valid:
+                return None
+            self._loaded_files[fp] = sf
+        return sf
+
+    def _on_date_expanded(self, date_item):
+        """Fill in metadata for a lazily-added date folder on first expand."""
+        for i in range(date_item.childCount()):
+            item = date_item.child(i)
+            if item.text(1) != "…":
+                continue                       # already populated
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            sf = self._get_scanfile(fp) if fp else None
+            if sf is None:
+                item.setText(1, "?")
+                item.setForeground(0, QColor("#6c7086"))
+                item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
+                continue
+            self._fill_item_meta(item, sf)
 
     def _update_overlay_btn(self):
         """Enable overlay button only when at least one file is selected."""
@@ -795,6 +890,9 @@ class DataBrowserPanel(QWidget):
         for key, lbl in cols:
             self.x_combo.addItem(lbl, key)
             self.y_combo.addItem(lbl, key)
+        # Point-by-point option: plot the signal vs. sample index (1, 2, 3, …)
+        # with nothing meaningful on the x-axis.
+        self.x_combo.addItem("Index (point #)", INDEX_KEY)
 
         # Smart defaults — find the x-axis dataset key by role for new files,
         # fall back to known names for old files
@@ -863,7 +961,9 @@ class DataBrowserPanel(QWidget):
         is_dc = sf.meta.get("is_dc_hyst", False)
 
         # ── 2D colour map of the selected Y channel ───────────────────────────
-        if self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc:
+        # Index mode is inherently a 1D point-by-point plot — skip the map.
+        if (x_key != INDEX_KEY and
+                self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc):
             sensor_key = y_key or "auto"
             result = sf.read_2d(sensor_key=sensor_key)
             if result and np.asarray(result["data"]).ndim == 2:
@@ -880,7 +980,8 @@ class DataBrowserPanel(QWidget):
             self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
             return
         if is_dc:
-            result = sf.read_1d(y_key=y_key)
+            # DC plots vs. Field by default; honour Index mode if chosen.
+            result = sf.read_1d(INDEX_KEY if x_key == INDEX_KEY else "auto", y_key)
         else:
             result = sf.read_1d(x_key, y_key)
         if result:

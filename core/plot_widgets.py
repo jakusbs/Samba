@@ -18,10 +18,13 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
 from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
+from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn)
+from theme import DIVERGING_CMAPS
 
 REDRAW_INTERVAL_MS = 80
 
@@ -49,10 +52,12 @@ class Live2DWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
 
         # Toolbar row: nav toolbar + per-view toggles
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         self.autocolor_cb = QCheckBox("Auto color"); self.autocolor_cb.setChecked(True)
         self.autocolor_cb.setToolTip("Rescale the colour range to the data as points arrive.")
         self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
@@ -85,6 +90,11 @@ class Live2DWidget(QWidget):
                 if len(v) > 1:
                     lo, hi = v.min(), v.max()
                     if lo == hi: hi = lo + 1e-12
+                    # Diverging colormap + signed data → centre the colour
+                    # range on zero so the neutral midpoint means "no signal"
+                    if self._cmap in DIVERGING_CMAPS and lo < 0.0 < hi:
+                        m = max(abs(lo), abs(hi))
+                        lo, hi = -m, m
                     self._img.set_clim(lo, hi)
             self._img.set_data(self._data)
         self.canvas.draw_idle()
@@ -108,6 +118,7 @@ class Live2DWidget(QWidget):
             except Exception: pass
         self._cb = self.fig.colorbar(self._img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc")
+        eng_axis(self._cb.ax.yaxis)
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
         self.ax.set_title(self._sensor, color="#ccccff", fontsize=10)
@@ -150,6 +161,10 @@ class Live1DWidget(QWidget):
       3. update_point() — write one data point, defer draw to timer
     """
 
+    # The legend keeps this fixed size regardless of the Text spinbox — a
+    # scaled-up legend ate half the plot; identity only needs to be legible.
+    _LEGEND_PT = 9
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._n: int = 0
@@ -159,6 +174,7 @@ class Live1DWidget(QWidget):
         self._x_label_nat: str = ""
         self._lines: Dict[str, Tuple]   = {}
         self._dirty = False
+        self._font_pt = 9
 
         self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e")
         self.ax1    = self.fig.add_subplot(111)
@@ -166,10 +182,12 @@ class Live1DWidget(QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.bar    = NavToolbar(self.canvas, None)
         self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
 
-        # Toolbar row: nav toolbar + auto-scale toggle
+        # Toolbar row: nav toolbar + auto-scale toggle + text-size spinbox
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
         self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
         self.autoscale_cb.setToolTip(
             "Rescale axes to the data on every update.\n"
@@ -177,6 +195,14 @@ class Live1DWidget(QWidget):
         self.autoscale_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
         self.autoscale_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
         top.addWidget(self.autoscale_cb)
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
+
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(
+            self.canvas, lambda: [self.ax1, self.ax2], lambda: self._font_pt)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -188,14 +214,71 @@ class Live1DWidget(QWidget):
         self._timer.timeout.connect(self._throttled_draw)
         self._timer.start()
 
+        # Debounced re-layout on resize: the legend strip is reserved as a
+        # figure fraction, so it must be recomputed when the canvas changes
+        # size or the empty space above the plot grows with the window.
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(150)
+        self._relayout_timer.timeout.connect(self._layout)
+        self.canvas.mpl_connect(
+            "resize_event", lambda ev: self._relayout_timer.start())
+
     def _style_axes(self):
         self.ax1.set_facecolor("#12121f")
         for ax in [self.ax1, self.ax2]:
-            ax.tick_params(colors="#aaaacc", labelsize=9)
+            ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
             for sp in ax.spines.values():
                 sp.set_edgecolor("#3a3a5c")
         self.ax1.yaxis.label.set_color("#89b4fa")
         self.ax2.yaxis.label.set_color("#f38ba8")
+        # Y2 belongs on the right-hand axis — cla() can reset a twinx back
+        # to left-side ticks/label, which then overlap Y1's.
+        self.ax2.yaxis.set_label_position("right")
+        self.ax2.yaxis.tick_right()
+        self.ax1.yaxis.set_label_position("left")
+        self.ax1.yaxis.tick_left()
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax1.yaxis)
+        eng_axis(self.ax2.yaxis)
+
+    def _on_fontsize(self, pt: int):
+        """User picked a new on-plot text size — restyle and redraw live."""
+        self._font_pt = int(pt)
+        self._apply_font()
+        self._layout()
+
+    def _layout(self):
+        """tight_layout (keeps axis titles clear of the tick numbers), then
+        reserve a strip above the axes for the legends so they never sit on
+        the data.  Legend heights are measured from a real draw, so the
+        reserved space follows the current font size and row count."""
+        try:
+            self.fig.tight_layout()
+            legs = [ax.get_legend() for ax in (self.ax1, self.ax2)]
+            legs = [l for l in legs if l is not None]
+            if legs:
+                self.canvas.draw()          # renderer needed for extents
+                renderer = self.canvas.get_renderer()
+                fig_h = float(self.fig.bbox.height) or 1.0
+                h = max(l.get_window_extent(renderer).height
+                        for l in legs) / fig_h
+                # Fill the figure to the top: axes + legend + a small pad —
+                # tight_layout's own generous top margin would otherwise
+                # leave a dead band above the legend.
+                pad = 8.0 / fig_h
+                self.fig.subplots_adjust(top=max(0.4, 1.0 - h - pad))
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+    def _apply_font(self):
+        """Push the current font size onto ticks, axis labels and legends."""
+        for ax in [self.ax1, self.ax2]:
+            ax.tick_params(labelsize=self._font_pt)
+            ax.xaxis.label.set_fontsize(self._font_pt)
+            ax.yaxis.label.set_fontsize(self._font_pt)
+            # legend deliberately NOT scaled — fixed at _LEGEND_PT
 
     def _throttled_draw(self):
         if not self._dirty:
@@ -268,11 +351,13 @@ class Live1DWidget(QWidget):
 
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._lines = {}
-        self.ax1.set_xlabel(x_lbl or "", color="#aaaacc")
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
+        self.ax1.set_xlabel(x_lbl or "", color="#aaaacc", fontsize=self._font_pt)
 
         li = ri = 0
-        left_units: set = set()
-        right_units: set = set()
+        left_meta:  list = []   # (label, unit, curve color) per Y1 sensor
+        right_meta: list = []
 
         for s in sensors_meta:
             lbl  = s["label"]; axis = s.get("axis", "Y1"); unit = s.get("unit", "")
@@ -280,16 +365,28 @@ class Live1DWidget(QWidget):
                 continue
             if axis == "Y2":
                 c  = RIGHT_COLORS[ri % len(RIGHT_COLORS)]; ri += 1; ax = self.ax2
-                if unit: right_units.add(unit)
+                right_meta.append((lbl, unit, c))
             else:
                 c  = LEFT_COLORS[li % len(LEFT_COLORS)];  li += 1; ax = self.ax1
-                if unit: left_units.add(unit)
+                left_meta.append((lbl, unit, c))
             line, = ax.plot([], [], color=c, linewidth=1.8,
                             label=lbl, marker=".", markersize=4)
             self._lines[lbl] = (line, ax)
 
-        if left_units:  self.ax1.set_ylabel(", ".join(sorted(left_units)), color="#89b4fa")
-        if right_units: self.ax2.set_ylabel(", ".join(sorted(right_units)), color="#f38ba8")
+        # Axis titles carry the sensor name(s) + unit, not just the unit.
+        # A single sensor on an axis colors the title like its curve; with
+        # several the title keeps the axis color and the legend maps
+        # name → color.
+        def _ylabel(entries):
+            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
+        if left_meta:
+            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
+            self.ax1.set_ylabel(_ylabel(left_meta), color=col,
+                                fontsize=self._font_pt)
+        if right_meta:
+            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
+            self.ax2.set_ylabel(_ylabel(right_meta), color=col,
+                                fontsize=self._font_pt)
 
         self._fill_lines(x_arr)
 
@@ -308,12 +405,21 @@ class Live1DWidget(QWidget):
                     ax.set_ylim(ylo - pad, yhi + pad)
             # Legend appears as soon as the axis has any labelled line — even
             # before the first point arrives — so it shows from scan start
-            # without needing a manual refresh.
+            # without needing a manual refresh.  Anchored ABOVE the axes
+            # (Y1 left, Y2 right) so it can never sit on the data; _layout()
+            # reserves the vertical strip it needs.
             if labelled:
+                if ax is self.ax1:
+                    loc, anchor = "lower left",  (0.0, 1.002)
+                else:
+                    loc, anchor = "lower right", (1.0, 1.002)
                 ax.legend(
-                    loc="upper left" if ax == self.ax1 else "upper right",
-                    fontsize=8, facecolor="#313244",
-                    edgecolor="#45475a", labelcolor="#cdd6f4")
+                    loc=loc, bbox_to_anchor=anchor, borderaxespad=0.0,
+                    ncol=min(len(labelled), 3),
+                    fontsize=self._LEGEND_PT, facecolor="#313244",
+                    edgecolor="#45475a", labelcolor="#cdd6f4",
+                    borderpad=0.3, labelspacing=0.3, handlelength=1.4,
+                    handletextpad=0.5, columnspacing=1.0)
         if all_visible:
             all_x = np.concatenate([l.get_xdata() for l, _ in all_visible])
             mx = np.isfinite(all_x)
@@ -322,7 +428,7 @@ class Live1DWidget(QWidget):
                 pad = max(abs(xhi - xlo) * 0.02, 1e-12)
                 self.ax1.set_xlim(xlo - pad, xhi + pad)
 
-        self.fig.tight_layout(); self.canvas.draw_idle()
+        self._layout()
 
     def _fill_lines(self, x_arr: Optional[np.ndarray]):
         for lbl, (line, _) in self._lines.items():
@@ -347,11 +453,13 @@ class Live1DWidget(QWidget):
         self._dirty = True
 
     def set_xlabel(self, txt: str):
-        self.ax1.set_xlabel(txt, color="#aaaacc")
+        self.ax1.set_xlabel(txt, color="#aaaacc", fontsize=self._font_pt)
         self.canvas.draw_idle()
 
     def clear(self):
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
         self._dirty = False
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
         self.canvas.draw_idle()

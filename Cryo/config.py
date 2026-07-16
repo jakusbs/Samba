@@ -127,15 +127,19 @@ def _sanitize(obj):
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
 # ─────────────────────────────────────────────────────────────────────────────
-LEFT_COLORS  = ['#89b4fa','#74c7ec','#89dceb','#a6e3a1','#94e2d5']
-RIGHT_COLORS = ['#f38ba8','#fab387','#f9e2af','#cba6f7','#eba0ac']
+# Curve palettes — order is validated for colour-vision + normal-vision
+# separation between ADJACENT entries on the dark plot surface; see
+# core/theme.py (the values here must match PLOT_LEFT/RIGHT_COLORS there).
+LEFT_COLORS  = ['#89b4fa','#a6e3a1','#b4befe','#94e2d5','#89dceb']
+RIGHT_COLORS = ['#f38ba8','#f9e2af','#cba6f7','#fab387','#eba0ac']
 COLORMAPS    = [
-    # Diverging (signed MOKE data) — listed first
-    'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',
-    # Sequential
-    'viridis','plasma','inferno','magma','cividis','turbo',
-    # Classic / misc
-    'gray','hot','cool','copper','jet','rainbow','nipy_spectral',
+    # Curated set (trimmed from 24 — the combo had become unusable).
+    # Diverging (signed MOKE data) — the colour range auto-centres on zero:
+    'RdBu_r', 'seismic', 'coolwarm', 'PuOr_r',
+    # Sequential (unsigned data: reflectivity, intensity):
+    'viridis', 'inferno',
+    # Grayscale:
+    'gray',
 ]
 SETUP_NAMES  = ["Green", "IR", "Cryo"]
 
@@ -480,10 +484,24 @@ def load_setup(name: str) -> dict:
             d.setdefault("active_idx", 0)
             for cfg in d["configs"]:
                 _migrate_config(cfg)
+            d["_load_status"] = "ok"
             return d
         except Exception as e:
             print(f"Config load error ({path}): {e}")
-    return make_default_setup(name)
+            # Preserve the unreadable file BEFORE any auto-save can overwrite
+            # it with defaults, and surface the failure to the caller.
+            try:
+                bak = path.with_name(path.name + ".bad")
+                shutil.copyfile(path, bak)
+                print(f"Unreadable setup file backed up to {bak}")
+            except Exception:
+                pass
+            d = make_default_setup(name)
+            d["_load_status"] = f"error: {e}"
+            return d
+    d = make_default_setup(name)
+    d["_load_status"] = "missing"
+    return d
 
 def save_setup(name: str, data: dict):
     """Save setup config to JSON atomically (write-to-tmp, then rename).
@@ -497,7 +515,7 @@ def save_setup(name: str, data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     path = CONFIG_DIR / f"{name}.json"
     tmp_path = CONFIG_DIR / f"{name}.json.tmp"
-    clean = _sanitize(data)
+    clean = _sanitize({k: v for k, v in data.items() if k != "_load_status"})
     try:
         with open(tmp_path, "w") as f:
             json.dump(clean, f, indent=2)

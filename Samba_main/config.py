@@ -2,7 +2,7 @@
 config.py — Samba v3
 Constants, hardware defaults, scan config schema, and JSON persistence.
 """
-import copy, json, logging
+import copy, json, logging, shutil
 from pathlib import Path
 from typing import Dict, List, TypedDict, Optional
 
@@ -14,15 +14,19 @@ SCHEMA_VERSION = 5
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
 # ─────────────────────────────────────────────────────────────────────────────
-LEFT_COLORS  = ['#89b4fa','#74c7ec','#89dceb','#a6e3a1','#94e2d5']
-RIGHT_COLORS = ['#f38ba8','#fab387','#f9e2af','#cba6f7','#eba0ac']
+# Curve palettes — order is validated for colour-vision + normal-vision
+# separation between ADJACENT entries on the dark plot surface; see
+# core/theme.py (the values here must match PLOT_LEFT/RIGHT_COLORS there).
+LEFT_COLORS  = ['#89b4fa','#a6e3a1','#b4befe','#94e2d5','#89dceb']
+RIGHT_COLORS = ['#f38ba8','#f9e2af','#cba6f7','#fab387','#eba0ac']
 COLORMAPS    = [
-    # Diverging (signed MOKE data) — listed first
-    'RdBu_r','seismic','bwr','coolwarm','PuOr_r','RdYlBu_r','Spectral_r','PiYG','BrBG','twilight','twilight_shifted',
-    # Sequential
-    'viridis','plasma','inferno','magma','cividis','turbo',
-    # Classic / misc
-    'gray','hot','cool','copper','jet','rainbow','nipy_spectral',
+    # Curated set (trimmed from 24 — the combo had become unusable).
+    # Diverging (signed MOKE data) — the colour range auto-centres on zero:
+    'RdBu_r', 'seismic', 'coolwarm', 'PuOr_r',
+    # Sequential (unsigned data: reflectivity, intensity):
+    'viridis', 'inferno',
+    # Grayscale:
+    'gray',
 ]
 SETUP_NAMES  = ["Green", "IR"]
 
@@ -71,6 +75,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
+        "lights_device":         "hpp-N42/camera/lights",
         "field_settle_rate":     2.0,    # mT — max |Δfield_polar_corr| per 0.5 s
         "field_settle_timeout":  300.0,  # seconds
     },
@@ -109,6 +114,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "act2_unit":             "nm",
         "trmoke_dg645":          "hpp-N42/delay/DG645",
         "rtv40_device":          "hpp-N42/pulser/RTV40",
+        "lights_device":         "hpp-N42/camera/lights",
         "field_settle_rate":     2.0,    # mT — max |Δfield_polar_corr| per 0.5 s
         "field_settle_timeout":  300.0,  # seconds
     },
@@ -402,13 +408,28 @@ def load_setup(name: str) -> dict:
             d.setdefault("active_idx", 0)
             for cfg in d["configs"]:
                 _migrate_config(cfg)
+            d["_load_status"] = "ok"
             return d
         except Exception as e:
             log.error("Config load error (%s): %s", path, e)
-    return make_default_setup(name)
+            # Preserve the unreadable file BEFORE any auto-save can overwrite
+            # it with defaults, and surface the failure to the caller.
+            try:
+                bak = path.with_name(path.name + ".bad")
+                shutil.copyfile(path, bak)
+                log.error("Unreadable setup file backed up to %s", bak)
+            except Exception:
+                pass
+            d = make_default_setup(name)
+            d["_load_status"] = f"error: {e}"
+            return d
+    d = make_default_setup(name)
+    d["_load_status"] = "missing"
+    return d
 
 def save_setup(name: str, data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    data = {k: v for k, v in data.items() if k != "_load_status"}
     try:
         with open(CONFIG_DIR / f"{name}.json", "w") as f:
             json.dump(data, f, indent=2)

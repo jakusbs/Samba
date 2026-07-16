@@ -1140,13 +1140,13 @@ Cryo, Green, and IR scanlists from the same entry point.
 ### Entry points
 
 ```python
-from analyze_samba import analyze_cryo
+from analyze_samba import analyze_SOT
 
 # Trace + retrace (returns (res, None) for legacy single-direction data)
-res_trace, res_retrace = analyze_cryo.import_analyze_both(SCANLIST)
+res_trace, res_retrace = analyze_SOT.import_analyze_both(SCANLIST)
 
 # Single direction with explicit overrides
-res = analyze_cryo.import_analyze_SOT(
+res = analyze_SOT.import_analyze_SOT(
     SCANLIST,
     see_channels = ('DC', 'ZI_x1'),   # None = auto-detect
     current_mA   = 12.5,              # None = HDF5 metadata → filename → 10 mA
@@ -1155,8 +1155,9 @@ res = analyze_cryo.import_analyze_SOT(
 )
 ```
 
-The class is also exported as `SambaSOTAnalysis` for backwards compatibility
-with older measurement scripts.
+`analyze_cryo` and `SambaSOTAnalysis` are kept as aliases (as are the old
+`*_cryo` helper names) for backwards compatibility with older measurement
+scripts — the module analyses Green, IR, and Cryo data alike.
 
 ### Auto-detection (no config needed)
 
@@ -1175,35 +1176,65 @@ with older measurement scripts.
 ```
 <analysis_base>/<sample_name>/
   calibration.txt
-  <YYYYMMDD_HHMMSS>_<scanlist-stem>[_<direction>]/
-    intensity_<ch>.png
-    phase_search.png
-    sumdiff_<ch>.png  …  realimag_<ch>.png  …  negpos_<ch>.png
-    fit_<ch>.png
-    analyzed_data.csv
-    results.json
+  <current>mA <meas-date>/          # e.g. "15mA 20260326" — groups a measurement
+    <run-date> <run-time>[_<direction>]/   # e.g. "20260702 105936"
+      intensity_<ch>.png
+      phase_search.png
+      sumdiff_<ch>.png  …  realimag_<ch>.png  …  negpos_<ch>.png
+      fit_<ch>.png
+      analyzed_data.csv
+      results.json
 ```
 
-Default `analysis_base` is `Z:\projects\MOKE_lab\Scanning\Analysis_Scripts`.
+The mid folder groups every analysis of one measurement (same current +
+measurement date); each run drops a fresh date-time subfolder inside it.
+Measurement date is taken from the data file's `YYYYMMDD` sub-folder, else a
+date token in the scanlist name, else today.
+
+Default `analysis_base` is auto-set to `Analysis_Samba/` two levels above
+the scanlist folder — scanlists in `<...>/Scanning/Data/ScanLists_<X>/` put
+the analysis in `<...>/Scanning/Analysis_Samba/`; sample-name directories
+are created inside it. Pass `analysis_base_dir=` to override.
 A timestamped subfolder per scan keeps re-runs separated. Override with
 `save_dir=` (parent) or `save_subdir=False` (write directly into `save_dir`).
 
 ### Calibration file
 
-`calibration.txt` lives in the sample folder; 4 data lines:
+`calibration.txt` (v3) lives in the sample folder; line-based, 5 data lines:
 
 ```
-0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV at µm ticks 0,5,10,15,20,25
-1.0                              # R1 (NM/M)
-1.0                              # R2 (M only, reference)
-0.0                              # theta — 1st-harmonic phase offset (deg)
+# samba_calib v3  —  6 mV λ/2 sweep / Ms (A/m) / t_stack (nm) / t_FM (nm) / theta (deg)
+0.05 1.10 2.18 3.27 4.40 5.51   # 6 mV λ/2 sweep at ticks 0,5,10,15,20,25
+1.4e6                            # Ms — saturation magnetization (A/m); 0 = unset
+8.0                              # t_stack — current-carrying stack thickness (nm); 0 = unset
+3.0                              # t_FM — ferromagnet thickness (nm); 0 = unset
+0.0                             # theta — 1st-harmonic phase offset (deg)
 ```
 
-When the file is missing, `read_calibration()` prompts interactively for each
-value and writes the file so subsequent runs skip the prompt. The slope from
-the 6 mV calibration points is converted to `sln = (1/slope) × π/180 × 1e6`
-(µrad/mV). Pass `use_calibration_file=False` to disable the prompt entirely
-and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
+(v2 files without the t_FM line are still read and upgraded on the next write.)
+
+The old R1/R2 (parallel-channel) lines were **dropped** — the SOT efficiency
+uses geometry + Ms, not a resistance ratio. `read_calibration()` builds the
+file from the HDF5 metadata and prompts only for what's missing, then writes
+it back so later runs are silent:
+- `sln` (µrad/mV): explicit `sln=`/`calibration=` → **HDF5 `/data/calibration`**
+  (`read_h5_calibration()`) → the file's 6 mV line → prompt → default 1.0.
+- `Ms` [A/m] and `t_stack` [nm]: explicit arg → file → prompt (blank/0 = unset,
+  ξ_DL then skipped; not re-prompted).
+- `theta`: never prompted (auto-detected by `get_theta`); file value or 0.
+- `t_FM` [nm]: `t_fm_nm=` arg → HDF5 `fm_thickness_nm` metadata (Samba/Cryo
+  metadata panel) → file → prompt (blank = unset).
+Old-format (R1/R2) files are detected (no `samba_calib v2` marker) and rebuilt.
+`results.json` records `sln`, `sln_source`, `bd_calibration_mV`, `device_id`,
+`r_4wire_ohm`/`r_2wire_ohm` (Ω), and `fm_thickness_nm` from the metadata.
+
+**SOT / spin-Hall efficiency** — with `Ms`, `t_stack` (from calibration.txt or
+args) and `t_FM` available, `eval_width_and_fit` computes
+`ξ_DL = (2e/ℏ)·μ₀·Ms·t_FM·(B_DL/μ₀) / J` with `J = Ic/(w·t_stack)` (w = the
+fitted device width, Ic = the coefficient-corrected total current) and stores
+`xi_DL`, `xi_DL_err`, `J_A_per_m2`, `Ms_A_per_m`, `t_stack_nm`, `t_fm_nm` in
+`results.json`. `import_analyze_both` runs each direction independently and
+prints the full traceback on a per-direction failure, keeping the other.
 
 ### Per-channel data layout
 
@@ -1222,13 +1253,29 @@ and use explicit `sln=`, `R=(R1,R2)`, `theta=` args.
 The 7-element list is the standard format: half-difference `(pos−neg)/2`,
 half-sum `(pos+neg)/2`, SEM-weighted error (quadrature of per-group SEMs),
 mean of positive- and negative-polarity scans, and N for the positive group.
-Polarity is `relay_sign × sign(field_T)` from columns 2–3 of the scanlist.
+Polarity grouping is `relay_sign × sign(field_T)` from columns 2–3 of the
+scanlist (on constant-relay data this reduces to the field sign). Note the
+absolute DL sign is a labelling convention and may differ from the legacy
+`data_calculation_new` (`-sign(field_T)` with its `#INVERTED!!` flip). The
+error is the **standard error of the mean** (SEM = std/√N combined in
+quadrature), not the original's plain STD — so bars here are ~√N tighter.
+This is deliberate; drop the `/√n` factors in `data_calculation` to restore
+STD-style bars.
 
 ### Phase optimisation
 
 `find_phase()` uses `scipy.optimize.minimize_scalar` with bounds `[-90°, 90°]`
 to avoid the 180° degeneracy that an unbounded optimiser hits. Run per
 polarity and averaged. Saved as `phase_search.png` when `do_plot=True`.
+
+**Edge detection** (`find_edges_width`) tries the innermost derivative-peak
+pair first, then falls back to the left/right-half strategy, then to the
+steepest gradient — the first result with width ≥ `min_width` (default 4)
+wins. `get_edges` never aborts: if the width is still too small it warns
+loudly and uses a central 15–85 % percentile window for the phase search
+(the fit uses the Oersted edges, so it is unaffected). `import_analyze_both`
+runs each direction in its own try/except and prints the full traceback on
+failure, so one bad direction never silently loses the other.
 
 ### Pipeline (`evaluate_data` modes)
 
@@ -2042,3 +2089,738 @@ exclude-list, **not** N checkboxes).
 - `test_runner.py` grew from 32 → 42 tests: `TestDcHystCycleSave` (4),
   `TestHystCycleRoundTrip` (4, writer↔reader via `Analysis/samba_io`),
   `TestDcHystSourceWrite` (2). Still numpy + h5py only.
+
+---
+
+## 32. Recent Changes (July 2026) — Calibration on Every Scan & Setup-Level Shared Metadata
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free (`python test_runner.py`,
+now 48 tests).
+
+### BD (λ/2) calibration now written for *every* scan type
+The 6 mV λ/2 calibration array (`/data/calibration`) was only written by
+`_open_hdf5` (SPATIAL / FIELD / TIME) **and** only injected into the config by
+`_start_scan` / `_start_scanlist`.  So two paths silently lost it:
+- **DC hysteresis** — `_run_dc_hyst` builds its own HDF5 file and never wrote the
+  calibration dataset.
+- **Calibration time scans** — `_start_calib_timescan` never injected
+  `cfg["bd_calibration"]` (only the two other start routes did).
+
+Fixes (Samba_main + Cryo):
+- Injection moved into **`_build_full_config()`** — the single build path shared by
+  `_start_scan`, `_start_scanlist` and `_start_calib_timescan` — so the panel's
+  6 mV values reach the config for *all* scan types.  The redundant per-route
+  injections were removed (Cryo's per-cycle deepcopies inherit it).
+- `_run_dc_hyst` (`core/scan/runner.py`) now writes `/data/calibration`
+  (float64, `unit=mV`, `role=calibration`) right after the channel datasets,
+  matching `_open_hdf5`.  The Analysis module's `read_h5_calibration()` reads the
+  same path, so DC-hyst files now feed SOT calibration like the others.
+
+### Setup-level shared metadata (same sample across scan types)
+Metadata (operator / sample / device / notes / incidence / polarization / mirror
+shift / R4W / R2W / FM thickness) was stored **per scan config**, so switching
+between configs of different scan types (a map vs. a line scan vs. a field sweep)
+reset the sample identity.  Metadata describes the *physical sample*, which is
+constant across scan types.
+
+Fix (both apps): the whole `MokeMetadataGroup` is now stored **once per setup**
+(`setup["metadata"]`):
+- `_save_active_config()` persists `setup["metadata"] = traj_panel.meta.get_values()`.
+- `_load_active_config()` re-applies `setup["metadata"]` into both the trajectory
+  and scanlist metadata groups **after** `load_config()`, overriding the per-config
+  copy — so switching configs keeps "the same sample".
+- Per-setup isolation is preserved: `_on_setup_changed` saves before switching, so
+  Green / IR / Cryo keep their own metadata.  Old setups without the shared block
+  fall back to the config's own metadata and populate it on the first save.
+- Per-config metadata copies are still written (via `get_config_partial`) so HDF5
+  files stay correct; the shared block just wins on load.
+
+### Tests
+- `test_runner.py` +2 → 48: `TestDcHystCalibration` (calibration written to the
+  DC-hyst HDF5; absent when no `bd_calibration` key).
+
+---
+
+## 33. Recent Changes (July 2026) — Data Browser, Naming, Lab Notebook & Plot Interaction
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free
+(`python test_runner.py`, 51 tests). Batch of small UI/quality improvements.
+
+### Data browser — point-by-point (index) x-axis (`core/data_browser.py`)
+- New sentinel `INDEX_KEY = "__index__"` and an **"Index (point #)"** entry
+  appended to the X-axis combo. When selected, `read_1d` ignores the stored
+  actuator/field/time axis and plots the signal vs. its sample index
+  (`np.arange`), keeping every finite-y sample. Works for line scans and DC
+  hyst; forced to the 1D path even when the 2D-map toggle is on.
+
+### Scan/file naming
+- **Polarization token** added to `MokeMetadataGroup.build_scan_name` (both
+  `Samba_main/panels/_widgets.py` and `Cryo/panels.py`): `s → Spol`,
+  `p → Ppol`, `45° → 45deg`, else the sanitized custom string. Inserted between
+  incidence and mirror-shift; empty polarization contributes nothing.
+- **Scanlist filename** (`core/scan/workers.py`): the redundant second date was
+  dropped. `list_name` already begins with a `YYYYMMDD` date (from
+  `build_scan_name`), so the scanlist `.txt` now appends only `_HHMMSS` (was
+  `_YYYYMMDD_HHMMSS`). A time is kept so two scanlists the same day don't collide.
+
+### Lab notebook — scanlist column + in-place migration (`core/lab_notebook.py`)
+- New **"Scanlist"** column (last column, key `_scanlist_name`): records the
+  scanlist name for scanlist scans, blank for single scans. Set at the scanlist
+  append sites in `samba.py` / `samba_cryo.py` from `ScanlistWorker.list_name`.
+- `append_measurement` now **migrates an existing notebook in place** when the
+  on-disk header is a strict prefix of the current headers (columns only
+  appended): it rewrites the file with the new header and pads old rows with
+  blanks, so old measurements keep their column alignment in the same file.
+  Only a non-prefix change (reorder/rename/remove) still falls back to the
+  `.bak` backup-and-restart. **Only ever append columns at the end.**
+
+### Plot interaction — click-to-read + text size (`core/plot_interact.py`, new)
+- Shared `ClickReadout`: left-click a line plot to annotate the nearest data
+  point (label + x/y); right-click or a config change clears it. Ignores clicks
+  while a nav-toolbar tool (pan/zoom) is active; fully fail-soft.
+- Shared `make_fontsize_spin`: a 6–32 pt spinbox for on-plot text size (labels,
+  ticks, legend, readout) — so numbers are readable from across the room during
+  alignment.
+- Wired into **`Live1DWidget`** (`core/plot_widgets.py`) and the data-browser
+  **`BrowserPlotWidget`**: both gain a "Text:" spinbox and the click readout.
+  Font size flows into tick labels, axis labels, legend, title and colorbar.
+
+### Tests
+- `test_runner.py` +3 → 51: `TestLabNotebookScanlistColumn` (scanlist value +
+  blank default, append-only in-place migration, non-prefix backup). The
+  `ClickReadout` nearest-point math was sanity-checked headless with an Agg
+  canvas (matplotlib/Qt aren't in the CI env, so that check isn't committed).
+
+### Follow-up
+- The **IR SmarAct reinit button** and **Calibration-tab LED buttons** noted here
+  as pending are implemented in §34.
+
+---
+
+## 34. Recent Changes (July 2026) — Stage Reinit & Calibration-Tab LEDs
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (SAMBA) +
+`claude/scan-calibration-metadata-sharing-scpsvm` (TANGO_Devices).
+
+### IR SmarAct stage reinitialise
+The IR SmarAct axes occasionally wedge after manual use with the hand
+controller; the fix is to re-initialise each axis (the standard TANGO `Init`,
+which re-runs the motor's `init_device` and re-establishes the MCS2 connection
+— distinct from Home / CalibrateAxis).
+- **TANGO_Devices** (`SmarActMCS2Stage.py`): new **`Initialise`** command on the
+  stage (IR-controller) device propagates `Init` to each of the three underlying
+  motor devices (X/Y/Z), then refreshes the stage's cached proxies. All axes are
+  attempted; errors are collected and raised together. **Needs redeploy.**
+- **SAMBA** (`core/calibration.py`): a **"⟲ Reinitialise"** button in the
+  Calibration tab's Stage-positioning group calls the stage device's `Initialise`
+  command, falling back to the standard `Init` if the server predates the new
+  command. Uses the stage device from `configure_stage` (`_stage_cfg["x"]`).
+  Generic — works for the Cryo Attocube stage too (its `Init` reconnects).
+
+### Calibration-tab LED buttons
+The `Lights` TANGO server exposes `LED1ON/OFF`, `LED2ON/OFF` (LED1 = green setup,
+LED2 = IR). A compact **"LEDs" row** (1 On / 1 Off / 2 On / 2 Off) was added to
+the Calibration tab's Stage-positioning group.
+- Shown only when a Lights device is configured (`set_lights_device(path)`);
+  hidden otherwise, so Cryo (no lights_device) never shows it.
+- New setup key **`lights_device`** (`Samba_main/config.py`, Green + IR, default
+  `hpp-N42/light/lights` — a **guess**; correct it in Setup Defaults). Round-tripped
+  through the new **"Lights (LED)"** field in `setup_defaults.py` (a plain path
+  field, since the Lights device may not be in the registry). Existing setups pick
+  up the default via `load_setup`'s `setdefault`.
+- Wired in `samba.py` `_load_active_config` + `_on_defaults_changed`
+  (`set_lights_device`). LED commands are fail-soft (status line on error).
+
+---
+
+## 35. Recent Changes (July 2026) — LED Toggle, Metadata Layout, Setup-Switch Config Bug
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`. Hardware-free
+(`python test_runner.py`, 51 tests).
+
+### Calibration-tab LED buttons show state (`core/calibration.py`)
+The LED On/Off buttons are now a toggle pair per LED: the active state is
+highlighted (On → green `#a6e3a1`, Off → red `#f38ba8`), the inactive one stays
+grey. State is tracked client-side (`_led_state`, updated on a successful
+command) since the Lights server has no read-back; `_style_led(led)` restyles.
+`_led(led, on)` builds the `LED{n}ON/OFF` command.
+
+### Metadata: t_FM + t_Stack on the operator row (`_widgets.py`, Cryo `panels.py`)
+- `t_FM` moved off its own column (it was pushing the panel out) onto the
+  **operator row** as a compact fixed-width spinbox, alongside a new **`t_S`
+  (full stack thickness)** spinbox. The row is a QHBoxLayout spanning the same
+  grid width as the Notes field, so the operator field stretches and the two
+  thickness fields stay inside the panel.
+- New metadata key **`t_stack_nm`** (round-tripped through `get_values` /
+  `load_values`; defaults 0.0 on old configs). Written to HDF5 metadata next to
+  `fm_thickness_nm` in `_write_hw_metadata` (`runner.py`) for the SOT analysis
+  (`J = Ic/(w·t_stack)`).
+
+### Setup-switch config-selection corruption (`samba.py`, config_list.py)
+**Bug:** switching setups (Green↔IR) made the *previous* setup adopt the *other*
+setup's config selection, and could surface as wrong labels/units (the wrong
+config loaded). **Cause:** `setup_tabs.currentChanged` drives two slots —
+`ConfigListPanel._on_tab_changed` (connected first) and
+`MainWindow._on_setup_changed`. On a switch `_on_tab_changed` fires first, while
+`_active_setup_name` is still the OLD setup, and emits
+`config_selected(new_row)` → `_on_config_selected` writes the new list's row into
+the **old** setup's `active_idx`.
+**Fix:** a `_switching_setup` guard set around `setup_tabs.setCurrentIndex` in
+`_action_bar_setup_clicked`; `_on_config_selected` early-returns while it's set,
+so `_on_setup_changed` is the sole authority. `_on_setup_changed` also sets the
+new setup's list row (blockSignals) so the highlight is correct.
+
+### Spatial/field axis labels authoritative from setup (`samba.py`)
+`_build_full_config` now injects `act1_label/act1_unit/act2_label/act2_unit` from
+the setup defaults for non-TR-MOKE scans (matching how device/attr are already
+injected), so a stale panel label can't leak wrong labels/units into the scan or
+the saved HDF5 axis. Cryo already injects labels via its piezo block.
+
+---
+
+## 36. Recent Changes (July 2026) — Block Setup Switch During a Scan
+
+Branch `claude/moke-sot-scan-fixes-11x8y9`.
+
+Switching the setup (Green↔IR) **while a scan or scanlist is running** reloaded
+the other setup's config into the panels and live display over the running one
+(label/unit mixing), and would retarget the setup lock that the running scan
+still holds. `_action_bar_setup_clicked` (the single choke point for both the
+pill buttons and the hidden tab bar) now refuses the switch when
+`_scan_running` and the target differs from the running setup: it bounces the
+tab-bar + pill back to the running setup via the new `_resync_setup_ui(idx)`
+and shows "Finish or abort the current scan before switching setup." in the
+status label. Same-setup clicks and all not-running switches are unaffected.
+
+---
+
+## 37. Recent Changes (July 2026) — Config-List Routing by Setup Name (Name Transport Fix)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (`python test_runner.py`, 52 tests).
+
+### Config name transported into the other setup on switch
+**Bug:** with a config selected, switching Green↔IR wrote that config's *name*
+into the other setup's config list (same row). **Cause:** `_on_setup_changed`
+fires from `setup_tabs.currentChanged`, i.e. *after* the tab index already
+points at the NEW setup — and its first act is `_save_active_config()`, which
+saves the OLD setup's data but called `cfg_list.sync_name(idx, name)`, which
+routed by **tab index** (`active_list()`) → old name written into the new
+setup's list. Same class as the §35 active_idx bug (UI-derived vs.
+authoritative setup identity), different symptom.
+
+**Fix:** every ConfigListPanel mutator (`sync_name` / `add_item` /
+`remove_item` / `rename_item`) now takes an optional `setup_name` resolved via
+`_list(setup_name)`; all samba.py call sites pass the authoritative
+`_active_setup_name`, so a call landing inside the switch window can never hit
+the wrong list. `load_setups` also blockSignals around its `setCurrentRow`
+(previously only harmless due to signal-connection ordering at startup).
+
+### Audit of the same bug class (UI-derived setup identity / stale-if-absent loads)
+- **Clean:** no remaining `setup_tabs.currentIndex()`-derived identity in
+  samba.py (the one `active_list()` left is in `_on_setup_changed` *after*
+  `_active_setup_name` is updated); setup-lock, notebook, server-sync, BD
+  save/load, `maybe_prompt` are all name-based; `setup_defaults.load()` has a
+  `_loading` guard so it can't echo defaults during a switch; shared metadata
+  and sensors are unconditionally re-loaded per config (no stale panel value
+  can survive a switch).
+- **Fixed — BD calibration leak:** a setup with *no saved* `bd_calibration`
+  kept showing (and injecting into every scan's HDF5!) the previous setup's
+  6 mV values. `_load_active_config` now clears the panel to zeros with a
+  "No BD calibration saved for setup 'X' yet" status, and both HDF5 writers
+  (`_open_hdf5`, `_run_dc_hyst`) skip an **all-zero** calibration so the
+  analysis falls back to `calibration.txt` instead of reading zeros as a real
+  λ/2 sweep.
+- **Theoretical only (not changed):** `if hyst_chs:` in `_load_active_config`
+  would keep the previous DC-channel rows if a config had an empty
+  `hyst_channels` — unreachable in practice because `_migrate_config`
+  `setdefault`s a non-empty list on every config at load.
+
+### Tests
+- `test_runner.py` +1 → 52: all-zero BD calibration is not written to HDF5.
+
+---
+
+## 38. Recent Changes (July 2026) — Scanlist Pause Fix (Stale Worker Reference)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (52 tests).
+
+**Bug:** the Pause button did nothing during a scanlist. **Cause:**
+`_toggle_pause` (and `_on_status`'s auto-pause detection) pick their target via
+`self._worker or self._sl_worker` — but `_on_worker_finished` never cleared
+`self._worker`, so after **any** earlier single scan the stale finished
+ScanWorker won the `or` and all pause/resume/is_paused calls went to its dead
+runner instead of the running scanlist. (A scanlist started as the first action
+of a session paused fine — which made it look intermittent.)
+
+**Fix (both apps):** `_on_worker_finished` now sets `self._worker = None` in
+its terminal path, mirroring what `_on_sl_worker_finished` already did for
+`_sl_worker`. In Cryo the clear is only in the terminal branch — the
+`_dir_queue` branch re-assigns `self._worker` for the next trace/retrace
+direction and returns early. All other `self._worker` consumers already guard
+against `None` (`_abort_scan`, closeEvent worker loop).
+
+**Note on DC hysteresis:** a running DC-hyst measurement itself cannot be
+paused — the Beckhoff PLC runs the loop autonomously and the TANGO side only
+polls it (only Abort is possible mid-loop). Pausing during a DC-hyst scanlist
+item takes effect at the next scan boundary (`_run_list`'s between-scan
+`while self.is_paused()` wait).
+
+---
+
+## 39. Recent Changes (July 2026) — DC-Hyst Per-Half-Loop Drift Alignment (Analysis)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (56 tests).
+
+Long DC-hyst runs suffer slow balanced-diode drift. Measured on a real
+1000-cycle file (Pt(8)CoFe(3) ETH1, 53 min): loop amplitude ≈ 0.62 mV but the
+per-cycle baseline wanders ≈ 2 mV p2p (>3× the signal) — individual cycles look
+terrible — while *within* one ~3 s cycle drift is only ~1–2 % of amplitude,
+showing up as a small systematic offset between the up- and down-sweep branches
+of the averaged loop.
+
+### `hyst_align_cycles(cyc, tail_frac=0.10)` (`Analysis/samba_io.py`)
+For every cycle and every **half-loop independently**, the saturated tails
+(the `tail_frac` most-positive/most-negative-field points of that half) give
+the half's two saturation levels; the half is shifted so their midpoint is 0.
+Physics pins the Kerr signal at saturation to the same levels in every cycle
+and both sweep directions, so any difference there is diode drift. This
+centres all cycles on a common baseline **and** zeroes the up/down branch
+offset, while leaving each half's amplitude (→ Ms, Mr, Hc) untouched. The
+absolute signal level is discarded (meaningless for a drifting balanced
+diode). Assumes the loop saturates within the swept range.
+
+- `hyst_cycle_average(cyc, exclude=(), align=False, tail_frac=0.10)` — pass
+  `align=True` to align before averaging (combines with `exclude`).
+- `plot_hyst_cycles(..., align=True)` — aligned overlay.
+- On the real file: cycle-to-cycle spread 392 µV → 29 µV (13×); the averaged
+  loop's up/down branch offset closes; a handful of genuinely distorted cycles
+  become visible in the aligned overlay (drop via `hyst_detect_outliers` +
+  `exclude`).
+
+### Tests
+- `test_runner.py` +4 → 56: `TestHystAlign` (per-cycle offsets removed, branch
+  offset closed in average, amplitude preserved, NaN cycle passthrough).
+
+---
+
+## 40. Recent Changes (July 2026) — Lazy Data-Browser Refresh (Setup-Switch Freeze)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (56 tests).
+
+`DataBrowserPanel.refresh()` constructed a `ScanFile` — which opens the HDF5
+and reads all metadata — for **every file in every date folder**, synchronously
+on the GUI thread. It runs on every setup switch (when the browser tab has
+been shown) and after every scan, so with months of data the switch froze for
+~2 s.
+
+Now only the **newest (auto-expanded) date folder** reads metadata eagerly;
+older folders get name-only rows (status column "…") whose metadata is filled
+on first expand (`itemExpanded` → `_on_date_expanded`). `ScanFile`s are also
+created lazily on selection via the new `_get_scanfile(fp)` cache helper, so
+selecting a file in a not-yet-populated folder still works; unreadable files
+are greyed out with their click target removed. Shared column/colour logic
+extracted into `_fill_item_meta`.
+
+---
+
+## 41. Recent Changes (July 2026) — Scanlist Hygiene, Field Re-Apply, LED Readback & New-Sample Popup
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (SAMBA, 56 tests) +
+`claude/scan-calibration-metadata-sharing-scpsvm` (TANGO_Devices). Six-item
+user batch.
+
+### Lab notebook — Scanlist column moved to 8th position (`core/lab_notebook.py`)
+`("Scanlist", "_scanlist_name")` moved from the last column to position 8
+(index 7, after "Notes", before "Incidence"). This is a deliberate one-time
+**reorder** — existing notebooks whose header doesn't match are backed up to
+`.bak` and restarted (the append-only in-place migration only covers appended
+columns). The user planned to delete the old lab book anyway.
+
+### Scanlist txt — aborted scans excluded (`core/scan/workers.py`)
+`ScanlistWorker._run_list` no longer records a scan in `results` (and no longer
+emits `scan_done`) when `self._abort` is set — an aborted scan's partial HDF5
+file stays on disk but never enters the scanlist `.txt`, so the analysis never
+averages a truncated line scan.
+
+### Scanlist txt — no trailing timestamp (`core/scan/workers.py`)
+The `.txt` filename is now just `{list_name}.txt` (the `_HHMMSS` suffix from
+§33 removed as well). Same-day name collisions are handled with a `_2`, `_3`, …
+dedupe loop instead.
+
+### Field setpoint re-applied at scan start (`hardware_panel.py`, `samba.py`)
+After an aborted scanlist zeroes the magnet, the hardware panel's field-write
+spinbox still shows the old setpoint — but starting a new scan didn't re-apply
+it, so scans silently ran at 0 field. New `HardwarePanel.apply_field_setpoint()`
+writes the spinbox value to the magnet current attr (returns `(value, err)`;
+"simulation" / no-device are non-errors). `MainWindow._apply_field_setpoint_for_scan`
+calls it at the start of `_start_scan`, `_start_scanlist` (which uses the
+Scanlist tab's own hw panel) and `_start_calib_timescan`, **skipping FIELD and
+DC_HYST scans** (those own the magnet themselves). Success/failure is logged to
+the status line. Samba_main only (Cryo's AttoDRY field control is separate).
+The manual **Zero field** button also resets the write spinbox to 0 (via
+`_on_zero_field_clicked`; `setValue` doesn't write to hardware — the demag
+does the zeroing) so a later scan start doesn't re-apply the old setpoint.
+Automatic zeroes (post-DC-hyst `demagnetize()`) leave the spinbox untouched.
+
+### LED state readback (`TANGO_Devices Lights.py` + `core/calibration.py`)
+- **Lights server**: new read-only bool attributes `led1` / `led2` returning
+  the live Beckhoff output state via AdsBridge2 `ReadBool`. **Needs redeploy.**
+- **SAMBA**: `CalibrationPanel._refresh_led_state()` reads both attrs in a
+  daemon thread and recolours the toggle buttons via `QTimer.singleShot`;
+  called from `set_lights_device()` (setup load / defaults change) and
+  `_read_all()` (Calibration tab opened). Fail-soft: an old server without the
+  attributes, a sim proxy, or an unreachable device just leaves the buttons
+  grey (state unknown) as before.
+
+### New-sample popup → fresh BD calibration (both apps)
+Editing the **Sample** field (Trajectory or Scanlist metadata group) to a new
+non-empty value pops "Sample changed to 'X' — start a new BD calibration?".
+Yes → the BD panel's 6 mV values are cleared to zeros, a status hint is shown,
+and the app jumps to the BD Calibration tab with its first-open reload prompt
+suppressed (new `BDCalibrationPanel.suppress_prompt(setup)` — the prompt would
+offer the old sample's calibration right back). `_last_sample_id` is
+initialised on every config load from the (shared) metadata, and programmatic
+`setText` (config load, meta sync between tabs) doesn't emit
+`editingFinished`, so only genuine user edits trigger the popup. All-zero
+calibrations are already skipped by the HDF5 writers (§37), so a scan started
+before entering the new values falls back to `calibration.txt` in the analysis.
+
+---
+
+## 42. Recent Changes (July 2026) — Stale-Value Auto-Pause + Error Popup
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: a failing
+TANGO device no longer paused the measurement — the scan continued, logged
+errors, and the data file contained incorrect values.
+
+### Root cause — two engine paths recorded stale values with `ok=True`
+Only an outright **read** failure (NaN) fed the per-point retry/auto-pause
+machinery. Two other failure modes slipped through `_do_acquire`:
+1. **Trigger failures**: a device whose `Start` command failed (e.g. server
+   in FAULT — commands rejected, attribute reads still fine) was still read
+   afterwards; the read succeeded and returned the **previous point's stale
+   values** → point recorded, scan continued. After `AUTO_PAUSE_THRESHOLD`
+   (5) consecutive failures the device was **permanently removed** from
+   `trigger_devs` (§23 behaviour) — the whole rest of the scan silently
+   recorded stale data.
+2. **Phase B state-poll give-up**: after 5 failed `state()` calls the device
+   was treated as done and read anyway → same stale-value recording.
+
+### Fix (`core/scan/runner.py`)
+- `_recover_trigger` now reports **every** unrecovered dispatch failure via
+  `trigger_failed` (not only at the 5-fail threshold) and devices are **never
+  removed** from `trigger_devs`.
+- `_do_acquire` collects `bad_devs` = unrecovered trigger failures ∪ Phase B
+  state-poll give-ups; after the batch read, sensors of those devices are
+  **forced to NaN** and `ok=False` — so a "successful" stale read can never
+  be recorded. The existing `_acquire_point_retry` machinery then retries the
+  point (with proxy refresh) up to 5× and **auto-pauses on the same point**;
+  Resume retries it from scratch. Phase B *timeout* (device slow, not
+  unreachable) keeps its historical log-and-proceed behaviour.
+
+### Error popup on auto-pause (both apps)
+`_on_status` shows a `QMessageBox.warning` ("Measurement paused") when a
+status message carrying the engine's **"AUTO-PAUSED"** marker arrives — all
+engine auto-pause paths (acquire failure, HDF5 write failure, scanlist field
+flip) emit it; a manual Pause never does. `_autopause_notified` fires it once
+per pause event (reset on resume via the not-paused status branch and re-armed
+in `_status_bar_run_start`). The popup states that no data was recorded for
+the failing point and that Resume retries the same point.
+
+### Tests
+- `test_persistent_trigger_failure_removes_device` →
+  `test_persistent_trigger_failure_fails_point_not_removed` (device stays in
+  `trigger_devs`, every attempt returns ok=False + NaN).
+- New `test_state_poll_failure_fails_point` (trigger OK, `state()` raising →
+  ok=False + NaN). Suite: 57 tests.
+
+---
+
+## 43. Recent Changes (July 2026) — Autofocus Rework (Sweep Instead of Hill-Climb)
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: autofocus
+"only sweeps down the z position" and behaves erratically.
+
+### Root causes (old `AutofocusWorker` hill-climb, `core/calibration.py`)
+1. The climb always started downward (`sign = -1`) and only reversed on an
+   intensity **drop sharper than `Int0/50`**. On a flat or noisy focus curve
+   the change never crossed that threshold, so the branch that shrinks the
+   step fired every time and the sign **never flipped** — the stage just
+   crawled downward with ever-smaller steps.
+2. The stage was **never moved to the best Z found** — the loop ended and
+   left the stage at the last (usually worst) position; `focus_found` only
+   updated the plot and the jog display.
+3. Each step compared against the *previous* point, not the best, making the
+   walk noise-driven.
+
+### New algorithm (same UI knobs)
+1. **Coarse sweep**: Z₀ ± `Max range`, step `dz`, capped at `Max points`
+   (label renamed from "Max tries"; if the range needs more points the
+   coarse step widens — the fine sweep restores resolution). Single-direction
+   traversal (low → high) minimises backlash.
+2. **Fine sweep**: 9 points over ± one coarse step around the coarse peak
+   (clamped to the range).
+3. **Parabolic vertex** through the fine maximum and its neighbours for
+   sub-step accuracy (only used when curvature is a true maximum and the
+   vertex lies between the neighbours).
+4. **Final move to the found focus** + one confirmation measurement (emitted
+   to the plot; its value reported as the focus FL).
+- `_measure_fl()` waits for the FL device to leave RUNNING (BeckhoffAverage
+  `Start` handshake, 2 s timeout) instead of a fixed 0.3 s sleep; falls back
+  cleanly for devices without state feedback.
+- Abort or an all-failed sweep returns Z to Z₀ and always restores the scan
+  axis (`try/finally`).
+
+### Verification
+Headless simulation (Qt/matplotlib/hardware stubbed, synthetic Gaussian
+focus curve + noise): finds the true focus starting above/below/near it
+(±0.02 µm quiet, ±0.06 µm at 2 % rms noise), point budget respected, stage
+moved to the result, abort restores Z₀ + scan axis. Not committed (needs the
+stub scaffolding); `python test_runner.py` (57) unaffected.
+
+---
+
+## 44. Recent Changes (July 2026) — LED Readback Delivery & Diagnosability
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). User report: Lights
+server redeployed with working led1/led2 attributes, but the Calibration-tab
+buttons still start grey.
+
+### `core/calibration.py`
+- **Guaranteed GUI delivery**: `CalibrationPanel` gains a `_gui_apply`
+  pyqtSignal(object) connected to `lambda fn: fn()`; background reader
+  threads emit their apply-callable through it. Replaces
+  `QTimer.singleShot(0, …)` in `_refresh_led_state` **and** `_read_all` —
+  singleShot from a plain Python thread has Qt/PyQt-version-dependent
+  delivery; a queued signal is delivered to the GUI thread unconditionally.
+- **Grey is now diagnosable**: when the led1/led2 read fails, the reason is
+  shown in the status line ("LED state unavailable (…)") and set as the
+  LED buttons' tooltip ("State read failed: … old Lights server without
+  led1/led2, or device unreachable"). Success clears the tooltip. Verified
+  headlessly (stubbed Qt/hardware): live server → correct colors;
+  old server → grey + visible reason.
+- Note: the SAMBA side of the readback shipped in §41 commit `97ebf12` —
+  a lab installation must be pulled to at least that commit (plus this one)
+  for the buttons to reflect the device state.
+
+---
+
+## 45. Recent Changes (July 2026) — Calibration-Tab Config & Plot, 1D Plot Layout
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). Four-item user batch.
+
+### Calibration tab — its own hidden time-scan config (`core/calibration.py` + both apps)
+The calibration time scan (▶ Start while the Calibration tab is open) used the
+scan config selected in the left panel (its `act1_npts` / integration time).
+Now the tab carries its **own** settings — a "Time scan (this tab's own
+settings)" group with Points + Int time spinboxes:
+- `_start_calib_timescan` (both apps) overrides `act1_npts` and
+  `integration_time` from `calib_panel.get_timescan_settings()`.
+- Persisted per setup under `setup["calib_timescan"]` (a hidden config —
+  never in the config list): `timescan_changed` →
+  `_on_calib_timescan_changed` saves; `load_timescan_settings` restores on
+  setup/config load (blockSignals). Old setups default to 300 pts / 0.1 s.
+- Sensors still come from the right panel (needed for multi-sensor plotting).
+
+### Calibration plot — text size + click readout (`FocusPlotWidget`)
+The §33 plot-interaction upgrade never reached the calibration plot. Its
+toolbar row now has the same "Text:" spinbox (ticks, axis labels, title,
+legend) and the left-click nearest-point readout.
+
+### Calibration plot — Y1/Y2 twin axis (corrected per user feedback)
+The real complaint was "select focus line on Y1 + balanced diode on Y2 and
+only one gets plotted": the calibration plot had a **single y-axis**, so both
+sensors were drawn on one scale and the small signal flattened into an
+invisible line — the Y1/Y2 assignment was ignored. (A first attempt added
+all-sensors + visibility checkboxes; reverted — not what was asked.)
+`setup_timescan` now honours the sensor panel: Y1 sensors on the left axis,
+Y2 sensors on a **right twin axis** (`_ts_ax2`, created per scan, removed in
+`clear()`), each autoscaled independently (X shared). Cool palette left /
+warm right; axis titles carry "name (unit)" (curve color when single,
+axis color when several); one combined legend on the top axes. Verified
+headlessly with real Agg rendering: a 5 V Y1 signal and a 1 mV Y2 signal
+each fill their own scale; Y1-only scans create no right axis; autofocus
+plotting is unaffected after `clear()`.
+
+### Live 1D plot — legend & axis-title layout (`core/plot_widgets.py`)
+- **Legends can no longer sit on the data**: anchored *above* the axes
+  (Y1's above-left, Y2's above-right, `ncol≤3`). New `_layout()` runs
+  `tight_layout`, then measures the real legend heights from a draw and
+  `subplots_adjust(top=…)` to reserve exactly the strip they need — correct
+  at any font size. Called from `apply_config` and on font-size change
+  (which previously never re-solved the layout → axis titles overlapping
+  tick numbers at larger fonts).
+- **Y-axis titles show sensor name + unit** (e.g. "ZI2 x1 (µV)"), not just
+  the unit. One sensor on an axis → title takes the **curve's color**;
+  several → joined "name (unit)" list in the axis color (legend maps
+  name → color). Rebuilt on every `apply_config`, so it follows what is
+  plotted.
+- **Y2 title/ticks forced to the right side** (`set_label_position("right")`
+  + `tick_right()` in `_style_axes`) — `cla()` on a twinx can reset them to
+  the left where they collide with Y1's.
+- Verified with a real Agg render (mpl 3.11) across 9/14/20 pt and 1–6
+  sensors per axis: legends fully above the data area and inside the
+  figure, labels on the correct sides, y-titles clear of tick numbers.
+
+---
+
+## 46. Recent Changes (July 2026) — Style Batch: Palettes, Zero-Centred Maps, Eng Ticks, Light Export, State Tint
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (57 tests). Style-review batch;
+user opted out of gridlines and a global UI font size.
+
+### `core/theme.py` (new)
+Central home for the Catppuccin Mocha tokens, plot surfaces, the validated
+curve palettes, `DIVERGING_CMAPS`, and the Mocha→Latte mapping used by the
+light export. New code imports from here; scattered hex values migrate
+opportunistically.
+**Fix-up:** core modules import it by bare name (`from theme import …`), so
+each app directory needs the usual re-export shim — `Samba_main/theme.py` and
+`Cryo/theme.py` (`from core.theme import *`) were added after a lab-machine
+`ModuleNotFoundError` (same convention as `plot_interact.py`, §33). **Any new
+`core/<mod>.py` that other core modules bare-import needs both shims.**
+
+### Curve palettes reordered (validated) — both `config.py` + calibration plot
+The old Y1 order put blue `#89b4fa` next to sapphire `#74c7ec` (ΔE ≈ 6 normal
+vision, 4.5 deutan — nearly indistinguishable) and sky/teal similarly. New
+orders validated on the dark surface with the dataviz palette checker:
+- `LEFT_COLORS  = blue, green, lavender, teal, sky`
+- `RIGHT_COLORS = red, yellow, mauve, peach, maroon`
+`FocusPlotWidget._TS_*_COLORS` now alias `theme.PLOT_*_COLORS`. Order is part
+of the validation — do not reshuffle.
+
+### Zero-centred diverging colormaps (`Live2DWidget`, `BrowserPlotWidget`)
+A diverging map (RdBu_r…) scaled min→max puts its neutral midpoint at the
+middle of the data range, not at zero — "no signal" showed as light red.
+When the selected cmap is in `theme.DIVERGING_CMAPS` **and** the data spans
+zero, the colour range is made symmetric (±max|data|), so white = 0 exactly.
+Single-signed data keeps min→max (aesthetic use of RdBu stays contrasty).
+Applied in the live map's autocolor path and the browser's `plot_2d`.
+
+### SI engineering ticks (`plot_interact.eng_axis`)
+All signal y-axes + both colorbars now use `EngFormatter(unit="", sep="")` —
+ticks read "24µ" instead of nice-looking numbers with a `1e-5` offset hiding
+at the axis top (classic misreading source; an additive offset is worse).
+Applied: Live1D (both axes), calibration plot (autofocus + time scan, both
+axes), browser 1D, Live2D + browser colorbars. X-axes unchanged.
+
+### Light-mode figure export (`plot_interact.render_light_figure` + button)
+"⬇ Light" button in the toolbar row of all four plot widgets (Live1D, Live2D,
+calibration, browser): exports the CURRENT plot restyled for white paper —
+white surfaces, dark ink for ticks/labels/legend, and every curve colour
+mapped Mocha→Latte (pastels are unreadable on white; Latte is the saturated
+counterpart). Implementation pickles the figure (deep copy — the on-screen
+plot is untouched), restyles the copy, saves via file dialog (PNG/PDF/SVG,
+200 dpi, bbox_inches tight).
+
+### Nav-toolbar icons visible (`plot_interact.fix_toolbar_icons`)
+matplotlib's dark-gray toolbar icons were nearly invisible on the dark
+toolbar. The helper inverts each action icon's RGB (alpha preserved) →
+light gray. Fail-soft; applied in all four plot widgets.
+
+### Scan-state status-bar tint (both apps)
+`_tint_status_bar(state)` styles the bottom QStatusBar: green top border +
+dark-green tint while RUNNING, peach while PAUSED (manual or auto), neutral
+when idle — machine state readable from across the room. Driven from
+`_set_running`, `_toggle_pause`, and `_on_status`'s pause detection.
+
+### Colormap list trimmed 24 → 7 (both `config.py`, follow-up)
+The Cmap combo had grown to 24 entries. Curated set: `RdBu_r, seismic,
+coolwarm, PuOr_r` (diverging, zero-centred) + `viridis, inferno` (sequential)
++ `gray`. Configs storing a removed name still render (matplotlib knows the
+name; combo falls back to RdBu_r and migrates on next save), and
+`theme.DIVERGING_CMAPS` keeps the removed diverging names so old scans still
+zero-centre.
+
+### Verification
+- Palettes: dataviz validator (CVD + normal-vision separation) on #12121f.
+- Headless real-Agg checks: eng ticks render "10µ…" with no offset text;
+  RdBu_r map with data −1…5 gets clim (−5, 5) while viridis keeps (−1, 5)
+  (browser + live widget); light export maps #89b4fa→#1e66f5 / #f38ba8→#d20f39,
+  leaves the original figure untouched, and saves a valid PNG.
+- Twin-axis timescan + LED checks re-run clean; `python test_runner.py` 57 OK.
+
+---
+
+## 47. Recent Changes (July 2026) — Setup-File Load Failures Made Visible & Non-Destructive
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (61 tests). User report: after
+copying `~/.config/moke_scan/` to a new computer, Samba_main started with
+only the Green setup's scan configs.
+
+### Root cause class
+`load_setup()` fell back to `make_default_setup()` **silently** in both
+failure modes — file unreadable (partial copy, permissions, encoding) and
+file missing. Worse, the next auto-save then **overwrote the real
+`<Setup>.json` with the defaults**, destroying the copied data. There was no
+visible signal, so the user couldn't tell whether IR.json was missing,
+unreadable, or clobbered.
+
+### Fix (`Samba_main/config.py` + `Cryo/config.py`)
+- **Unreadable file** → backed up to `<name>.json.bad` *before* any save can
+  overwrite it (original left in place), and the returned default setup
+  carries `_load_status = "error: …"`.
+- **Missing file** → `_load_status = "missing"`; a healthy load → `"ok"`.
+- `save_setup()` strips the transient `_load_status` key.
+
+### Startup warnings (both apps)
+- **Samba_main** (`_collect_setup_load_warnings` / `_show_setup_load_warnings`):
+  a QMessageBox at startup lists (a) setups whose file could not be read
+  (with the `.json.bad` backup path and the note that saving overwrites), and
+  (b) setups whose file is **missing while other setups loaded fine** — the
+  partial-copy case; all-missing is a normal first run and stays silent.
+- **Cryo**: single setup — popup only for the unreadable case (missing =
+  first run).
+
+### Tests
+- `test_runner.py` +4 → 61: `TestSetupLoadStatus` imports the real
+  `Samba_main/config.py` against a temp CONFIG_DIR — valid file → "ok";
+  corrupt file → "error", `.bad` backup byte-identical, original untouched;
+  missing → "missing"; `save_setup` strips the key.
+
+---
+
+## 48. Recent Changes (July 2026) — Calibration Tab Full Hidden Config & 1D Legend Sizing
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (61 tests). Three-item user batch.
+
+### Calibration tab layout — Time scan under Autofocus
+The Time-scan settings group moved from a third column into a **vertical
+column 2** (`col2`): Autofocus on top, Time scan underneath with stretch, so
+together they take the height of the Stage-positioning column.
+
+### Calibration tab — its own sensors (completes the hidden config)
+The calibration time scan no longer borrows `cfg["sensors"]` from the config
+open in the left panel. The Time-scan group (retitled "…this tab's own
+config") now contains its **own sensor picker rows**:
+- `CalibrationPanel` gains `sensor_row_factory` — each app passes a lambda
+  creating its own `SensorPickerRow` (identical API in Samba_main and Cryo)
+  bound to the live registry via the new `MainWindow._registry_now()`
+  (falls back to `load_registry()` before the registry panel exists).
+- Rows: "＋" add button (max 6), per-row × delete, checkbox/device/channel/
+  axis as in the right panel; `get_timescan_sensors()`;
+  `get_timescan_settings()` now includes `"sensors"`, persisted in
+  `setup["calib_timescan"]` through the existing save/load path.
+  `load_timescan_settings` rebuilds rows (loading never re-emits); a fresh
+  setup starts with one row; registry edits rebuild rows
+  (`_on_registry_changed` → `load_timescan_settings`).
+- `_start_calib_timescan` (both apps) uses the tab's sensors for
+  `cfg["sensors"]` (falls back to the right panel only if the tab has no
+  rows); the no-sensor warning names the calibration tab.
+- Cryo passthrough: `CryoCalibrationPanel.__init__` forwards
+  `sensor_row_factory`.
+
+### Live 1D legend — fixed size, no dead band, resize-aware
+- **Legend no longer scales with the Text spinbox** (`_LEGEND_PT = 9`,
+  compact paddings) — a 20 pt legend used to eat half the plot.
+- **Dead space above the plot removed**: `_layout()` previously *added* the
+  legend strip to tight_layout's already-generous top margin (~40 px of
+  emptiness); it now sets `top = 1 − legend_h − 8px`, filling the figure to
+  the top (measured: 7 px headroom, 1 px gap to the axes).
+- **Re-layout on canvas resize** (debounced 150 ms QTimer on
+  `resize_event`): the reserved strip is a figure fraction, so growing the
+  window used to stretch it into a large empty band (measured 36 px on a
+  6×4→10×8 grow; now re-tightens to 7 px).
+- Verified with real Agg rendering at 9/20 pt and across a resize;
+  calib-sensor row logic verified headlessly (round-trip, add/remove emit
+  once, default row, cap 6). Suite: 61 tests.

@@ -121,7 +121,7 @@ class HardwarePanel(QGroupBox):
         frg.addWidget(self.field_spin, row, 1)
         self.zero_field_btn = QPushButton("Zero field")
         self.zero_field_btn.setToolTip("Demagnetize: alternating decay to 0 A")
-        self.zero_field_btn.clicked.connect(self._demagnetize)
+        self.zero_field_btn.clicked.connect(self._on_zero_field_clicked)
         frg.addWidget(self.zero_field_btn, row, 2); row += 1
 
         frg.addWidget(QLabel("Field:"), row, 0)
@@ -381,6 +381,45 @@ class HardwarePanel(QGroupBox):
             self._set_err(self.mag_status, err[:60])
         else:
             self._set_ok(self.mag_status, f"Sent {attr} = {val:.4f} A")
+
+    def apply_field_setpoint(self):
+        """Write the displayed magnet-current setpoint to the magnet.
+
+        Called at scan start so the measurement runs at the field shown in
+        the write window — e.g. after an aborted scanlist auto-zeroed the
+        magnet while the window still displays the old setpoint.
+
+        Returns ``(value_A, error)``: error is None on success, a short
+        string otherwise ('simulation' in sim mode).
+        """
+        s = self._setup(); dev = s.get("magnet_device", "")
+        val = self.field_spin.value()
+        if not dev:
+            return val, "no magnet device configured"
+        p, conn_err = fresh_proxy(dev)
+        if conn_err:
+            self._set_err(self.mag_status, conn_err)
+            return val, conn_err
+        if is_sim_proxy(p):
+            return val, "simulation"
+        attr = s.get("magnet_current_attr", "current_polar")
+        err  = safe_write(p, attr, val)
+        if err:
+            self._set_err(self.mag_status, err[:60])
+        else:
+            self._set_ok(self.mag_status,
+                         f"Sent {attr} = {val:.4f} A (scan start)")
+        return val, err
+
+    def _on_zero_field_clicked(self):
+        """Manual Zero-field button: also reset the write spinbox to 0 so a
+        later scan start (apply_field_setpoint) doesn't re-apply the old
+        setpoint. setValue does NOT write to hardware (only Return/Enter
+        does) — the demagnetization below is the actual zeroing. Automatic
+        zero procedures (post-DC-hyst via demagnetize()) deliberately leave
+        the spinbox untouched."""
+        self.field_spin.setValue(0.0)
+        self._demagnetize()
 
     def _demagnetize(self):
         """Run demagnetization in a background thread."""

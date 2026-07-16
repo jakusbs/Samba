@@ -260,10 +260,13 @@ class TestTriggerRecovery(unittest.TestCase):
         self.assertIs(devp[dev], good_proxy, "devp must point to the refreshed proxy")
         self.assertAlmostEqual(vals['ZI x1'], 3.14)
 
-    def test_persistent_trigger_failure_removes_device(self):
+    def test_persistent_trigger_failure_fails_point_not_removed(self):
         """
-        After AUTO_PAUSE_THRESHOLD consecutive failures (across calls) the
-        device is permanently removed from trigger_devs.
+        A device whose trigger keeps failing must NOT be removed from
+        trigger_devs (removal let the scan continue forever, silently
+        recording the device's stale attribute values).  Instead every
+        attempt returns ok=False with the device's sensors forced to NaN,
+        so the per-point retry loop auto-pauses the scan.
         """
         r = _make_runner()
         dev = 'dev://zi1'
@@ -282,10 +285,37 @@ class TestTriggerRecovery(unittest.TestCase):
         cfg          = {'move_timeout': 5.0}
 
         for _ in range(AUTO_PAUSE_THRESHOLD):
-            _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+            vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+            self.assertFalse(ok,
+                             "Untriggered device must fail the point")
+            self.assertTrue(np.isnan(vals['ZI x1']),
+                            "Stale read must be replaced by NaN")
 
-        self.assertNotIn(dev, trigger_devs,
-                         "Persistently failing device must be removed")
+        self.assertIn(dev, trigger_devs,
+                      "Failing device must stay triggered (retried on Resume)")
+
+    def test_state_poll_failure_fails_point(self):
+        """
+        A device that triggers fine but whose state() cannot be polled in
+        Phase B (5 consecutive failures) must fail the point with NaN —
+        a successful read after an unverified acquisition may be stale.
+        """
+        r = _make_runner()
+        dev = 'dev://zi1'
+
+        class NoState(InstantProxy):
+            def state(self):
+                raise Exception("state poll failure — simulated")
+
+        devp         = {dev: NoState(read_val=3.14)}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 5.0}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertFalse(ok, "Unverifiable acquisition must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']),
+                        "Possibly-stale read must be replaced by NaN")
 
     def test_consec_fail_counter_resets_on_recovery(self):
         """
@@ -862,6 +892,63 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
         self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
 
 
+class TestDcHystCalibration(unittest.TestCase):
+    """The DC-hyst HDF5 file must carry the BD (λ/2) calibration array under
+    /data/calibration, exactly like the spatial/field path in _open_hdf5 —
+    previously it was only written by _open_hdf5, so DC-hyst files lacked it."""
+
+    def _run(self, bd_cal):
+        import os, glob, tempfile, h5py
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "cal.h5"
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "cal",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_channels": [{"label": "MOKE", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}],
+                       "sensors": []}
+                if bd_cal is not None:
+                    cfg["bd_calibration"] = bd_cal
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()
+                r.run({"status": lambda m: None, "log": lambda m: None})
+                paths = glob.glob(os.path.join(td, "**", "cal.h5"), recursive=True)
+                self.assertTrue(paths, "DC-hyst file was not created")
+                with h5py.File(paths[0], "r") as f:
+                    if "calibration" not in f["data"]:
+                        return None
+                    ds = f["data"]["calibration"]
+                    return (ds[...], dict(ds.attrs))
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename) = _orig
+
+    def test_calibration_written_to_hdf5(self):
+        vals = [0.05, 1.10, 2.18, 3.27, 4.40, 5.51]
+        res = self._run(vals)
+        self.assertIsNotNone(res, "/data/calibration missing from DC-hyst file")
+        arr, attrs = res
+        self.assertEqual([float(x) for x in arr], vals)
+        def _s(v): return v.decode() if isinstance(v, bytes) else str(v)
+        self.assertEqual(_s(attrs.get("unit")), "mV")
+        self.assertEqual(_s(attrs.get("role")), "calibration")
+
+    def test_no_calibration_key_writes_no_dataset(self):
+        self.assertIsNone(self._run(None),
+                          "calibration dataset must be absent when cfg has no bd_calibration")
+
+    def test_all_zero_calibration_not_written(self):
+        # All-zero = the BD panel was never filled for this setup — must not be
+        # recorded as if it were a real λ/2 sweep (analysis falls back to
+        # calibration.txt instead).
+        self.assertIsNone(self._run([0.0] * 6),
+                          "all-zero calibration must be skipped, not written")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 13. DC hysteresis — raw per-cycle data saved to /data/cycles
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1047,6 +1134,77 @@ class TestHystCycleRoundTrip(unittest.TestCase):
             _os.remove(tmp)
 
 
+class TestHystAlign(unittest.TestCase):
+    """hyst_align_cycles: per-half-loop baseline alignment removes balanced-
+    diode drift (per-cycle level jumps + up/down branch offset) while leaving
+    the loop amplitude untouched."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Analysis'))
+        import samba_io as _sio
+        cls.sio = _sio
+
+    def _make_cyc(self, n_cyc=6, half=20, cyc_step=5.0, branch_off=0.3,
+                  nan_cycle=None):
+        """Synthetic loop: ±1 saturation, switching at ±2 mT; cycle c is offset
+        by c*cyc_step, and the up/down halves by ±branch_off."""
+        f_up   = np.linspace(-10, 10, half)
+        f_down = f_up[::-1]
+        y_up   = np.tanh((f_up   - 2.0) * 2.0)   # switches at +2 going up
+        y_down = np.tanh((f_down + 2.0) * 2.0)   # switches at −2 going down
+        field = np.tile(np.concatenate([f_up, f_down]), (n_cyc, 1))
+        loop  = np.concatenate([y_up + branch_off, y_down - branch_off])
+        sig   = np.stack([loop + c * cyc_step for c in range(n_cyc)])
+        cyc = {'field': field, 'valid': np.ones(n_cyc, bool),
+               'n_cycles': n_cyc}
+        for name in ('result1', 'result2', 'result3',
+                     'result4', 'result5', 'result6'):
+            cyc[name] = sig.copy()
+        if nan_cycle is not None:
+            for name in ('result1', 'result2', 'result3',
+                         'result4', 'result5', 'result6'):
+                cyc[name][nan_cycle] = np.nan
+            cyc['valid'][nan_cycle] = False
+        return cyc
+
+    def test_align_removes_cycle_offsets(self):
+        cyc = self._make_cyc()
+        ali = self.sio.hyst_align_cycles(cyc)
+        # every cycle's +saturation level must now be identical
+        sat = ali['result1'][:, 18]        # near +10 mT on the up sweep
+        self.assertLess(float(np.ptp(sat)), 1e-9)
+        self.assertTrue(ali.get('aligned'))
+        # original dict untouched (shallow copy with new arrays)
+        self.assertGreater(float(np.ptp(cyc['result1'][:, 18])), 1.0)
+
+    def test_align_closes_branch_offset_in_average(self):
+        cyc = self._make_cyc()
+        half = 20; nt = 2   # tail_frac 0.10 of 20
+        def branch_gap(avg):
+            up, dn = avg['result1'][:half], avg['result1'][half:]
+            return float(np.nanmean(up[-nt:]) - np.nanmean(dn[:nt]))  # both at +sat
+        raw = self.sio.hyst_cycle_average(cyc)
+        ali = self.sio.hyst_cycle_average(cyc, align=True)
+        self.assertGreater(abs(branch_gap(raw)), 0.5)   # 2×branch_off ≈ 0.6
+        self.assertLess(abs(branch_gap(ali)), 1e-6)
+
+    def test_align_preserves_amplitude(self):
+        cyc = self._make_cyc()
+        ali = self.sio.hyst_align_cycles(cyc)
+        up = ali['result1'][0, :20]
+        amp = up[-2:].mean() - up[:2].mean()   # +sat minus −sat on the up sweep
+        self.assertAlmostEqual(amp, 2.0, delta=0.01)
+
+    def test_invalid_cycle_passes_through(self):
+        cyc = self._make_cyc(nan_cycle=2)
+        ali = self.sio.hyst_align_cycles(cyc)
+        self.assertTrue(np.all(np.isnan(ali['result1'][2])))
+        # average with align skips it and still closes the branch offset
+        avg = self.sio.hyst_cycle_average(cyc, align=True)
+        self.assertEqual(avg['included'], [1, 2, 4, 5, 6])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. DC hysteresis — recorded-source selection written at scan start (A.4)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1099,6 +1257,167 @@ class TestDcHystSourceWrite(unittest.TestCase):
             write_hook=lambda attr: "no such attr" if attr.startswith("source") else None)
         # base params still attempted; scan didn't crash (we got here)
         self.assertTrue(any(a == "MagneticField" for a, _ in writes))
+
+
+class TestSampleMetadata(unittest.TestCase):
+    """_write_hw_metadata records device_id + device resistances so the
+    analysis can read the calibration/resistivity from the file's metadata."""
+
+    def _write(self, cfg):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "m.h5")
+        with h5py.File(p, "w") as f:
+            _runner_mod._write_hw_metadata(f.create_group("metadata"), cfg)
+        with h5py.File(p, "r") as f:
+            return dict(f["metadata"].attrs)
+
+    def test_device_id_and_resistances_written(self):
+        a = self._write({"device_id": "devX", "r_4wire_ohm": 2500.0,
+                         "r_2wire_ohm": 3000.0})
+        self.assertEqual(a["device_id"], "devX")
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 2500.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 3000.0)
+
+    def test_missing_fields_default_safely(self):
+        a = self._write({})
+        self.assertEqual(a["device_id"], "")
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 0.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 0.0)
+
+    def test_legacy_kohm_key_converted_to_ohm(self):
+        a = self._write({"r_4wire_kohm": 2.5, "r_2wire_kohm": 3.0})
+        self.assertAlmostEqual(float(a["r_4wire_ohm"]), 2500.0)
+        self.assertAlmostEqual(float(a["r_2wire_ohm"]), 3000.0)
+
+    def test_fm_thickness_written(self):
+        a = self._write({"fm_thickness_nm": 3.5})
+        self.assertAlmostEqual(float(a["fm_thickness_nm"]), 3.5)
+        b = self._write({})
+        self.assertAlmostEqual(float(b["fm_thickness_nm"]), 0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Lab notebook — scanlist column + append-only in-place migration
+# ─────────────────────────────────────────────────────────────────────────────
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+import lab_notebook as _nb_mod                          # noqa: E402
+
+
+class TestLabNotebookScanlistColumn(unittest.TestCase):
+    """The new 'Scanlist' column is the LAST column; an existing notebook whose
+    header lacks it is migrated in place (old rows padded), never column-shifted."""
+
+    def _read(self, path):
+        import csv
+        with open(path, newline="", encoding="utf-8") as fh:
+            return list(csv.reader(fh))
+
+    def test_scanlist_name_recorded_and_blank_for_single(self):
+        import tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        _nb_mod.append_measurement(nb, {"name": "s1", "_scanlist_name": "list_A"})
+        _nb_mod.append_measurement(nb, {"name": "s2"})   # single scan → blank
+        rows = self._read(nb)
+        col = rows[0].index("Scanlist")
+        self.assertEqual(col, 7, "Scanlist must be the 8th CSV column")
+        self.assertEqual(rows[1][col], "list_A")
+        self.assertEqual(rows[2][col], "")
+
+    def test_appends_column_without_shifting_old_rows(self):
+        import csv, tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        # Simulate an OLD notebook whose header is the current one minus the
+        # last column — a strict prefix (append-only schema growth).
+        old_headers = _nb_mod._HEADERS[:-1]
+        with open(nb, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(old_headers)
+            w.writerow(["v"] * len(old_headers))   # one legacy row
+        # Appending a new measurement must migrate in place, not back up.
+        _nb_mod.append_measurement(nb, {"name": "new"})
+        self.assertFalse(os.path.exists(nb + ".bak"), "should migrate in place, no .bak")
+        rows = self._read(nb)
+        self.assertEqual(rows[0], _nb_mod._HEADERS)             # header upgraded
+        self.assertEqual(len(rows[1]), len(_nb_mod._HEADERS))   # old row padded
+        self.assertEqual(rows[1][-1], "")                       # padded blank
+
+    def test_non_prefix_header_change_backs_up(self):
+        import csv, tempfile
+        nb = os.path.join(tempfile.mkdtemp(), "lab.csv")
+        with open(nb, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(["Totally", "Different", "Header"])
+        _nb_mod.append_measurement(nb, {"name": "x"})
+        self.assertTrue(os.path.exists(nb + ".bak"), "reordered header → backup")
+        rows = self._read(nb)
+        self.assertEqual(rows[0], _nb_mod._HEADERS)
+
+
+class TestSetupLoadStatus(unittest.TestCase):
+    """load_setup must never silently swallow an unreadable setup file:
+    it backs the file up to <name>.json.bad and reports _load_status so the
+    app can warn instead of quietly overwriting the file with defaults
+    (the 'copied .config to a new machine, IR configs gone' report)."""
+
+    def _fresh_config(self, tmpdir):
+        """Import the real Samba_main/config.py against a temp CONFIG_DIR."""
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.CONFIG_DIR = Path(tmpdir)
+        return mod
+
+    def test_valid_file_status_ok(self):
+        import json, tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        good = cfgmod.make_default_setup("Green")
+        good.pop("_load_status", None)
+        with open(os.path.join(tmp, "Green.json"), "w") as f:
+            json.dump(good, f)
+        d = cfgmod.load_setup("Green")
+        self.assertEqual(d.get("_load_status"), "ok")
+
+    def test_corrupt_file_backed_up_and_reported(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        p = os.path.join(tmp, "IR.json")
+        with open(p, "w") as f:
+            f.write("{ this is not json")
+        d = cfgmod.load_setup("IR")
+        self.assertTrue(d.get("_load_status", "").startswith("error"),
+                        d.get("_load_status"))
+        self.assertTrue(os.path.exists(p + ".bad"),
+                        "unreadable file must be backed up")
+        with open(p + ".bad") as f:
+            self.assertEqual(f.read(), "{ this is not json",
+                             "backup must preserve the original bytes")
+        with open(p) as f:
+            self.assertEqual(f.read(), "{ this is not json",
+                             "original must not be touched by load")
+
+    def test_missing_file_reported(self):
+        import tempfile
+        cfgmod = self._fresh_config(tempfile.mkdtemp())
+        d = cfgmod.load_setup("IR")
+        self.assertEqual(d.get("_load_status"), "missing")
+
+    def test_save_strips_load_status(self):
+        import json, tempfile
+        tmp = tempfile.mkdtemp()
+        cfgmod = self._fresh_config(tmp)
+        d = cfgmod.make_default_setup("Green")
+        d["_load_status"] = "missing"
+        cfgmod.save_setup("Green", d)
+        with open(os.path.join(tmp, "Green.json")) as f:
+            saved = json.load(f)
+        self.assertNotIn("_load_status", saved)
 
 
 if __name__ == '__main__':

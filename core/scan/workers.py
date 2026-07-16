@@ -241,8 +241,14 @@ class ScanlistWorker(QThread):
         else:
             sl_dir   = os.path.join(base, "ScanLists")
         os.makedirs(sl_dir, exist_ok=True)
-        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-        txt_path = os.path.join(sl_dir, f"{self.list_name}_{ts}.txt")
+        # list_name already begins with a YYYYMMDD date (from build_scan_name);
+        # no time suffix by request.  If the same scanlist name is run again
+        # the same day, a _2/_3… suffix avoids overwriting the earlier list.
+        txt_path = os.path.join(sl_dir, f"{self.list_name}.txt")
+        _n = 2
+        while os.path.exists(txt_path):
+            txt_path = os.path.join(sl_dir, f"{self.list_name}_{_n}.txt")
+            _n += 1
 
         results = []
         scan_idx = 0   # global counter across all cycles × directions
@@ -300,7 +306,13 @@ class ScanlistWorker(QThread):
                 })
 
                 relay_sign = +1 if self._relay_state == 0 else -1
-                if fn:
+                if fn and self._abort:
+                    # Aborted mid-scan: the partial HDF5 exists (marked
+                    # "aborted") but must NOT be recorded in the scanlist —
+                    # the analysis would average the truncated scan in.
+                    self.log_msg.emit(
+                        f"Aborted scan not recorded in scanlist: {fn}")
+                elif fn:
                     results.append((fn, relay_sign, field_T))
                     self.scan_done.emit(scan_idx, fn)
                 scan_idx += 1

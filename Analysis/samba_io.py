@@ -193,6 +193,18 @@ def load_hyst_cycles(path: str) -> dict:
     return out
 
 
+def _require_cycles(cyc):
+    """Raise a clear error when load_hyst_cycles() returned None (bad path or
+    a non-DC_HYST file) instead of letting callers crash on NoneType."""
+    if cyc is None:
+        raise ValueError(
+            "no per-cycle data: load_hyst_cycles() returned None. Check that "
+            "the path is correct (use the FULL path including the YYYYMMDD "
+            "date folder) and that the file is a DC_HYST scan containing "
+            "/data/cycles (TIME/SPATIAL/FIELD scans have no cycles).")
+    return cyc
+
+
 def _included_mask(cyc: dict, exclude=()):
     """Boolean [n_cycles] mask of valid, non-excluded cycles (1-based exclude)."""
     valid = cyc['valid'].copy()
@@ -203,14 +215,76 @@ def _included_mask(cyc: dict, exclude=()):
     return valid
 
 
-def hyst_cycle_average(cyc: dict, exclude=()) -> dict:
+def hyst_align_cycles(cyc: dict, tail_frac: float = 0.10) -> dict:
+    """Remove balanced-diode drift from every cycle before averaging.
+
+    The balanced diode drifts slowly (minutes), so consecutive DC-hyst cycles
+    sit at wildly different vertical levels — often several times the loop
+    amplitude over a long measurement — and the up- and down-sweep halves of
+    one cycle carry a small relative offset.  Both are pure baseline artefacts:
+    at magnetic saturation the Kerr signal is pinned to the same two levels in
+    every cycle and both sweep directions, so any level difference there is
+    diode drift, not physics.
+
+    For every cycle and every HALF-loop independently (positive sweep = first
+    ``n_loop/2`` points, negative sweep = the rest), the saturated tails — the
+    ``tail_frac`` fraction of that half's points with the most positive and
+    most negative field — give the half's two saturation levels; the half is
+    shifted so their midpoint sits at zero.  This centres every cycle on a
+    common baseline *and* zeroes the up/down branch offset, while leaving each
+    half's measured amplitude (and therefore Ms, Mr, Hc) untouched.
+
+    Note: the absolute signal level is discarded (it is meaningless for a
+    drifting balanced diode).  Loops that do not reach saturation within the
+    swept field range will be mis-centred — this assumes saturated tails.
+
+    Returns a shallow copy of ``cyc`` with aligned ``result1``..``result6``
+    (``field`` and metadata unchanged) plus ``aligned = True``.
+    """
+    cyc = _require_cycles(cyc)
+    out = dict(cyc)
+    n_cyc, n_loop = cyc['field'].shape
+    half = n_loop // 2
+    n_tail = max(1, int(round(tail_frac * half)))
+
+    for name in _HYST_BLOCKS:
+        if name == 'field':
+            continue
+        sig = cyc[name].copy()
+        for c in range(n_cyc):
+            if not cyc['valid'][c]:
+                continue
+            fld = cyc['field'][c]
+            for sl in (slice(0, half), slice(half, n_loop)):
+                f, y = fld[sl], sig[c, sl]
+                order = np.argsort(f)          # most-negative … most-positive
+                lo, hi = order[:n_tail], order[-n_tail:]
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', category=RuntimeWarning)
+                    mid = 0.5 * (np.nanmean(y[hi]) + np.nanmean(y[lo]))
+                if np.isfinite(mid):
+                    sig[c, sl] = y - mid
+        out[name] = sig
+    out['aligned'] = True
+    return out
+
+
+def hyst_cycle_average(cyc: dict, exclude=(), align: bool = False,
+                       tail_frac: float = 0.10) -> dict:
     """Average the retained cycles, dropping 1-based cycle numbers in ``exclude``.
 
     Mirrors the device's ``RecomputeAverage`` offline so a bad scan can be
     kicked out of the average without re-measuring.  Returns a dict with
     ``field`` and ``result1``..``result6`` each a 1-D ``[n_loop]`` array, plus
     ``included`` (the 1-based cycle numbers used).
+
+    ``align=True`` first removes per-half-loop baseline drift via
+    :func:`hyst_align_cycles` (see there), so slow balanced-diode drift no
+    longer smears the average or offsets the up- vs down-sweep branches.
     """
+    cyc = _require_cycles(cyc)
+    if align and not cyc.get('aligned'):
+        cyc = hyst_align_cycles(cyc, tail_frac=tail_frac)
     mask = _included_mask(cyc, exclude)
     if not mask.any():
         raise ValueError("hyst_cycle_average: every cycle is excluded/invalid")
@@ -232,6 +306,7 @@ def hyst_detect_outliers(cyc: dict, channel: str = 'result1',
     sorted list of 1-based cycle numbers.  With < 3 valid cycles there is no
     robust baseline, so an empty list is returned.
     """
+    cyc = _require_cycles(cyc)
     if channel not in cyc:
         raise KeyError(f"hyst_detect_outliers: unknown channel {channel!r}")
     valid = cyc['valid']
@@ -252,16 +327,21 @@ def hyst_detect_outliers(cyc: dict, channel: str = 'result1',
 
 
 def plot_hyst_cycles(cyc: dict, channel: str = 'result1', exclude=(),
-                     ax=None, show_average: bool = True):
+                     ax=None, show_average: bool = True,
+                     align: bool = False, tail_frac: float = 0.10):
     """Overlay each retained cycle's loop (faint) + the average (bold).
 
-    Excluded/invalid cycles are drawn dashed.  ``matplotlib`` is imported
-    lazily so the rest of this module stays usable without it.  Returns the
-    matplotlib Axes.
+    Excluded/invalid cycles are drawn dashed.  ``align=True`` removes the
+    per-half-loop diode-drift baseline first (see :func:`hyst_align_cycles`).
+    ``matplotlib`` is imported lazily so the rest of this module stays usable
+    without it.  Returns the matplotlib Axes.
     """
+    cyc = _require_cycles(cyc)
     import matplotlib.pyplot as plt
     if ax is None:
         _, ax = plt.subplots()
+    if align and not cyc.get('aligned'):
+        cyc = hyst_align_cycles(cyc, tail_frac=tail_frac)
     mask = _included_mask(cyc, exclude)
     field, sig = cyc['field'], cyc[channel]
     label = cyc['labels'].get(channel, channel)

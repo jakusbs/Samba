@@ -50,6 +50,7 @@ from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
 from panels.bd_calibration import BDCalibrationPanel
+from panels.sensor_picker import SensorPickerRow
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
 from calibration import CalibrationPanel
@@ -238,6 +239,7 @@ class MainWindow(QMainWindow):
         self._dc_loop_y:   Dict[str, list] = {}
         self._last_dc_cycle: int = 0
         self._active_cfg_idx:    int                      = 0
+        self._switching_setup:   bool                     = False
         self._current_scan_cfg:  dict                     = {}
         self._calib_timescan:    bool                     = False
         self._scan_start_time:   float                    = 0.0
@@ -245,6 +247,8 @@ class MainWindow(QMainWindow):
         self._trmoke_x_factor:   Optional[float]          = None
         self._meta_syncing:      bool                     = False
         self._timing_syncing:    bool                     = False
+        self._last_sample_id:    str                      = ""
+        self._autopause_notified: bool                    = False
 
         # ── Bottom status-bar state (live scan progress) ────────────────────
         self._run_start_time:     float = 0.0   # set once per run, NOT reset per direction
@@ -257,6 +261,12 @@ class MainWindow(QMainWindow):
 
         for n in SETUP_NAMES:
             self._setups[n] = load_setup(n)
+        # Surface load problems once the event loop runs (silent defaults hid
+        # unreadable/missing setup files — e.g. after copying ~/.config to a
+        # new machine — and the next auto-save then overwrote the real file).
+        self._setup_load_warnings = self._collect_setup_load_warnings()
+        if self._setup_load_warnings:
+            QTimer.singleShot(0, self._show_setup_load_warnings)
 
         self.setStyleSheet(DARK_STYLE)
         self._build_ui()
@@ -564,8 +574,10 @@ class MainWindow(QMainWindow):
             w   = widget_cls(); setattr(self, widget_attr, w); lay.addWidget(w)
             self.live_tabs.addTab(tab, title)
 
-        self.calib_panel = CalibrationPanel(self._active_setup,
-                                              config_getter=self._build_full_config)
+        self.calib_panel = CalibrationPanel(
+            self._active_setup, config_getter=self._build_full_config,
+            sensor_row_factory=lambda **kw: SensorPickerRow(
+                self._registry_now(), **kw))
         self.live_tabs.addTab(self.calib_panel, "Calibration")
         self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
 
@@ -637,10 +649,27 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
     # ── Bottom status bar ─────────────────────────────────────────────────────
+
+    # ── Status-bar state tint (visible from across the room) ─────────────────
+    _SB_TINTS = {
+        "idle":    "QStatusBar{background:#181825;border-top:2px solid #313244;}",
+        "running": "QStatusBar{background:#16241b;border-top:2px solid #a6e3a1;}",
+        "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
+    }
+
+    def _tint_status_bar(self, state: str):
+        """Tint the bottom status bar by scan state: green while running,
+        peach while paused (manual or auto), neutral when idle."""
+        sb = getattr(self, "_sb", None)
+        if sb is not None:
+            sb.setStyleSheet(self._SB_TINTS.get(state, self._SB_TINTS["idle"]))
+
     def _build_status_bar(self):
         """Seven-field QStatusBar showing live scan-run progress."""
         sb = QStatusBar()
         self.setStatusBar(sb)
+        self._sb = sb
+        sb.setStyleSheet(self._SB_TINTS["idle"])
         container = QWidget()
         row = QHBoxLayout(container)
         row.setContentsMargins(8, 0, 8, 0); row.setSpacing(0)
@@ -739,6 +768,7 @@ class MainWindow(QMainWindow):
 
     def _status_bar_run_start(self, cfg: dict, n_scans_total: int):
         """Reset status-bar state at the start of a scan run."""
+        self._autopause_notified = False   # re-arm the auto-pause popup
         self._run_start_time     = _time.time()
         self._run_scans_done     = 0
         self._run_scans_total    = max(1, int(n_scans_total))
@@ -794,6 +824,7 @@ class MainWindow(QMainWindow):
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         # When setup defaults are edited, save them and update trajectory labels
         self.setup_defaults.defaults_changed.connect(self._on_defaults_changed)
+        self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
         # When scan mode changes, swap right panel between normal/DC
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
 
@@ -809,6 +840,12 @@ class MainWindow(QMainWindow):
         # ── Metadata bidirectional sync (Trajectory ↔ Scanlist) ──────────────
         self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
         self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
+
+        # New-sample popup: offer a fresh BD calibration when the sample ID is
+        # edited by hand (programmatic setText — config loads, meta sync — does
+        # not emit editingFinished, so only genuine user edits trigger this).
+        self.traj_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+        self.sl_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
 
         # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
         self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
@@ -852,6 +889,13 @@ class MainWindow(QMainWindow):
         self._save_active_config()
         self._active_setup_name = SETUP_NAMES[idx]
         self._active_cfg_idx    = self._active_setup().get("active_idx", 0)
+        # Highlight the new setup's active config (blockSignals so this doesn't
+        # re-enter _on_config_selected — the switch is already the authority).
+        lw = self.cfg_list.active_list()
+        if 0 <= self._active_cfg_idx < lw.count():
+            lw.blockSignals(True)
+            lw.setCurrentRow(self._active_cfg_idx)
+            lw.blockSignals(False)
         # Sync hidden QTabBar and pill buttons
         self._setup_tab_bar.blockSignals(True)
         self._setup_tab_bar.setCurrentIndex(idx)
@@ -884,7 +928,37 @@ class MainWindow(QMainWindow):
 
     def _action_bar_setup_clicked(self, idx):
         """Called when a setup tab (Green/IR/Cryo) is clicked in the action bar."""
-        self.cfg_list.setup_tabs.setCurrentIndex(idx)  # triggers _on_setup_changed
+        cur = SETUP_NAMES.index(self._active_setup_name)
+        # Refuse a setup switch while a scan/scanlist is running: it would
+        # reload the panels/live-display config of the other setup over the
+        # running one (label/unit mixing) and, worse, retarget the setup lock
+        # that the running scan still holds.  Bounce the UI back to the running
+        # setup and tell the user.
+        if self._scan_running and idx != cur:
+            self._resync_setup_ui(cur)
+            self.status_lbl.setText(
+                "⚠ Finish or abort the current scan before switching setup.")
+            return
+        # setCurrentIndex synchronously fires _on_tab_changed (which would emit a
+        # spurious config_selected against the still-old setup) and then
+        # _on_setup_changed.  Guard the window so the former is ignored; the
+        # latter is the single authority for the switch.
+        self._switching_setup = True
+        try:
+            self.cfg_list.setup_tabs.setCurrentIndex(idx)  # triggers _on_setup_changed
+        finally:
+            self._switching_setup = False
+
+    def _resync_setup_ui(self, idx: int):
+        """Force the hidden tab-bar and pill buttons to reflect setup `idx`
+        without re-triggering a switch (used to bounce a blocked mid-scan
+        switch back to the running setup)."""
+        self._setup_tab_bar.blockSignals(True)
+        self._setup_tab_bar.setCurrentIndex(idx)
+        self._setup_tab_bar.blockSignals(False)
+        btn = self._setup_btn_grp.button(idx)
+        if btn:
+            btn.blockSignals(True); btn.setChecked(True); btn.blockSignals(False)
 
     def _on_new_config(self):
         """Create a blank new config: SPATIAL scan along X, no sensors loaded."""
@@ -898,10 +972,17 @@ class MainWindow(QMainWindow):
         new_idx = len(self._active_setup()["configs"]) - 1
         self._active_cfg_idx = new_idx
         self._active_setup()["active_idx"] = new_idx
-        self.cfg_list.add_item(new_cfg["name"])
+        self.cfg_list.add_item(new_cfg["name"], self._active_setup_name)
         save_setup(self._active_setup_name, self._active_setup())
 
     def _on_config_selected(self, idx):
+        # Ignore the config-list's own currentChanged→config_selected that fires
+        # while a setup switch is in progress: at that moment _active_setup_name
+        # is still the OLD setup, so applying the NEW list's row here would
+        # overwrite the old setup's active_idx (the "switching setups keeps the
+        # other setup's selection" bug).  _on_setup_changed drives the switch.
+        if getattr(self, "_switching_setup", False):
+            return
         if idx == -1:
             self._save_active_config()
             src = copy.deepcopy(self._active_setup()["configs"][self._active_cfg_idx])
@@ -910,7 +991,7 @@ class MainWindow(QMainWindow):
             new_idx = len(self._active_setup()["configs"]) - 1
             self._active_cfg_idx = new_idx
             self._active_setup()["active_idx"] = new_idx
-            self.cfg_list.add_item(src["name"])
+            self.cfg_list.add_item(src["name"], self._active_setup_name)
             save_setup(self._active_setup_name, self._active_setup()); return
         self._save_active_config()
         self._active_cfg_idx = idx
@@ -921,7 +1002,7 @@ class MainWindow(QMainWindow):
     def _on_config_deleted(self, idx: int):
         configs = self._active_setup()["configs"]
         if len(configs) <= 1: return
-        configs.pop(idx); self.cfg_list.remove_item(idx)
+        configs.pop(idx); self.cfg_list.remove_item(idx, self._active_setup_name)
         new_idx = min(idx, len(configs) - 1)
         self._active_cfg_idx = new_idx
         self._active_setup()["active_idx"] = new_idx
@@ -932,7 +1013,7 @@ class MainWindow(QMainWindow):
         configs = self._active_setup()["configs"]
         if 0 <= idx < len(configs):
             configs[idx]["name"] = name
-            self.cfg_list.rename_item(idx, name)
+            self.cfg_list.rename_item(idx, name, self._active_setup_name)
             save_setup(self._active_setup_name, self._active_setup())
 
     def _load_active_config(self):
@@ -956,6 +1037,8 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
+        self.calib_panel.set_lights_device(setup.get("lights_device", ""))
+        self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
         self.calib_panel.configure_stage(
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
@@ -963,6 +1046,18 @@ class MainWindow(QMainWindow):
         )
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
+        # ── Shared (setup-level) metadata ────────────────────────────────────
+        # Metadata (sample / device / notes / optics / resistances) describes the
+        # physical sample under test, which is constant across scan types.  It is
+        # stored once per setup and re-applied here, overriding the per-config
+        # copy that load_config() just set, so switching between a map, a line
+        # scan, a field sweep, etc. keeps "the same sample".  Old setups without
+        # a shared block fall back to the config's own metadata.
+        shared_meta = setup.get("metadata")
+        if shared_meta:
+            self.traj_panel.meta.load_values(shared_meta)
+            self.sl_panel.meta.load_values(shared_meta)
+        self._last_sample_id = self.traj_panel.meta.meta_sample.text().strip()
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -983,6 +1078,13 @@ class MainWindow(QMainWindow):
             self.bd_cal_panel.set_status(
                 f"Loaded from setup '{self._active_setup_name}'"
                 + (f" ({date_str})" if date_str else "") + ".")
+        else:
+            # No saved calibration for THIS setup — clear the panel instead of
+            # silently keeping the previous setup's values (which would be
+            # injected into every scan's HDF5 as this setup's calibration).
+            self.bd_cal_panel.load_calibration([0.0] * 6)
+            self.bd_cal_panel.set_status(
+                f"No BD calibration saved for setup '{self._active_setup_name}' yet.")
 
     def _save_active_config(self):
         setup   = self._active_setup()
@@ -995,11 +1097,18 @@ class MainWindow(QMainWindow):
         old["colormap"]       = self.right_panel.get_colormap()
         old["hyst_channels"]  = self.right_panel.get_dc_channels()
         old["hyst_sources"]   = self.right_panel.get_dc_sources()
+        # Metadata is shared across all configs of this setup (same sample) —
+        # persist it at setup level so it survives config/scan-type switches.
+        setup["metadata"] = self.traj_panel.meta.get_values()
         # Sync save_dir, server_sync_dir, and setup defaults back into setup
         setup["save_dir"] = self.save_dir.text().strip()
         setup["server_sync_dir"] = self.server_dir.text().strip()
         setup.update(self.setup_defaults.get_defaults())
-        self.cfg_list.sync_name(idx, old["name"])
+        # Route by the authoritative setup NAME, not the current tab: during a
+        # setup switch this save runs while the tab already shows the NEW setup
+        # but the data (and this name) belong to the OLD one — routing by tab
+        # used to transport the old config's name into the new setup's list.
+        self.cfg_list.sync_name(idx, old["name"], self._active_setup_name)
         save_setup(self._active_setup_name, setup)
         self._update_estimate()
 
@@ -1085,6 +1194,36 @@ class MainWindow(QMainWindow):
         finally:
             self._meta_syncing = False
 
+    def _on_sample_id_edited(self):
+        """User finished editing the Sample field. If the name actually
+        changed, offer to start a fresh BD calibration for the new sample:
+        Yes → empty the 6 mV values and jump to the BD Calibration tab
+        (the tab's first-open reload prompt is suppressed — it would offer
+        the OLD sample's calibration right back)."""
+        sender = self.sender()
+        new_id = sender.text().strip() if sender is not None else \
+            self.traj_panel.meta.meta_sample.text().strip()
+        if new_id == self._last_sample_id:
+            return
+        old_id = self._last_sample_id
+        self._last_sample_id = new_id
+        if not new_id:
+            return
+        ans = QMessageBox.question(
+            self, "New sample",
+            f"Sample changed to '{new_id}'"
+            + (f" (was '{old_id}')" if old_id else "")
+            + ".\n\nStart a new BD calibration for it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.bd_cal_panel.suppress_prompt(self._active_setup_name)
+        self.bd_cal_panel.load_calibration([0.0] * 6)
+        self.bd_cal_panel.set_status(
+            f"New calibration for sample '{new_id}' — enter the 6 mV values and Save.")
+        self.bottom_tabs.setCurrentWidget(self.bd_cal_panel)
+
     def _sync_sl_meta_to_traj(self):
         if self._meta_syncing: return
         self._meta_syncing = True
@@ -1130,13 +1269,55 @@ class MainWindow(QMainWindow):
         date_str = setup.get("bd_calibration_date", "unknown date")
         return vals, date_str
 
+    def _registry_now(self) -> list:
+        """Current device registry — the registry panel once built, else disk."""
+        dr = getattr(self, "dev_registry", None)
+        return dr.get_registry() if dr is not None else load_registry()
+
     def _on_registry_changed(self):
         """Called when the Device Registry is saved — update the right panel and monitor."""
         registry = self.dev_registry.get_registry()
         self.right_panel.set_registry(registry)
         self.traj_panel.populate_monitor_combo(registry)
         self.setup_defaults.set_registry(registry)
+        # Rebuild the calibration tab's own sensor rows with the new registry
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _collect_setup_load_warnings(self) -> list:
+        """Inspect each setup's _load_status (set by load_setup) and build
+        user-facing warnings.  'missing' is only reported when at least one
+        OTHER setup loaded fine — all-missing is a normal first run."""
+        statuses = {n: s.pop("_load_status", "ok")
+                    for n, s in self._setups.items()}
+        msgs = []
+        for n, st in statuses.items():
+            if st.startswith("error"):
+                msgs.append(
+                    f"Setup '{n}': the saved configuration could not be read "
+                    f"({st[7:][:150]}).\nThe unreadable file was backed up to "
+                    f"~/.config/moke_scan/{n}.json.bad — default configs are "
+                    f"shown, and saving will overwrite {n}.json.")
+        missing = [n for n, st in statuses.items() if st == "missing"]
+        if missing and len(missing) < len(statuses):
+            msgs.append(
+                "No saved configuration file found for setup(s): "
+                + ", ".join(missing)
+                + "\n(expected in ~/.config/moke_scan/) — started with "
+                  "default configs. If you copied configs from another "
+                  "machine, check that every <Setup>.json arrived.")
+        return msgs
+
+    def _show_setup_load_warnings(self):
+        QMessageBox.warning(self, "Setup configuration",
+                            "\n\n".join(self._setup_load_warnings))
+
+    def _on_calib_timescan_changed(self):
+        """Persist the calibration tab's own time-scan settings per setup."""
+        setup = self._active_setup()
+        setup["calib_timescan"] = self.calib_panel.get_timescan_settings()
+        save_setup(self._active_setup_name, setup)
 
     def _on_defaults_changed(self):
         """Called when Setup Defaults are edited — save to setup dict immediately."""
@@ -1152,6 +1333,7 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
+        self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
         self.calib_panel.configure_stage(
             defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
@@ -1219,6 +1401,7 @@ class MainWindow(QMainWindow):
         # Disable hardware Read buttons during scan to prevent concurrent TANGO
         # access on the ZI device (Device_4Impl is single-threaded; simultaneous
         # state() + read_attribute() calls cause IMP_LIMIT CORBA exceptions).
+        self._tint_status_bar("running" if running else "idle")
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
@@ -1240,11 +1423,17 @@ class MainWindow(QMainWindow):
             partial["act1_device"]  = dg_path
             partial["trmoke_dg645"] = dg_path
         else:
-            # Spatial / Field / Time: stage device+attr always from setup defaults
+            # Spatial / Field / Time: stage device+attr+label+unit are authoritative
+            # from setup defaults, so a stale panel label can't leak wrong labels/
+            # units into the scan or the saved HDF5 axis.
             partial["act1_device"] = setup.get("act1_device", "")
             partial["act1_attr"]   = setup.get("act1_attr",   "x")
             partial["act2_device"] = setup.get("act2_device", "")
             partial["act2_attr"]   = setup.get("act2_attr",   "y")
+            partial["act1_label"]  = setup.get("act1_label", partial.get("act1_label", "X"))
+            partial["act1_unit"]   = setup.get("act1_unit",  partial.get("act1_unit",  "nm"))
+            partial["act2_label"]  = setup.get("act2_label", partial.get("act2_label", "Y"))
+            partial["act2_unit"]   = setup.get("act2_unit",  partial.get("act2_unit",  "nm"))
         # DC hyst channels live in the right panel now
         if partial.get("scan_type") == "DC_HYST":
             dc_sensors = self.right_panel.get_dc_channels()
@@ -1262,6 +1451,14 @@ class MainWindow(QMainWindow):
                     if ch.get("enabled") and ch.get("device"):
                         partial["hyst_device"] = ch["device"]
                         break
+
+        # ── BD calibration — injected here (the single build path shared by
+        # every start route: single scan, scanlist, DC-hyst and the
+        # calibration time scan) so the 6 mV λ/2 values reach HDF5 for all
+        # scan types, not just the standard SPATIAL/FIELD path.
+        bd_panel = getattr(self, "bd_cal_panel", None)
+        if bd_panel is not None:
+            partial["bd_calibration"] = bd_panel.get_calibration()
         return partial
 
     # ── Scan geometry helpers ─────────────────────────────────────────────────
@@ -1351,6 +1548,28 @@ class MainWindow(QMainWindow):
                                     "Enable at least one sensor.")
                 return None
         return active
+
+    def _apply_field_setpoint_for_scan(self, cfg: dict, hw_panel):
+        """Push the hardware panel's magnet-current setpoint to the magnet at
+        scan start, so the measurement runs at the field shown in the write
+        window (an aborted scanlist auto-zeroes the magnet while the window
+        still displays the old setpoint).  FIELD sweeps and DC hysteresis
+        drive the magnet themselves and are skipped."""
+        if cfg.get("scan_type") in ("FIELD", "DC_HYST"):
+            return
+        try:
+            val, err = hw_panel.apply_field_setpoint()
+        except Exception as e:
+            self._log_append(f"⚠ Field setpoint apply failed: {e}", level="warning")
+            return
+        if err in ("simulation", "no magnet device configured"):
+            return
+        if err:
+            self._log_append(f"⚠ Could not apply field setpoint {val:.4g} A "
+                             f"at scan start: {err}", level="warning")
+        else:
+            self._log_append(f"Field setpoint {val:.4g} A applied to magnet "
+                             f"(scan start)", level="info")
 
     def _wire_worker(self, worker: ScanWorker):
         """Connect the standard signals shared by all scan workers."""
@@ -1444,8 +1663,11 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass  # fail-open: device unreachable, proceed
 
-        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
+
+        # Apply the displayed field setpoint so the scan runs at the field the
+        # write window shows (an aborted scanlist may have auto-zeroed it).
+        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
@@ -1477,24 +1699,41 @@ class MainWindow(QMainWindow):
         cfg["scan_x"] = False
         cfg["scan_y"] = False
 
+        # The calibration tab has its own hidden config: points + integration
+        # time come from its Time-scan settings group, not the scan config
+        # selected in the left panel.
+        ts = self.calib_panel.get_timescan_settings()
+        cfg["act1_npts"]        = int(ts["npts"])
+        cfg["integration_time"] = float(ts["int_time"])
+        # The tab's own sensors (its hidden config), not the left panel's
+        cal_sensors = ts.get("sensors") or []
+        if cal_sensors:
+            cfg["sensors"] = cal_sensors
+
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
-            QMessageBox.warning(self, "No sensors",
-                                "Enable at least one sensor."); return
+            QMessageBox.warning(
+                self, "No sensors",
+                "Enable at least one sensor in the Calibration tab's "
+                "Time-scan config."); return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
         self._calib_timescan = True
 
-        # For the calibration plot, only show sensors that aren't hidden
+        # Plot the sensors marked visible in the right panel; they keep their
+        # Y1/Y2 assignment (the calibration plot has a twin right axis).
         plot_sensors = [s for s in active
                         if s.get("plot_visible", True)
                         and s.get("y_axis", s.get("plot_axis", "Y1")) not in ("hidden", "—", "X")]
-        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors if plot_sensors else active)
+        self.calib_panel.focus_plot.setup_timescan(
+            n_pts, plot_sensors if plot_sensors else active)
 
         # Also set up the main live display for the Log tab
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
+
+        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
 
         self._worker = ScanWorker(cfg, setup)
         self._wire_worker(self._worker)
@@ -1565,6 +1804,20 @@ class MainWindow(QMainWindow):
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            # Error popup — once per auto-pause event ("AUTO-PAUSED" marker is
+            # emitted by every engine auto-pause path; a manual Pause never
+            # carries it, so the popup only appears for real failures).
+            self._tint_status_bar("paused")
+            if "AUTO-PAUSED" in msg and not self._autopause_notified:
+                self._autopause_notified = True
+                QMessageBox.warning(
+                    self, "Measurement paused",
+                    f"{msg}\n\nThe scan is holding at the failing point — no "
+                    "data has been recorded for it. Fix the device, then "
+                    "press Resume to retry the same point (or Abort to stop).")
+        elif _active_worker:
+            self._autopause_notified = False
+            self._tint_status_bar("running")
 
     def _on_progress(self, done: int, total: int):
         """Record scan progress for the bottom status bar."""
@@ -1580,6 +1833,10 @@ class MainWindow(QMainWindow):
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
         self._calib_timescan = False
+        # Drop the finished worker: _toggle_pause/_on_status pick the target via
+        # `self._worker or self._sl_worker`, so a stale finished single-scan
+        # worker would swallow Pause clicks during a later scanlist run.
+        self._worker = None
         # Auto-zero the field after every DC hysteresis scan
         if cfg_type == "DC_HYST":
             self._log_append("DC hyst complete — auto-zeroing field…", level="info")
@@ -1621,10 +1878,12 @@ class MainWindow(QMainWindow):
             worker.resume()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
+            self._tint_status_bar("running")
         else:
             worker.pause()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            self._tint_status_bar("paused")
 
     def _abort_scan(self):
         if not self._scan_running: return
@@ -1643,8 +1902,11 @@ class MainWindow(QMainWindow):
         self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
-        # ── BD calibration — injected into cfg for HDF5 storage ──────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
+
+        # Apply the displayed field setpoint so the scanlist starts at the
+        # field the write window shows (a previous abort auto-zeroed it).
+        self._apply_field_setpoint_for_scan(cfg, self.sl_panel.hw)
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
@@ -1686,6 +1948,9 @@ class MainWindow(QMainWindow):
             entry = dict(self._current_scan_cfg)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
+            # Mark this row as part of the scanlist (blank for single scans).
+            if self._sl_worker is not None:
+                entry["_scanlist_name"] = getattr(self._sl_worker, "list_name", "")
             for _k in ("geometry", "stage_type",
                        "hw_temperature_K",
                        "_temp_sweep_start_K", "_temp_sweep_stop_K", "_temp_sweep_step_K"):

@@ -63,7 +63,7 @@ from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
-                     TrajectoryPanel, ScanlistPanel)
+                     TrajectoryPanel, ScanlistPanel, SensorPickerRow)
 from panels_cryo import CryoHardwarePanel
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
@@ -347,6 +347,8 @@ class CryoMainWindow(QMainWindow):
         self._scan_running:        bool                     = False
         self._meta_syncing:        bool                     = False
         self._timing_syncing:      bool                     = False
+        self._last_sample_id:      str                      = ""
+        self._autopause_notified:  bool                     = False
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -373,6 +375,16 @@ class CryoMainWindow(QMainWindow):
 
         # Only load Cryo setup
         self._setups[CRYO_SETUP] = load_setup(CRYO_SETUP)
+        # Surface load problems once the event loop runs (a silently-defaulted
+        # setup after an unreadable file would be overwritten on the next save).
+        _st = self._setups[CRYO_SETUP].pop("_load_status", "ok")
+        if _st.startswith("error"):
+            _msg = (f"The saved Cryo configuration could not be read "
+                    f"({_st[7:][:150]}).\nThe unreadable file was backed up to "
+                    f"~/.config/moke_scan/{CRYO_SETUP}.json.bad — default "
+                    f"configs are shown, and saving will overwrite it.")
+            QTimer.singleShot(0, lambda m=_msg: QMessageBox.warning(
+                self, "Setup configuration", m))
 
         self.setStyleSheet(CRYO_STYLE)
         self._build_ui()
@@ -652,6 +664,8 @@ class CryoMainWindow(QMainWindow):
         self.live_tabs.addTab(plot_tab, "1D Plot")
 
         self.calib_panel = CryoCalibrationPanel(self._active_setup,
+            sensor_row_factory=lambda **kw: SensorPickerRow(
+                self._registry_now(), **kw),
                                                   config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
         self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
@@ -797,10 +811,27 @@ class CryoMainWindow(QMainWindow):
         self._build_status_bar()
 
     # ── Bottom status bar ─────────────────────────────────────────────────────
+
+    # ── Status-bar state tint (visible from across the room) ─────────────────
+    _SB_TINTS = {
+        "idle":    "QStatusBar{background:#181825;border-top:2px solid #313244;}",
+        "running": "QStatusBar{background:#16241b;border-top:2px solid #a6e3a1;}",
+        "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
+    }
+
+    def _tint_status_bar(self, state: str):
+        """Tint the bottom status bar by scan state: green while running,
+        peach while paused (manual or auto), neutral when idle."""
+        sb = getattr(self, "_sb", None)
+        if sb is not None:
+            sb.setStyleSheet(self._SB_TINTS.get(state, self._SB_TINTS["idle"]))
+
     def _build_status_bar(self):
         """Seven-field QStatusBar showing live scan-run progress."""
         sb = QStatusBar()
         self.setStatusBar(sb)
+        self._sb = sb
+        sb.setStyleSheet(self._SB_TINTS["idle"])
         container = QWidget()
         row = QHBoxLayout(container)
         row.setContentsMargins(8, 0, 8, 0); row.setSpacing(0)
@@ -899,6 +930,7 @@ class CryoMainWindow(QMainWindow):
 
     def _status_bar_run_start(self, cfg: dict, n_scans_total: int):
         """Reset status-bar state at the start of a scan run."""
+        self._autopause_notified = False   # re-arm the auto-pause popup
         self._run_start_time     = _time.time()
         self._run_scans_done     = 0
         self._run_scans_total    = max(1, int(n_scans_total))
@@ -952,6 +984,7 @@ class CryoMainWindow(QMainWindow):
         self.right_panel.plot_config_changed.connect(self._on_plot_config_changed)
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         self.defaults_panel.defaults_changed.connect(self._on_defaults_changed)
+        self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
         self._geo_btn_grp.buttonClicked.connect(self._on_geometry_changed)
         self._piezo_btn_grp.buttonClicked.connect(self._on_stage_type_changed)
@@ -966,6 +999,12 @@ class CryoMainWindow(QMainWindow):
         # ── Metadata bidirectional sync (Trajectory ↔ Scanlist) ──────────────
         self.traj_panel.meta.changed.connect(self._sync_traj_meta_to_sl)
         self.sl_panel.meta.changed.connect(self._sync_sl_meta_to_traj)
+
+        # New-sample popup: offer a fresh BD calibration when the sample ID is
+        # edited by hand (programmatic setText — config loads, meta sync — does
+        # not emit editingFinished, so only genuine user edits trigger this).
+        self.traj_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
+        self.sl_panel.meta.meta_sample.editingFinished.connect(self._on_sample_id_edited)
 
         # ── Timing bidirectional sync (Trajectory ↔ Scanlist) ────────────────
         self.traj_panel.int_time.valueChanged.connect(self._sync_traj_timing_to_sl)
@@ -1062,6 +1101,16 @@ class CryoMainWindow(QMainWindow):
         registry = self.dev_registry.get_registry()
         self.traj_panel.populate_monitor_combo(registry)
         self.traj_panel.load_config(cfg)
+        # ── Shared (setup-level) metadata ────────────────────────────────────
+        # Metadata describes the physical sample under test, which is constant
+        # across scan types.  Stored once per setup and re-applied here, so
+        # switching between a map, a line scan, a field/temperature sweep, etc.
+        # keeps "the same sample".  Old setups fall back to the config's copy.
+        shared_meta = setup.get("metadata")
+        if shared_meta:
+            self.traj_panel.meta.load_values(shared_meta)
+            self.sl_panel.meta.load_values(shared_meta)
+        self._last_sample_id = self.traj_panel.meta.meta_sample.text().strip()
         self.traj_panel.load_monitor_settings(cfg)
         self.right_panel.load_sensors(cfg.get("sensors", DEFAULT_SENSORS))
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
@@ -1111,6 +1160,9 @@ class CryoMainWindow(QMainWindow):
         old["colormap"]       = self.right_panel.get_colormap()
         old["geometry"]       = self._get_current_geometry()
         old["stage_type"]     = self._get_current_stage_type()
+        # Metadata is shared across all configs of this setup (same sample) —
+        # persist it at setup level so it survives config/scan-type switches.
+        self._active_setup()["metadata"] = self.traj_panel.meta.get_values()
         self._active_setup()["save_dir"] = self.save_dir.text().strip()
         self._active_setup()["server_sync_dir"] = self.server_dir.text().strip()
         self.cfg_list.sync_name(idx, old["name"])
@@ -1191,6 +1243,36 @@ class CryoMainWindow(QMainWindow):
         finally:
             self._meta_syncing = False
 
+    def _on_sample_id_edited(self):
+        """User finished editing the Sample field. If the name actually
+        changed, offer to start a fresh BD calibration for the new sample:
+        Yes → empty the 6 mV values and jump to the BD Calibration tab
+        (the tab's first-open reload prompt is suppressed — it would offer
+        the OLD sample's calibration right back)."""
+        sender = self.sender()
+        new_id = sender.text().strip() if sender is not None else \
+            self.traj_panel.meta.meta_sample.text().strip()
+        if new_id == self._last_sample_id:
+            return
+        old_id = self._last_sample_id
+        self._last_sample_id = new_id
+        if not new_id:
+            return
+        ans = QMessageBox.question(
+            self, "New sample",
+            f"Sample changed to '{new_id}'"
+            + (f" (was '{old_id}')" if old_id else "")
+            + ".\n\nStart a new BD calibration for it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.bd_cal_panel.suppress_prompt(self._active_setup_name)
+        self.bd_cal_panel.load_calibration([0.0] * 6)
+        self.bd_cal_panel.set_status(
+            f"New calibration for sample '{new_id}' — enter the 6 mV values and Save.")
+        self.bottom_tabs.setCurrentWidget(self.bd_cal_panel)
+
     def _sync_sl_meta_to_traj(self):
         if self._meta_syncing: return
         self._meta_syncing = True
@@ -1236,12 +1318,26 @@ class CryoMainWindow(QMainWindow):
         date_str = setup.get("bd_calibration_date", "unknown date")
         return vals, date_str
 
+    def _registry_now(self) -> list:
+        """Current device registry — the registry panel once built, else disk."""
+        dr = getattr(self, "dev_registry", None)
+        return dr.get_registry() if dr is not None else load_registry()
+
     def _on_registry_changed(self):
         registry = self.dev_registry.get_registry()
         self.right_panel.set_registry(registry)
         self.traj_panel.populate_monitor_combo(registry)
         self.defaults_panel.set_registry(registry)
+        # Rebuild the calibration tab's own sensor rows with the new registry
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _on_calib_timescan_changed(self):
+        """Persist the calibration tab's own time-scan settings per setup."""
+        setup = self._active_setup()
+        setup["calib_timescan"] = self.calib_panel.get_timescan_settings()
+        save_setup(self._active_setup_name, setup)
 
     def _on_defaults_changed(self):
         """Called when Setup Defaults panel values change — persist and apply."""
@@ -1293,6 +1389,8 @@ class CryoMainWindow(QMainWindow):
         fl_dev = setup.get("focus_averagein", "")
         if fl_dev:
             self.calib_panel.set_fl_device(fl_dev)
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         # ANC300 device — same device regardless of geometry, take from any piezo block
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
@@ -1358,6 +1456,7 @@ class CryoMainWindow(QMainWindow):
         # Disable hardware Read buttons during scan to prevent concurrent TANGO
         # access on the ZI device (Device_4Impl is single-threaded; simultaneous
         # state() + read_attribute() calls cause IMP_LIMIT CORBA exceptions).
+        self._tint_status_bar("running" if running else "idle")
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
@@ -1392,6 +1491,13 @@ class CryoMainWindow(QMainWindow):
         if piezo_block.get("z_device"):
             partial.setdefault("z_device", piezo_block["z_device"])
             partial.setdefault("z_attr",   piezo_block.get("z_attr", "z"))
+
+        # ── BD calibration — injected here (the single build path shared by
+        # every start route: single scan, scanlist and the calibration time
+        # scan) so the 6 mV λ/2 values reach HDF5 for all scan types.
+        bd_panel = getattr(self, "bd_cal_panel", None)
+        if bd_panel is not None:
+            partial["bd_calibration"] = bd_panel.get_calibration()
         return partial
 
     # ── Scan geometry ────────────────────────────────────────────────────────
@@ -1547,8 +1653,7 @@ class CryoMainWindow(QMainWindow):
         if cfg.get("stage_type") == "anm200":
             self._apply_anm200_scaling(cfg)
 
-        # ── BD calibration — injected into cfg for HDF5 storage ─────────────
-        cfg["bd_calibration"] = self.bd_cal_panel.get_calibration()
+        # BD calibration is injected in _build_full_config() (shared path).
 
         # ── Build direction queue ─────────────────────────────────────────────
         # Each axis can carry up to 2 [start, stop] directions.
@@ -1687,18 +1792,35 @@ class CryoMainWindow(QMainWindow):
         cfg["scan_type"] = "SPATIAL"
         cfg["scan_x"] = False; cfg["scan_y"] = False
 
+        # The calibration tab has its own hidden config: points + integration
+        # time come from its Time-scan settings group, not the scan config
+        # selected in the left panel.
+        ts = self.calib_panel.get_timescan_settings()
+        cfg["act1_npts"]        = int(ts["npts"])
+        cfg["integration_time"] = float(ts["int_time"])
+        # The tab's own sensors (its hidden config), not the left panel's
+        cal_sensors = ts.get("sensors") or []
+        if cal_sensors:
+            cfg["sensors"] = cal_sensors
+
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
-            QMessageBox.warning(self, "No sensors", "Enable at least one sensor."); return
+            QMessageBox.warning(
+                self, "No sensors",
+                "Enable at least one sensor in the Calibration tab's "
+                "Time-scan config."); return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
         self._calib_timescan = True
 
+        # Plot the sensors marked visible in the right panel; they keep their
+        # Y1/Y2 assignment (the calibration plot has a twin right axis).
         plot_sensors = [s for s in active
                         if s.get("plot_visible", True)
                         and s.get("y_axis", s.get("plot_axis", "Y1")) not in ("hidden", "—", "X")]
-        self.calib_panel.focus_plot.setup_timescan(n_pts, plot_sensors if plot_sensors else active)
+        self.calib_panel.focus_plot.setup_timescan(
+            n_pts, plot_sensors if plot_sensors else active)
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
 
@@ -1759,6 +1881,20 @@ class CryoMainWindow(QMainWindow):
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            # Error popup — once per auto-pause event ("AUTO-PAUSED" marker is
+            # emitted by every engine auto-pause path; a manual Pause never
+            # carries it, so the popup only appears for real failures).
+            self._tint_status_bar("paused")
+            if "AUTO-PAUSED" in msg and not self._autopause_notified:
+                self._autopause_notified = True
+                QMessageBox.warning(
+                    self, "Measurement paused",
+                    f"{msg}\n\nThe scan is holding at the failing point — no "
+                    "data has been recorded for it. Fix the device, then "
+                    "press Resume to retry the same point (or Abort to stop).")
+        elif worker:
+            self._autopause_notified = False
+            self._tint_status_bar("running")
 
     def _on_progress(self, done: int, total: int):
         """Record scan progress for the bottom status bar."""
@@ -1798,6 +1934,12 @@ class CryoMainWindow(QMainWindow):
         release_lock(self._active_setup_name)
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
+        # Drop the finished worker: _toggle_pause/_on_status pick the target via
+        # `self._worker or self._sl_worker`, so a stale finished single-scan
+        # worker would swallow Pause clicks during a later scanlist run.
+        # (Only in this terminal branch — the _dir_queue branch above re-assigns
+        # self._worker for the next direction and returns early.)
+        self._worker = None
         self._calib_timescan = False
         self._interleaved_2d = False
         self.map2d_retrace.hide()
@@ -1826,10 +1968,12 @@ class CryoMainWindow(QMainWindow):
             worker.resume()
             self.pause_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
+            self._tint_status_bar("running")
         else:
             worker.pause()
             self.pause_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
+            self._tint_status_bar("paused")
 
     def _abort_scan(self):
         if not self._scan_running: return
@@ -1902,10 +2046,8 @@ class CryoMainWindow(QMainWindow):
         else:
             cfg_list = [copy.deepcopy(cfg)]
 
-        # ── BD calibration — injected into all per-cycle cfgs ────────────────
-        bd_cal = self.bd_cal_panel.get_calibration()
-        for c in cfg_list:
-            c["bd_calibration"] = bd_cal
+        # BD calibration is injected in _build_full_config() and carried into
+        # each per-cycle cfg by the copy.deepcopy(cfg) above.
 
         first_cfg = cfg_list[0]
         self._sl_cfg_list = cfg_list
@@ -1969,6 +2111,9 @@ class CryoMainWindow(QMainWindow):
             entry = dict(base_cfg)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
+            # Mark this row as part of the scanlist (blank for single scans).
+            if self._sl_worker is not None:
+                entry["_scanlist_name"] = getattr(self._sl_worker, "list_name", "")
             append_measurement(nb, entry)
         except Exception:
             log.debug("Lab notebook append failed for scanlist file", exc_info=True)

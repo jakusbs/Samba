@@ -26,6 +26,10 @@ _COLUMNS = [
     ("Operator",                 "operator"),
     ("Sample ID",                "sample_id"),
     ("Notes",                    "notes"),
+    # Scanlist membership (blank for single scans) — 8th column by request.
+    # Moving it here from the end was a deliberate one-time reorder: existing
+    # notebooks get backed up to .bak and restarted (non-prefix header change).
+    ("Scanlist",                 "_scanlist_name"),
     ("Incidence",                "incidence"),
     ("Polarization",             "polarization"),
     ("lam2",                     "lam2"),
@@ -69,6 +73,11 @@ _COLUMNS = [
     ("Stage type",               "stage_type"),
     ("File path",                "_hdf5_path"),
     ("Duration (s)",             "_duration_s"),
+    # NOTE: prefer to only APPEND new columns at the end.  append_measurement()
+    # migrates an existing notebook in place (padding old rows with blanks)
+    # when the on-disk header is a prefix of this list, so old measurements
+    # keep their column alignment.  Inserting/renaming a column instead
+    # forces a fresh file (old data preserved as a .bak).
 ]
 
 _HEADERS = [h for h, _ in _COLUMNS]
@@ -78,6 +87,9 @@ _KEYS    = [k for _, k in _COLUMNS]
 def _compute_derived(entry: dict) -> dict:
     """Fill in derived _* keys from scan config fields."""
     out = dict(entry)
+
+    # Scanlist membership — set by the scanlist code path, blank for single scans
+    out.setdefault("_scanlist_name", "")
 
     # Date / Time from scan start timestamp
     ts = entry.get("_scan_start_time")
@@ -176,12 +188,50 @@ def _current_header(nb_path: str) -> list:
         return []
 
 
+def _migrate_append_only(nb_path: str) -> bool:
+    """If the on-disk header is a strict prefix of _HEADERS (columns were only
+    appended), rewrite the file in place with the new header and pad every old
+    row with blanks for the added trailing columns.  Old measurements keep
+    their column alignment and stay in the same file.
+
+    Returns True if migration happened (file now has the current header),
+    False if the header is unchanged or not a prefix (caller handles those).
+    """
+    try:
+        with open(nb_path, "r", newline="", encoding="utf-8") as fh:
+            rows = list(csv.reader(fh))
+    except Exception:
+        return False
+    if not rows:
+        return False
+    old_header = rows[0]
+    n_old = len(old_header)
+    # Prefix check: existing columns must match the first n_old current headers.
+    if n_old >= len(_HEADERS) or old_header != _HEADERS[:n_old]:
+        return False
+    pad = [""] * (len(_HEADERS) - n_old)
+    try:
+        with open(nb_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(_HEADERS)
+            for r in rows[1:]:
+                writer.writerow(r + pad)
+        log.info("Lab notebook migrated in place: +%d column(s) appended",
+                 len(_HEADERS) - n_old)
+        return True
+    except Exception:
+        log.warning("Lab notebook in-place migration failed", exc_info=True)
+        return False
+
+
 def append_measurement(nb_path: str, entry: dict) -> None:
     """Append one measurement row to the CSV lab notebook.
 
     Creates the file with a header row if it doesn't exist yet.
-    If the file exists but has a different (stale) header — e.g. after a
-    schema change that added columns — the old file is renamed to .bak and a
+    If the file exists but the header only gained new trailing columns, the
+    file is migrated in place (old rows padded with blanks) so history stays
+    in one file with correct alignment.  If the header changed in any other
+    way (reorder / rename / remove), the old file is renamed to .bak and a
     fresh file is started so header and data rows stay aligned.
 
     ``entry`` is the scan cfg dict merged with extra ``_*`` keys:
@@ -198,14 +248,16 @@ def append_measurement(nb_path: str, entry: dict) -> None:
         need_header = not os.path.isfile(nb_path) or os.path.getsize(nb_path) == 0
 
         if not need_header and _current_header(nb_path) != _HEADERS:
-            # Schema changed — back up the old file and start fresh
-            bak = nb_path + ".bak"
-            try:
-                os.replace(nb_path, bak)
-                log.warning("Lab notebook schema changed; old file backed up to %s", bak)
-            except Exception:
-                pass
-            need_header = True
+            # Try an in-place append-only migration first (columns added at end);
+            # only fall back to backup-and-restart if that isn't applicable.
+            if not _migrate_append_only(nb_path):
+                bak = nb_path + ".bak"
+                try:
+                    os.replace(nb_path, bak)
+                    log.warning("Lab notebook schema changed; old file backed up to %s", bak)
+                except Exception:
+                    pass
+                need_header = True
 
         with open(nb_path, "a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=_HEADERS)
