@@ -2674,6 +2674,11 @@ Central home for the Catppuccin Mocha tokens, plot surfaces, the validated
 curve palettes, `DIVERGING_CMAPS`, and the Mocha→Latte mapping used by the
 light export. New code imports from here; scattered hex values migrate
 opportunistically.
+**Fix-up:** core modules import it by bare name (`from theme import …`), so
+each app directory needs the usual re-export shim — `Samba_main/theme.py` and
+`Cryo/theme.py` (`from core.theme import *`) were added after a lab-machine
+`ModuleNotFoundError` (same convention as `plot_interact.py`, §33). **Any new
+`core/<mod>.py` that other core modules bare-import needs both shims.**
 
 ### Curve palettes reordered (validated) — both `config.py` + calibration plot
 The old Y1 order put blue `#89b4fa` next to sapphire `#74c7ec` (ΔE ≈ 6 normal
