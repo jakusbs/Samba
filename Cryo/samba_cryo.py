@@ -63,7 +63,7 @@ from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
-                     TrajectoryPanel, ScanlistPanel)
+                     TrajectoryPanel, ScanlistPanel, SensorPickerRow)
 from panels_cryo import CryoHardwarePanel
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
@@ -664,6 +664,8 @@ class CryoMainWindow(QMainWindow):
         self.live_tabs.addTab(plot_tab, "1D Plot")
 
         self.calib_panel = CryoCalibrationPanel(self._active_setup,
+            sensor_row_factory=lambda **kw: SensorPickerRow(
+                self._registry_now(), **kw),
                                                   config_getter=self._build_full_config)
         self.live_tabs.addTab(self.calib_panel, "Calibration")
         self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
@@ -1316,11 +1318,19 @@ class CryoMainWindow(QMainWindow):
         date_str = setup.get("bd_calibration_date", "unknown date")
         return vals, date_str
 
+    def _registry_now(self) -> list:
+        """Current device registry — the registry panel once built, else disk."""
+        dr = getattr(self, "dev_registry", None)
+        return dr.get_registry() if dr is not None else load_registry()
+
     def _on_registry_changed(self):
         registry = self.dev_registry.get_registry()
         self.right_panel.set_registry(registry)
         self.traj_panel.populate_monitor_combo(registry)
         self.defaults_panel.set_registry(registry)
+        # Rebuild the calibration tab's own sensor rows with the new registry
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         self.status_lbl.setText("Device registry saved ✓")
 
     def _on_calib_timescan_changed(self):
@@ -1788,10 +1798,17 @@ class CryoMainWindow(QMainWindow):
         ts = self.calib_panel.get_timescan_settings()
         cfg["act1_npts"]        = int(ts["npts"])
         cfg["integration_time"] = float(ts["int_time"])
+        # The tab's own sensors (its hidden config), not the left panel's
+        cal_sensors = ts.get("sensors") or []
+        if cal_sensors:
+            cfg["sensors"] = cal_sensors
 
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
-            QMessageBox.warning(self, "No sensors", "Enable at least one sensor."); return
+            QMessageBox.warning(
+                self, "No sensors",
+                "Enable at least one sensor in the Calibration tab's "
+                "Time-scan config."); return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg

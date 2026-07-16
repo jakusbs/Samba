@@ -595,12 +595,19 @@ class CalibrationPanel(QWidget):
     # Emitted when the tab's own time-scan settings are edited (persist them)
     timescan_changed = pyqtSignal()
 
-    def __init__(self, setup_getter, config_getter=None, parent=None):
+    def __init__(self, setup_getter, config_getter=None, parent=None,
+                 sensor_row_factory=None):
+        """sensor_row_factory: callable(device_name=, channel_attr=, axis=,
+        enabled=) returning the app's SensorPickerRow — gives the calibration
+        tab its own sensor selection, independent of the scan config."""
         super().__init__(parent)
         self._setup_getter  = setup_getter
         self._config_getter = config_getter
         self._af_worker = None
         self._stage_cfg: dict = {}   # populated by configure_stage()
+        self._sensor_row_factory = sensor_row_factory
+        self._ts_sensor_rows: list = []
+        self._ts_loading = False
         self._gui_apply.connect(lambda fn: fn())
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(6)
@@ -735,13 +742,20 @@ class CalibrationPanel(QWidget):
         self._af_status.setWordWrap(True); self._af_status.setStyleSheet("font-size:10px;")
         af_l.addWidget(self._af_status, 6, 0, 1, 3)
 
-        rl.addWidget(af_grp)
+        # ── Column 2: Autofocus on top, Time scan settings underneath ───────
+        # (one vertical column, so together they take the height of the
+        # Stage-positioning column instead of adding a third column)
+        col2 = QWidget()
+        c2 = QVBoxLayout(col2); c2.setContentsMargins(0, 0, 0, 0); c2.setSpacing(6)
+        c2.addWidget(af_grp)
 
         # ── Time scan settings (the calibration tab's own hidden config) ─────
         # Used by the ▶ Start time scan instead of the scan config selected in
         # the left panel; persisted per setup, never shown in the config list.
-        ts_grp = QGroupBox("Time scan (this tab's own settings)")
-        ts_l = QGridLayout(ts_grp); ts_l.setSpacing(4)
+        ts_grp = QGroupBox("Time scan (this tab's own config)")
+        ts_v = QVBoxLayout(ts_grp); ts_v.setSpacing(4)
+        ts_v.setContentsMargins(8, 8, 8, 8)
+        ts_l = QGridLayout(); ts_l.setSpacing(4)
         ts_l.addWidget(QLabel("Points:"), 0, 0)
         self.ts_npts_spin = QSpinBox()
         self.ts_npts_spin.setRange(2, 1_000_000); self.ts_npts_spin.setValue(300)
@@ -751,13 +765,34 @@ class CalibrationPanel(QWidget):
         self.ts_int_spin.setRange(0.001, 30.0); self.ts_int_spin.setDecimals(3)
         self.ts_int_spin.setValue(0.1); self.ts_int_spin.setSuffix(" s")
         ts_l.addWidget(self.ts_int_spin, 0, 3)
+        ts_v.addLayout(ts_l)
         ts_grp.setToolTip(
-            "Parameters for the calibration time scan (▶ Start while this tab\n"
-            "is open). Independent of the scan config selected on the left —\n"
-            "saved per setup as a hidden calibration config.")
-        self.ts_npts_spin.valueChanged.connect(lambda _: self.timescan_changed.emit())
-        self.ts_int_spin.valueChanged.connect(lambda _: self.timescan_changed.emit())
-        rl.addWidget(ts_grp)
+            "The calibration tab's own scan config (points, integration time,\n"
+            "sensors) — used by ▶ Start while this tab is open. Independent of\n"
+            "the scan config selected on the left; saved per setup, never\n"
+            "shown in the config list.")
+        self.ts_npts_spin.valueChanged.connect(lambda _: self._ts_emit_changed())
+        self.ts_int_spin.valueChanged.connect(lambda _: self._ts_emit_changed())
+
+        # Its own sensors (device/channel/axis picker rows from the app)
+        sens_hdr = QHBoxLayout(); sens_hdr.setSpacing(4)
+        _sens_lbl = QLabel("Sensors:")
+        _sens_lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
+        self.ts_add_btn = QPushButton("＋")
+        self.ts_add_btn.setFixedSize(24, 20)
+        self.ts_add_btn.setToolTip("Add a sensor to the calibration time scan")
+        self.ts_add_btn.clicked.connect(self._ts_add_sensor_row)
+        sens_hdr.addWidget(_sens_lbl); sens_hdr.addStretch(1)
+        sens_hdr.addWidget(self.ts_add_btn)
+        ts_v.addLayout(sens_hdr)
+        self._ts_rows_lay = QVBoxLayout(); self._ts_rows_lay.setSpacing(2)
+        ts_v.addLayout(self._ts_rows_lay)
+        ts_v.addStretch(1)
+        if self._sensor_row_factory is None:
+            _sens_lbl.setVisible(False); self.ts_add_btn.setVisible(False)
+
+        c2.addWidget(ts_grp, stretch=1)
+        rl.addWidget(col2)
 
         splitter.addWidget(right)
 
@@ -765,9 +800,44 @@ class CalibrationPanel(QWidget):
         root.addWidget(splitter)
 
     # ── Time-scan settings (hidden calibration config) ────────────────────────
+    _TS_MAX_SENSORS = 6
+
+    def _ts_emit_changed(self):
+        if not self._ts_loading:
+            self.timescan_changed.emit()
+
+    def _ts_make_row(self, device_name: str = "", channel_attr: str = "",
+                     axis: str = "Y1", enabled: bool = True):
+        row = self._sensor_row_factory(device_name=device_name,
+                                       channel_attr=channel_attr,
+                                       axis=axis, enabled=enabled)
+        row.changed.connect(self._ts_emit_changed)
+        row.delete_requested.connect(lambda r=row: self._ts_remove_row(r))
+        self._ts_sensor_rows.append(row)
+        self._ts_rows_lay.addWidget(row)
+        return row
+
+    def _ts_add_sensor_row(self):
+        if (self._sensor_row_factory is None
+                or len(self._ts_sensor_rows) >= self._TS_MAX_SENSORS):
+            return
+        self._ts_make_row()
+        self._ts_emit_changed()
+
+    def _ts_remove_row(self, row):
+        if row in self._ts_sensor_rows:
+            self._ts_sensor_rows.remove(row)
+            row.setParent(None); row.deleteLater()
+            self._ts_emit_changed()
+
+    def get_timescan_sensors(self) -> list:
+        """Sensor dicts (scan-engine format) from the tab's own picker rows."""
+        return [r.get() for r in self._ts_sensor_rows]
+
     def get_timescan_settings(self) -> dict:
         return {"npts":     int(self.ts_npts_spin.value()),
-                "int_time": float(self.ts_int_spin.value())}
+                "int_time": float(self.ts_int_spin.value()),
+                "sensors":  self.get_timescan_sensors()}
 
     def load_timescan_settings(self, d: dict):
         """Restore the per-setup time-scan settings without re-emitting."""
@@ -777,6 +847,22 @@ class CalibrationPanel(QWidget):
             try:    spin.setValue(type(default)((d or {}).get(key, default)))
             except Exception: spin.setValue(default)
             finally: spin.blockSignals(False)
+        if self._sensor_row_factory is None:
+            return
+        self._ts_loading = True
+        try:
+            for r in list(self._ts_sensor_rows):
+                self._ts_sensor_rows.remove(r)
+                r.setParent(None); r.deleteLater()
+            for s in ((d or {}).get("sensors") or [])[:self._TS_MAX_SENSORS]:
+                self._ts_make_row(
+                    s.get("device_name", ""), s.get("channel_attr", ""),
+                    s.get("plot_axis", s.get("y_axis", "Y1")),
+                    bool(s.get("enabled", True)))
+            if not self._ts_sensor_rows:
+                self._ts_make_row()   # start with one row on fresh setups
+        finally:
+            self._ts_loading = False
 
     # ── Axis info from config ─────────────────────────────────────────────────
     def _get_axis_info(self) -> dict:

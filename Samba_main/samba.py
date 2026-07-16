@@ -50,6 +50,7 @@ from plot_widgets import Live2DWidget, Live1DWidget
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
 from panels.bd_calibration import BDCalibrationPanel
+from panels.sensor_picker import SensorPickerRow
 from data_browser import DataBrowserPanel
 from script_console import ScriptConsolePanel
 from calibration import CalibrationPanel
@@ -573,8 +574,10 @@ class MainWindow(QMainWindow):
             w   = widget_cls(); setattr(self, widget_attr, w); lay.addWidget(w)
             self.live_tabs.addTab(tab, title)
 
-        self.calib_panel = CalibrationPanel(self._active_setup,
-                                              config_getter=self._build_full_config)
+        self.calib_panel = CalibrationPanel(
+            self._active_setup, config_getter=self._build_full_config,
+            sensor_row_factory=lambda **kw: SensorPickerRow(
+                self._registry_now(), **kw))
         self.live_tabs.addTab(self.calib_panel, "Calibration")
         self.live_tabs.currentChanged.connect(self._on_live_tab_changed)
 
@@ -1266,12 +1269,20 @@ class MainWindow(QMainWindow):
         date_str = setup.get("bd_calibration_date", "unknown date")
         return vals, date_str
 
+    def _registry_now(self) -> list:
+        """Current device registry — the registry panel once built, else disk."""
+        dr = getattr(self, "dev_registry", None)
+        return dr.get_registry() if dr is not None else load_registry()
+
     def _on_registry_changed(self):
         """Called when the Device Registry is saved — update the right panel and monitor."""
         registry = self.dev_registry.get_registry()
         self.right_panel.set_registry(registry)
         self.traj_panel.populate_monitor_combo(registry)
         self.setup_defaults.set_registry(registry)
+        # Rebuild the calibration tab's own sensor rows with the new registry
+        self.calib_panel.load_timescan_settings(
+            self._active_setup().get("calib_timescan", {}))
         self.status_lbl.setText("Device registry saved ✓")
 
     def _collect_setup_load_warnings(self) -> list:
@@ -1694,11 +1705,17 @@ class MainWindow(QMainWindow):
         ts = self.calib_panel.get_timescan_settings()
         cfg["act1_npts"]        = int(ts["npts"])
         cfg["integration_time"] = float(ts["int_time"])
+        # The tab's own sensors (its hidden config), not the left panel's
+        cal_sensors = ts.get("sensors") or []
+        if cal_sensors:
+            cfg["sensors"] = cal_sensors
 
         active = [s for s in cfg["sensors"] if s["enabled"]]
         if not active:
-            QMessageBox.warning(self, "No sensors",
-                                "Enable at least one sensor."); return
+            QMessageBox.warning(
+                self, "No sensors",
+                "Enable at least one sensor in the Calibration tab's "
+                "Time-scan config."); return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg

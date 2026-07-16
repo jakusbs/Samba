@@ -2777,3 +2777,50 @@ unreadable, or clobbered.
   `Samba_main/config.py` against a temp CONFIG_DIR — valid file → "ok";
   corrupt file → "error", `.bad` backup byte-identical, original untouched;
   missing → "missing"; `save_setup` strips the key.
+
+---
+
+## 48. Recent Changes (July 2026) — Calibration Tab Full Hidden Config & 1D Legend Sizing
+
+Branch `claude/moke-sot-scan-fixes-11x8y9` (61 tests). Three-item user batch.
+
+### Calibration tab layout — Time scan under Autofocus
+The Time-scan settings group moved from a third column into a **vertical
+column 2** (`col2`): Autofocus on top, Time scan underneath with stretch, so
+together they take the height of the Stage-positioning column.
+
+### Calibration tab — its own sensors (completes the hidden config)
+The calibration time scan no longer borrows `cfg["sensors"]` from the config
+open in the left panel. The Time-scan group (retitled "…this tab's own
+config") now contains its **own sensor picker rows**:
+- `CalibrationPanel` gains `sensor_row_factory` — each app passes a lambda
+  creating its own `SensorPickerRow` (identical API in Samba_main and Cryo)
+  bound to the live registry via the new `MainWindow._registry_now()`
+  (falls back to `load_registry()` before the registry panel exists).
+- Rows: "＋" add button (max 6), per-row × delete, checkbox/device/channel/
+  axis as in the right panel; `get_timescan_sensors()`;
+  `get_timescan_settings()` now includes `"sensors"`, persisted in
+  `setup["calib_timescan"]` through the existing save/load path.
+  `load_timescan_settings` rebuilds rows (loading never re-emits); a fresh
+  setup starts with one row; registry edits rebuild rows
+  (`_on_registry_changed` → `load_timescan_settings`).
+- `_start_calib_timescan` (both apps) uses the tab's sensors for
+  `cfg["sensors"]` (falls back to the right panel only if the tab has no
+  rows); the no-sensor warning names the calibration tab.
+- Cryo passthrough: `CryoCalibrationPanel.__init__` forwards
+  `sensor_row_factory`.
+
+### Live 1D legend — fixed size, no dead band, resize-aware
+- **Legend no longer scales with the Text spinbox** (`_LEGEND_PT = 9`,
+  compact paddings) — a 20 pt legend used to eat half the plot.
+- **Dead space above the plot removed**: `_layout()` previously *added* the
+  legend strip to tight_layout's already-generous top margin (~40 px of
+  emptiness); it now sets `top = 1 − legend_h − 8px`, filling the figure to
+  the top (measured: 7 px headroom, 1 px gap to the axes).
+- **Re-layout on canvas resize** (debounced 150 ms QTimer on
+  `resize_event`): the reserved strip is a figure fraction, so growing the
+  window used to stretch it into a large empty band (measured 36 px on a
+  6×4→10×8 grow; now re-tightens to 7 px).
+- Verified with real Agg rendering at 9/20 pt and across a resize;
+  calib-sensor row logic verified headlessly (round-trip, add/remove emit
+  once, default row, cap 6). Suite: 61 tests.

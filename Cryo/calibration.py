@@ -63,8 +63,10 @@ class CryoCalibrationPanel(CalibrationPanel):
         "QPushButton:hover{background:#45475a;}"
         "QPushButton:disabled{color:#585b70;border-color:#313244;}")
 
-    def __init__(self, setup_getter, config_getter=None, parent=None):
-        super().__init__(setup_getter, config_getter, parent)
+    def __init__(self, setup_getter, config_getter=None, parent=None,
+                 sensor_row_factory=None):
+        super().__init__(setup_getter, config_getter, parent,
+                         sensor_row_factory=sensor_row_factory)
         self._anc_device = ""
         self._anc_worker = None
         self._build_anc_group()

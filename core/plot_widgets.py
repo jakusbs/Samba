@@ -161,6 +161,10 @@ class Live1DWidget(QWidget):
       3. update_point() — write one data point, defer draw to timer
     """
 
+    # The legend keeps this fixed size regardless of the Text spinbox — a
+    # scaled-up legend ate half the plot; identity only needs to be legible.
+    _LEGEND_PT = 9
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._n: int = 0
@@ -210,6 +214,16 @@ class Live1DWidget(QWidget):
         self._timer.timeout.connect(self._throttled_draw)
         self._timer.start()
 
+        # Debounced re-layout on resize: the legend strip is reserved as a
+        # figure fraction, so it must be recomputed when the canvas changes
+        # size or the empty space above the plot grows with the window.
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(150)
+        self._relayout_timer.timeout.connect(self._layout)
+        self.canvas.mpl_connect(
+            "resize_event", lambda ev: self._relayout_timer.start())
+
     def _style_axes(self):
         self.ax1.set_facecolor("#12121f")
         for ax in [self.ax1, self.ax2]:
@@ -249,8 +263,11 @@ class Live1DWidget(QWidget):
                 fig_h = float(self.fig.bbox.height) or 1.0
                 h = max(l.get_window_extent(renderer).height
                         for l in legs) / fig_h
-                top = self.fig.subplotpars.top
-                self.fig.subplots_adjust(top=max(0.4, top - h - 0.01))
+                # Fill the figure to the top: axes + legend + a small pad —
+                # tight_layout's own generous top margin would otherwise
+                # leave a dead band above the legend.
+                pad = 8.0 / fig_h
+                self.fig.subplots_adjust(top=max(0.4, 1.0 - h - pad))
         except Exception:
             pass
         self.canvas.draw_idle()
@@ -261,10 +278,7 @@ class Live1DWidget(QWidget):
             ax.tick_params(labelsize=self._font_pt)
             ax.xaxis.label.set_fontsize(self._font_pt)
             ax.yaxis.label.set_fontsize(self._font_pt)
-            leg = ax.get_legend()
-            if leg is not None:
-                for t in leg.get_texts():
-                    t.set_fontsize(self._font_pt)
+            # legend deliberately NOT scaled — fixed at _LEGEND_PT
 
     def _throttled_draw(self):
         if not self._dirty:
@@ -396,14 +410,16 @@ class Live1DWidget(QWidget):
             # reserves the vertical strip it needs.
             if labelled:
                 if ax is self.ax1:
-                    loc, anchor = "lower left",  (0.0, 1.005)
+                    loc, anchor = "lower left",  (0.0, 1.002)
                 else:
-                    loc, anchor = "lower right", (1.0, 1.005)
+                    loc, anchor = "lower right", (1.0, 1.002)
                 ax.legend(
                     loc=loc, bbox_to_anchor=anchor, borderaxespad=0.0,
                     ncol=min(len(labelled), 3),
-                    fontsize=self._font_pt, facecolor="#313244",
-                    edgecolor="#45475a", labelcolor="#cdd6f4")
+                    fontsize=self._LEGEND_PT, facecolor="#313244",
+                    edgecolor="#45475a", labelcolor="#cdd6f4",
+                    borderpad=0.3, labelspacing=0.3, handlelength=1.4,
+                    handletextpad=0.5, columnspacing=1.0)
         if all_visible:
             all_x = np.concatenate([l.get_xdata() for l, _ in all_visible])
             mx = np.isfinite(all_x)
