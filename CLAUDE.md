@@ -2824,3 +2824,47 @@ config") now contains its **own sensor picker rows**:
 - Verified with real Agg rendering at 9/20 pt and across a resize;
   calib-sensor row logic verified headlessly (round-trip, add/remove emit
   once, default row, cap 6). Suite: 61 tests.
+
+---
+
+## 49. Recent Changes (July 2026) — Per-Sensor Colored Y-Axis Titles
+
+Branch `claude/device-plot-legend-colors-yifm6d` (61 tests). User report: with
+two sensors on one axis the curves get different colors but the axis title is
+all one color (partially supersedes the §45 "several → axis color" behaviour).
+
+### `set_multicolor_ylabel` + `_MulticolorYLabel` (`core/plot_interact.py`)
+matplotlib's ylabel is a single `Text` and can only have one color, so the
+title is now drawn as **stacked rotated segments, one per sensor, each in its
+curve's color**:
+- The real ylabel keeps the full `"A (µV), B (µV)"` string but is made
+  invisible (`set_alpha(0.0)`) — it still reserves the correct
+  tight_layout/`_layout()` space and gives the segments a position to follow.
+- `_MulticolorYLabel` (an `Artist` added via `ax.add_artist`, so `cla()`
+  removes it) re-reads the label's position, font size and rotation **on every
+  draw** — segments track autoscaling tick-width changes, the Text spinbox and
+  resizes with no extra wiring. `zorder=5` so it draws *after* the `YAxis`
+  (zorder 1.5), which updates the label position during its own draw; at a
+  lower zorder the segments sat at the previous frame's label position.
+- Segments stack bottom→top (reading order of a 90°-rotated label), centred on
+  the label's extent, `","` appended to non-final segments plus a ≈one-space
+  gap. One sensor on an axis → plain ylabel in the curve color (unchanged);
+  empty → label cleared.
+- Module still imports without matplotlib (guarded `Artist` import — CI).
+- `render_light_figure` maps the segment colors Mocha→Latte like curves (the
+  segments are not in `ax.texts`, so the existing loops missed them); the
+  artist survives the figure pickle.
+
+### Call sites
+- `Live1DWidget.apply_config` (`core/plot_widgets.py`) — Y1 + Y2.
+- `FocusPlotWidget.setup_timescan` (`core/calibration.py`) — time-scan Y1 + Y2;
+  autofocus mode and `clear()` restore the plain "Focus signal (V)" label.
+
+### Verification
+Headless offscreen-Qt run of the real widgets (mpl 3.11, 27 checks): segment
+colors == line colors on both axes and in the calibration time scan; segments
+horizontally/vertically centred on the (invisible) label after a real draw
+with live data + autoscale; font-size change follows; re-apply/`clear()` never
+duplicate or leak the artist; single-sensor and empty axes keep the old
+behaviour; light export remaps segment colors and renders. `python
+test_runner.py` 61 OK; `plot_interact` imports with matplotlib blocked.

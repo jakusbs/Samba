@@ -24,7 +24,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
-                           fix_toolbar_icons, make_light_export_btn)
+                           fix_toolbar_icons, make_light_export_btn,
+                           set_multicolor_ylabel)
 from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
@@ -313,16 +314,11 @@ class FocusPlotWidget(QWidget):
             self._ts_lines[lbl] = line
             self._ts_yd[lbl] = np.full(n_pts, np.nan)
 
-        def _ylabel(entries):
-            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
-        if left_meta:
-            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
-            self.ax.set_ylabel(_ylabel(left_meta), color=col,
-                               fontsize=self._font_pt)
-        if right_meta:
-            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
-            self._ts_ax2.set_ylabel(_ylabel(right_meta), color=col,
-                                    fontsize=self._font_pt)
+        # Each sensor's name in the axis title takes its curve's color
+        set_multicolor_ylabel(self.ax, left_meta, "#89b4fa", self._font_pt)
+        if self._ts_ax2 is not None:
+            set_multicolor_ylabel(self._ts_ax2, right_meta, "#f38ba8",
+                                  self._font_pt)
 
         # Combined legend (both axes) on the topmost axes
         handles = list(self._ts_lines.values())
