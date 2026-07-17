@@ -621,6 +621,7 @@ class MainWindow(QMainWindow):
         self.bottom_tabs = QTabWidget(); self.bottom_tabs.setMinimumHeight(80)
         self.traj_panel  = TrajectoryPanel(self._active_setup)
         self.sl_panel    = ScanlistPanel(self._active_setup)
+        self._link_hw_panels()
         self.data_browser = DataBrowserPanel(
             lambda: self._active_setup().get("save_dir", "~/moke_data"))
         self.bd_cal_panel = BDCalibrationPanel()
@@ -1976,6 +1977,28 @@ class MainWindow(QMainWindow):
         """Update relay label in both HW panels when the scanlist worker flips the relay."""
         for hw in (self.traj_panel.hw, self.sl_panel.hw):
             hw.set_relay_state(state)
+
+    def _link_hw_panels(self):
+        """Mirror the Trajectory and Scanlist hardware panels.
+
+        Both tabs show the same physical hardware, so the write windows must
+        agree: a magnet current typed on the Trajectory tab used to leave the
+        Scanlist tab's window at 0 A — which apply_field_setpoint() then
+        wrote to the magnet at scanlist start.  Spin/combo mirroring only
+        moves displayed values (writes still happen on Return/Enter in the
+        panel being edited); relay state mirrors via relay_changed.
+        Qt suppresses no-change setValue signals, so the cross-connections
+        cannot loop.
+        """
+        a, b = self.traj_panel.hw, self.sl_panel.hw
+        for name in ("amp_spin", "freq_spin", "compl_spin", "field_spin"):
+            sa, sb = getattr(a, name), getattr(b, name)
+            sa.valueChanged.connect(sb.setValue)
+            sb.valueChanged.connect(sa.setValue)
+        a.range_combo.currentIndexChanged.connect(b.range_combo.setCurrentIndex)
+        b.range_combo.currentIndexChanged.connect(a.range_combo.setCurrentIndex)
+        a.relay_changed.connect(b.set_relay_state)
+        b.relay_changed.connect(a.set_relay_state)
 
     def _on_cycle_done(self, cycle_idx: int):
         cfg  = self._current_scan_cfg

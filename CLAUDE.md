@@ -2868,3 +2868,68 @@ with live data + autoscale; font-size change follows; re-apply/`clear()` never
 duplicate or leak the artist; single-sensor and empty axes keep the old
 behaviour; light export remaps segment colors and renders. `python
 test_runner.py` 61 OK; `plot_interact` imports with matplotlib blocked.
+
+---
+
+## 50. Recent Changes (July 2026) — N+Δ Always Visible & Hardware-Panel Truth/Sync
+
+Branch `claude/device-plot-legend-colors-yifm6d` (68 tests). Three-item user
+batch.
+
+### N and Δ-step both always visible, step as the base (`core/nstep.py`, new)
+The N / Δ radio toggles (only one spinbox visible at a time, the other as a
+grey computed label) are replaced everywhere by **both spinboxes always
+visible and editable**, coupled through the new shared `NStepPair`
+(+ `Samba_main/nstep.py` / `Cryo/nstep.py` shims):
+- Editing one box derives the other from the current span; when start/stop
+  change, the box the user edited **last** (the "anchor") keeps its value —
+  and the default anchor is the **step size** (per user request), including
+  after every config load.
+- N stays the authoritative value handed to the engine (typing a step rounds
+  to an integer point count); zero span (time scans) never clobbers N.
+- Guarded `setValue` — external `valueChanged` listeners (config save,
+  summary labels) still fire; Qt's no-change suppression prevents loops.
+- Converted: Samba_main `ActuatorGroup` (X/Y spatial) + `FieldSegmentList`
+  (per-segment Δ column, field sweeps); Cryo `ActuatorGroup` (direction-list
+  span), `FieldSegmentList` (had a per-row radio toggle) and the temperature
+  sweep group (N + ΔT; `temp_dT` stays persisted when the step is the anchor,
+  loads via `set_step`). TR-MOKE's Δt toggle untouched.
+- Dead code removed: `_on_field_mode` / `_upd_field_comp` / `_get_field_npts`
+  in both apps referenced `self.fs/fe/fn/fd` widgets that were never created.
+
+### Hardware panel — magnet current + relay read from the TANGO devices
+`refresh()` (startup + every Trajectory/Scanlist tab switch) already
+populated the Keithley spinboxes from the device, but the **magnet-current
+write window** and **relay state** were client-side only — always 0 after a
+restart. New `_read_magnet_relay()` (background thread + `_mr_ok` signal)
+reads `magnet_current_attr` and `relay_attr` and fills the window/label:
+- Skipped while a scan runs (a FIELD scan sweeps the current — capturing a
+  mid-sweep value as the setpoint would be wrong) and for sim proxies.
+- `setValue` on the write spinbox does not write hardware (only Return/Enter
+  does) — the window now just shows device truth.
+
+### Trajectory ↔ Scanlist hardware panels mirrored (`samba.py`)
+**Bug (user report):** 1 A set on the Trajectory tab left the Scanlist tab's
+magnet window at 0 A — and since §41, `apply_field_setpoint()` at scanlist
+start writes the *Scanlist tab's* spinbox to the magnet (and
+`get_settings()["magnet_current"]` feeds the field-flip magnitude), so the
+scanlist really ran at 0 field. New `MainWindow._link_hw_panels()`
+cross-connects the two `HardwarePanel`s:
+- `amp/freq/compl/field` spinboxes and the range combo mirror bidirectionally
+  (display only — writes still require Return/Enter in the edited panel);
+  Qt's no-change signal suppression makes the cross-connection loop-free.
+- New `HardwarePanel.relay_changed` signal (emitted on a successful/sim
+  toggle and on device readback) mirrors the relay state; `set_relay_state`
+  stays signal-free so the mirror can't loop.
+- Samba_main only; Cryo's AttoDRY panel already live-reads via
+  `ReadbackWorker` (linking its two tabs' panels is a possible follow-up).
+
+### Tests / verification
+- `test_runner.py` +7 → 68: `TestNStepPair` (load anchors step, step→N,
+  N→step, span change preserves step by default / N after an N edit,
+  zero-span safety, `set_step`).
+- Offscreen-Qt run of the real widgets (27 checks): both apps' actuator
+  groups and segment lists (derive/anchor/load round-trips), panel mirroring
+  via the real unbound `MainWindow._link_hw_panels`, relay mirroring on a
+  patched successful toggle, magnet/relay readback fills both tabs, sim
+  refresh never clobbers values.
