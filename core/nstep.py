@@ -36,6 +36,14 @@ class NStepPair:
         self._min_step = float(min_step)
         self._guard = False          # suppress our own handlers, not others'
         self.anchor = "step"         # "step" or "n": preserved on span change
+        # Derive only when the edit is committed (Enter / focus-out / arrows),
+        # not on every keystroke — typing "0.5" would otherwise emit an
+        # intermediate "0" (clamped to the spin minimum) and slam the partner.
+        for w in (npts_spin, step_spin):
+            try:
+                w.setKeyboardTracking(False)
+            except Exception:
+                pass
         npts_spin.valueChanged.connect(self._on_n_edited)
         step_spin.valueChanged.connect(self._on_s_edited)
 
@@ -69,9 +77,17 @@ class NStepPair:
         if span <= 0:
             return
         step = max(self._min_step, float(self._s.value()))
+        # A tiny step over a large span can produce an N beyond the 32-bit
+        # range Qt accepts — clamp to the N box's own maximum BEFORE setValue
+        # (which would raise OverflowError rather than clamp).
+        n = min(round(span / step) + 1, 2_147_483_647)
+        try:
+            n = min(n, int(self._n.maximum()))
+        except Exception:
+            pass
         self._guard = True
         try:
-            self._n.setValue(max(2, int(round(span / step)) + 1))
+            self._n.setValue(max(2, int(n)))
         finally:
             self._guard = False
 

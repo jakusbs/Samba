@@ -2933,3 +2933,14 @@ cross-connects the two `HardwarePanel`s:
   via the real unbound `MainWindow._link_hw_panels`, relay mirroring on a
   patched successful toggle, magnet/relay readback fills both tabs, sim
   refresh never clobbers values.
+
+### Fix-up (same batch): OverflowError typing a step starting with "0"
+Typing "0.5" into a Δ box emitted an intermediate "0" keystroke (clamped to
+the spin minimum 1e-6); over a 50000 nm span the derived N exceeded Qt's
+32-bit int range and `QSpinBox.setValue` raised OverflowError → core dump.
+`NStepPair` now (a) clamps the derived N to the N box's own `maximum()`
+(and 2^31−1) **before** `setValue`, and (b) sets
+`setKeyboardTracking(False)` on both boxes, so derivation happens only on
+commit (Enter / focus-out / arrows), never on intermediate keystrokes.
+Regression test added (suite 69); verified against the real widgets with
+QTest keystrokes offscreen.

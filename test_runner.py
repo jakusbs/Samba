@@ -1431,8 +1431,12 @@ class TestNStepPair(unittest.TestCase):
             self._subs = []
         def value(self):
             return self._v
+        def maximum(self):
+            return self._hi if self._hi is not None else 2147483647
         def setValue(self, v):
             v = int(v) if self._int else float(v)
+            if self._int and not (-2147483648 <= v <= 2147483647):
+                raise OverflowError("argument 1 overflowed")   # like Qt
             if self._lo is not None: v = max(self._lo, v)
             if self._hi is not None: v = min(self._hi, v)
             if v == self._v:
@@ -1502,6 +1506,15 @@ class TestNStepPair(unittest.TestCase):
         pair.set_step(4.0)                         # config load with stored ΔT
         self.assertAlmostEqual(s.value(), 4.0)
         self.assertEqual(n.value(), 26)
+        self.assertEqual(pair.anchor, "step")
+
+    def test_tiny_step_clamps_to_spin_max_no_overflow(self):
+        # Typing a step starting with "0" used to emit an intermediate value
+        # clamped to the spin minimum (1e-6); over a 50000 nm span the derived
+        # N exceeded Qt's 32-bit range and setValue raised OverflowError.
+        pair, n, s, span = self._mk(0, 50000.0, 51)
+        s.setValue(1e-6)                           # must not raise
+        self.assertEqual(n.value(), 10000)         # clamped to the N box max
         self.assertEqual(pair.anchor, "step")
 
 
