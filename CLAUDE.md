@@ -2993,3 +2993,45 @@ initially / in sim mode / for a server without the command pair; shown for
 the MCS2 signature; Yes → exactly one `Home` dispatched + positions re-read +
 button re-enabled; No → nothing dispatched; failure path re-enables with an
 error. Both servers `py_compile` clean; `python test_runner.py` 69 OK.
+
+---
+
+## 52. Recent Changes (July 2026) — MCS2 Button: Zero-In-Place Instead of Referencing Home
+
+Branch `claude/device-plot-legend-colors-yifm6d` (SAMBA, 69 tests) + same
+branch on TANGO_Devices. User realised the §51 "⌂ Home" physically **moves**
+the stage (referencing routine that drives to the hardware mark and zeros
+there), and asked for a button that instead **sets the current position as 0
+without moving**.
+
+### TANGO_Devices — new stage `SetZero` command (**needs redeploy**)
+`SmarActMCS2Stage.py` `SetZero`: per axis, reaches the shared Ctrl's
+`SetOffset(channel, 0)` — `SA_CTL_PKEY_LOGICAL_SCALE_OFFSET` adjusted so the
+current reading becomes 0, **no travel**, move mode preserved (its
+closed-loop-holding branch only does a relative-0 re-peg). The motor devices
+don't expose `SetOffset`, so the stage discovers the Ctrl name + each axis'
+channel from the motor's own `SmarActMCS2CtrlDevice` / `AxisNumber` device
+properties. All axes attempted; errors collected and raised. The referencing
+`Home` command is **kept** on the server (valid in Jive for a true reference);
+SAMBA just points its button at `SetZero`.
+
+### SAMBA — button relabelled "⊘ Zero here" (`core/calibration.py`)
+- Same gating idea, new signature: shown only when the stage exposes both
+  `SetZero` **and** `Initialise` (probed in a background thread) — Green's old
+  Smaract server and the Cryo Attocube stages never match.
+- Calls `SetZero` (20 s client timeout, background thread), re-reads positions
+  after. Confirmation dialog reworded — **no movement**, but it redefines the
+  coordinate frame so previously saved positions shift.
+- Why zero-in-place is safe here: the IR axes keep their referenced /
+  PositionKnown status across hand-controller use (per-axis `Init` recovered
+  them, which only works when position is known), so SetOffset won't leave them
+  "not homed".
+
+### Verification
+- Stage `SetZero` via stubbed pytango (8 checks): `SetOffset(axis,0)` once per
+  axis with no motion; cached positions refreshed; per-axis failure → FAULT +
+  raise naming the axis.
+- Offscreen-Qt `CalibrationPanel` (8 checks): button relabelled "⊘ Zero here",
+  hidden without the SetZero+Initialise signature, shown with it; Yes → one
+  `SetZero` dispatched + positions re-read + button re-enabled; No → nothing.
+- Both servers `py_compile` clean; `python test_runner.py` 69 OK.
