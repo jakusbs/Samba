@@ -1861,7 +1861,7 @@ class analyze_SOT:
     # ── eval_width_and_fit ────────────────────────────────────────────────
 
     def eval_width_and_fit(self, current_coefficient2=0.99, fit_edge_offset=5,
-                           nice_plot=False, use_Oe_as_edges=True):
+                           nice_plot=False, use_Oe_as_edges=True, oe_fit='A0'):
         """Fit Oersted (log) and DL (constant) contributions; compute SOT fields.
 
         Fit-window edges: with ``use_Oe_as_edges=True`` (default) the device
@@ -1869,7 +1869,22 @@ class analyze_SOT:
         original analysis so the DL-field magnitude agrees. The conversion is
         identical to the reference: ``conconst = A·width/(2·Ic)·10`` (nrad/mT)
         and ``conDL = const/conconst`` (mT).
+
+        oe_fit : ``'A0'`` (default) or ``'x0'``
+            ``'A0'`` — legacy model ``A0 + A·ln((w−x)/x)``: a free vertical
+            offset absorbs any baseline in the Oersted sum.
+            ``'x0'`` — model ``A·ln((w−u)/u)`` with ``u = x − x0``: the offset
+            is pinned to 0 (the antisymmetric Oersted profile must cross zero
+            at the wire centre) and the profile slides horizontally instead.
+            The fitted ``x0`` corrects the grid-quantised argmin/argmax edge
+            placement, and its zero crossing gives the *real* device centre
+            (printed in raw scan coordinates, stored as ``Oe_center_raw``).
+            A three-parameter check fit (A, x0, A0 all free) is run as well
+            and reports whether a free A0 would be consistent with 0 — if it
+            is not, a genuine background exists and may bias x0.
         """
+        if oe_fit not in ('A0', 'x0'):
+            raise ValueError(f"oe_fit must be 'A0' or 'x0', got {oe_fit!r}")
         mpl.rcParams['font.size'] = 16
 
         def Log_fit(x, A, A0, width):
@@ -1960,26 +1975,77 @@ class analyze_SOT:
             pConst   = [float(np.mean(theta_DL[mask]))]
             errConst = [float(np.std(theta_DL[mask]))]
 
-        # Oe log fit
+        # ── Oe log fit ─────────────────────────────────────────────────────
+        # The legacy 2-parameter fit (A, A0) always runs: it is the result in
+        # 'A0' mode and seeds the amplitude for the 'x0' fit.
         try:
-            pLog, covLog = curve_fit(
+            pLegacy, covLegacy = curve_fit(
                 lambda x, A, A0: Log_fit(x, A, A0, width),
                 pos_fit, theta_Oe[mask],
                 **fit_kw)
-            errLog = np.sqrt(np.diag(covLog))
+            errLegacy = np.sqrt(np.diag(covLegacy))
         except Exception as e:
             warnings.warn(f'Oe log fit failed: {e}')
-            pLog   = [0.0, float(np.mean(theta_Oe[mask]))]
-            errLog = [0.0, 0.0]
+            pLegacy   = [0.0, float(np.mean(theta_Oe[mask]))]
+            errLegacy = [0.0, 0.0]
+
+        def Log_fit_x0(x, A, x0):
+            # Offset pinned to 0 — the antisymmetric Oersted profile slides
+            # in x instead.  The clip keeps the log defined while the
+            # optimiser explores x0.
+            u = np.clip(x - x0, 1e-6, width - 1e-6)
+            return A * np.log((width - u) / u)
+
+        def Log_fit_x0A0(x, A, x0, A0):
+            u = np.clip(x - x0, 1e-6, width - 1e-6)
+            return A0 + A * np.log((width - u) / u)
+
+        x0_fit = x0_err = None            # only set in 'x0' mode
+        A0_check = A0_check_err = None    # 3-parameter consistency check
+        if oe_fit == 'x0':
+            try:
+                pX, covX = curve_fit(
+                    Log_fit_x0, pos_fit, theta_Oe[mask],
+                    p0=[pLegacy[0] or 1.0, 0.0],
+                    bounds=([-np.inf, -width / 4], [np.inf, width / 4]),
+                    **fit_kw)
+                errX = np.sqrt(np.diag(covX))
+                A_fit, x0_fit = float(pX[0]), float(pX[1])
+                A_err, x0_err = float(errX[0]), float(errX[1])
+                A0_fit, A0_err = 0.0, 0.0
+                oe_curve = Log_fit_x0(pos_fit, A_fit, x0_fit)
+            except Exception as e:
+                warnings.warn(f'Oe x0 fit failed ({e}) — falling back to the '
+                              f'legacy A0 fit.')
+                oe_fit = 'A0'
+            if x0_fit is not None:
+                # Consistency check: with A0 also free, is it compatible
+                # with 0?  If not, a genuine constant background exists in
+                # the Oersted sum and forcing A0=0 may bias x0 and A.
+                try:
+                    pC, covC = curve_fit(
+                        Log_fit_x0A0, pos_fit, theta_Oe[mask],
+                        p0=[A_fit, x0_fit, 0.0],
+                        bounds=([-np.inf, -width / 4, -np.inf],
+                                [np.inf,  width / 4,  np.inf]),
+                        **fit_kw)
+                    A0_check     = float(pC[2])
+                    A0_check_err = float(np.sqrt(np.diag(covC))[2])
+                except Exception as e:
+                    warnings.warn(f'A0 consistency-check fit failed: {e}')
+        if oe_fit == 'A0':
+            A_fit, A0_fit = float(pLegacy[0]), float(pLegacy[1])
+            A_err, A0_err = float(errLegacy[0]), float(errLegacy[1])
+            oe_curve = Log_fit(pos_fit, A_fit, A0_fit, width)
 
         const_array = [pConst[0]] * len(pos_fit)
 
         # Conversion constant and DL field (in mT)
-        conconst = pLog[0] * width / (2 * Ic) * 10   # nrad/mT
+        conconst = A_fit * width / (2 * Ic) * 10   # nrad/mT
         if conconst and not np.isnan(conconst):
             conDL = pConst[0] / conconst
             drel  = (abs(errConst[0] / pConst[0]) if pConst[0] else 0)
-            drel += (abs(errLog[0]   / pLog[0])   if pLog[0]  else 0)
+            drel += (abs(A_err       / A_fit)     if A_fit     else 0)
             conDL_error = abs(conDL) * drel
         else:
             conDL = conDL_error = np.nan
@@ -1987,6 +2053,20 @@ class analyze_SOT:
         print(f'  Width       = {width:.2f} {self.x_unit}')
         print(f'  conconst    = {conconst:.4g} nrad/mT')
         print(f'  DL-field    = ({conDL:.4g} ± {conDL_error:.4g}) mT')
+        if x0_fit is not None:
+            centre = x1 + x0_fit + width / 2.0
+            print(f'  Oe x0       = ({x0_fit:+.3f} ± {x0_err:.3f}) '
+                  f'{self.x_unit}  (edge-placement correction)')
+            print(f'  Oe centre   = {centre:.3f} {self.x_unit} in raw scan '
+                  f'coords (zero crossing of the Oersted field); real edges '
+                  f'{x1 + x0_fit:.3f} .. {x1 + x0_fit + width:.3f}')
+            if A0_check is not None:
+                ok = abs(A0_check) <= 2 * (A0_check_err or np.inf)
+                print(f'  A0 check    = ({A0_check:+.3g} ± {A0_check_err:.3g})'
+                      f' nrad → ' + ('consistent with 0 — pinning A0 is OK'
+                                     if ok else
+                                     'NOT consistent with 0 — a real '
+                                     'background may bias x0/A!'))
         self.fit_DL_mT       = conDL
         self.fit_DL_error_mT = conDL_error
         self.fit_width_um    = float(width)
@@ -2044,10 +2124,15 @@ class analyze_SOT:
                    color='r', label='Not used for fit')
 
         try:
-            ax.plot(pos_fit, Log_fit(pos_fit, pLog[0], pLog[1], width),
-                    color='orange', linewidth=4,
-                    label=(f'fit A0+A·ln((w−x)/x),  '
-                           f'A0={pLog[1]:.2g}  A={pLog[0]:.2g}±{errLog[0]:.3g}'))
+            if x0_fit is not None:
+                _oe_label = (f'fit A·ln((w−u)/u), u=x−x0,  '
+                             f'x0={x0_fit:+.2g}±{x0_err:.2g}  '
+                             f'A={A_fit:.2g}±{A_err:.3g}')
+            else:
+                _oe_label = (f'fit A0+A·ln((w−x)/x),  '
+                             f'A0={A0_fit:.2g}  A={A_fit:.2g}±{A_err:.3g}')
+            ax.plot(pos_fit, oe_curve, color='orange', linewidth=4,
+                    label=_oe_label)
         except Exception:
             pass
 
@@ -2065,6 +2150,12 @@ class analyze_SOT:
         ax.vlines([0, width],
                   ymin=float(np.min(theta_Oe)), ymax=float(np.max(theta_Oe)),
                   color='g')
+        if x0_fit is not None:
+            # Fitted (x0-corrected) edges, for comparison with the raw ones
+            ax.vlines([x0_fit, x0_fit + width],
+                      ymin=float(np.min(theta_Oe)),
+                      ymax=float(np.max(theta_Oe)),
+                      color='orange', linestyles='--')
         ax2 = ax.twinx()
         ax2.set_ylabel(r'$R$ [a.u.]')
         ax2.plot(position, reflex, color='firebrick', label='reflection')
@@ -2087,8 +2178,17 @@ class analyze_SOT:
             width=width, x1_raw=float(x1), x2_raw=float(x2),
             n_fit_points=int(mask.sum()),
             DL_const=float(pConst[0]), DL_const_err=float(errConst[0]),
-            Oe_A=float(pLog[0]), Oe_A_err=float(errLog[0]),
-            Oe_A0=float(pLog[1]), conconst_nrad_per_mT=float(conconst),
+            Oe_A=float(A_fit), Oe_A_err=float(A_err),
+            Oe_A0=float(A0_fit),
+            oe_fit=str(oe_fit),
+            Oe_x0=(None if x0_fit is None else float(x0_fit)),
+            Oe_x0_err=(None if x0_err is None else float(x0_err)),
+            Oe_A0_check=(None if A0_check is None else float(A0_check)),
+            Oe_A0_check_err=(None if A0_check_err is None
+                             else float(A0_check_err)),
+            Oe_center_raw=(None if x0_fit is None
+                           else float(x1 + x0_fit + width / 2.0)),
+            conconst_nrad_per_mT=float(conconst),
             DL_field_mT=float(conDL), DL_field_err_mT=float(conDL_error),
             current_mA=float(self.calc_info.current),
             xi_DL=float(xi_DL), xi_DL_err=float(xi_DL_err),
@@ -2110,7 +2210,7 @@ class analyze_SOT:
 
         if nice_plot:
             self._nice_plot(position, theta_Oe, theta_DL, error_bar,
-                            reflex, pos_fit, pLog, pConst, width, plotname)
+                            reflex, pos_fit, oe_curve, pConst, plotname)
         return self
 
     # ── Persistence helpers ───────────────────────────────────────────────
@@ -2184,9 +2284,7 @@ class analyze_SOT:
             warnings.warn(f'_save_results_json: {e}')
 
     def _nice_plot(self, position, theta_Oe, theta_DL, error_bar, reflex,
-                   pos_fit, pLog, pConst, width, plotname):
-        def Log_fit(x, A, A0, width):
-            return A0 + A * np.log((width - x) / x)
+                   pos_fit, oe_curve, pConst, plotname):
         fs = 30
         fig, ax = plt.subplots(figsize=(11, 8))
         ax.plot(position, theta_DL, '-.v', color='green', label=r'$\theta_{DL}$')
@@ -2196,7 +2294,7 @@ class analyze_SOT:
         ax.plot(position, theta_Oe, '-.v', color='k', label=r'$\theta_{Oe}$')
         ax.errorbar(position, theta_Oe, yerr=error_bar, color='k')
         try:
-            ax.plot(pos_fit, Log_fit(pos_fit, pLog[0], pLog[1], width),
+            ax.plot(pos_fit, oe_curve,
                     color='grey', linewidth=4, label=r'fit $A\ln\frac{w-x}{x}$')
         except Exception:
             pass
@@ -2234,7 +2332,7 @@ class analyze_SOT:
     @staticmethod
     def import_analyze_SOT(scanlist_path, see_channels=None,
                             direction=None, ignorLines=(), fit_edge_offset=5,
-                            force_theta_0=False, **kwargs):
+                            force_theta_0=False, oe_fit='A0', **kwargs):
         """Full SOT analysis pipeline for a single scan direction.
 
         Equivalent to ``analyze_SHE_OHE.import_analyze_SOT`` from Jakub_methods.py.
@@ -2254,12 +2352,14 @@ class analyze_SOT:
         res.evaluate_data(do_plot='sumdiff')
         res.evaluate_data(do_plot='negpos')
         res.evaluate_data(do_plot='realimag')
-        res.eval_width_and_fit(fit_edge_offset=fit_edge_offset, nice_plot=True)
+        res.eval_width_and_fit(fit_edge_offset=fit_edge_offset, nice_plot=True,
+                               oe_fit=oe_fit)
         return res
 
     @staticmethod
     def import_analyze_both(scanlist_path, see_channels=None,
-                             ignorLines=(), fit_edge_offset=5, **kwargs):
+                             ignorLines=(), fit_edge_offset=5, oe_fit='A0',
+                             **kwargs):
         """Run the full pipeline for each direction available in the scanlist.
 
         Returns ``(res_trace, res_retrace)``.  Either element is ``None``
@@ -2279,7 +2379,8 @@ class analyze_SOT:
             print('=' * 60 + '\n  SINGLE DIRECTION\n' + '=' * 60)
             res = analyze_SOT.import_analyze_SOT(
                 scanlist_path, see_channels=see_channels, direction=None,
-                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset, **kwargs)
+                ignorLines=ignorLines, fit_edge_offset=fit_edge_offset,
+                oe_fit=oe_fit, **kwargs)
             return res, None
 
         def _run(direction):
@@ -2290,7 +2391,7 @@ class analyze_SOT:
                 return analyze_SOT.import_analyze_SOT(
                     scanlist_path, see_channels=see_channels,
                     direction=direction, ignorLines=ignorLines,
-                    fit_edge_offset=fit_edge_offset, **kwargs)
+                    fit_edge_offset=fit_edge_offset, oe_fit=oe_fit, **kwargs)
             except Exception as e:
                 import traceback
                 print('=' * 60)
