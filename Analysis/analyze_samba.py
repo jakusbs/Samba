@@ -1861,7 +1861,8 @@ class analyze_SOT:
     # ── eval_width_and_fit ────────────────────────────────────────────────
 
     def eval_width_and_fit(self, current_coefficient2=0.99, fit_edge_offset=5,
-                           nice_plot=False, use_Oe_as_edges=True, oe_fit='A0'):
+                           nice_plot=False, use_Oe_as_edges=True, oe_fit='x0',
+                           oe_recenter=True, max_recenter=3):
         """Fit Oersted (log) and DL (constant) contributions; compute SOT fields.
 
         Fit-window edges: with ``use_Oe_as_edges=True`` (default) the device
@@ -1870,7 +1871,7 @@ class analyze_SOT:
         identical to the reference: ``conconst = A·width/(2·Ic)·10`` (nrad/mT)
         and ``conDL = const/conconst`` (mT).
 
-        oe_fit : ``'A0'`` (default) or ``'x0'``
+        oe_fit : ``'x0'`` (default) or ``'A0'``
             ``'A0'`` — legacy model ``A0 + A·ln((w−x)/x)``: a free vertical
             offset absorbs any baseline in the Oersted sum.
             ``'x0'`` — model ``A·ln((w−u)/u)`` with ``u = x − x0``: the offset
@@ -1882,6 +1883,16 @@ class analyze_SOT:
             A three-parameter check fit (A, x0, A0 all free) is run as well
             and reports whether a free A0 would be consistent with 0 — if it
             is not, a genuine background exists and may bias x0.
+        oe_recenter : bool (default True), max_recenter : int (default 3)
+            ``'x0'`` mode only.  A fitted ``x0`` larger than one scan pixel
+            means the fit window is mis-centred on the device, which biases
+            the Oersted amplitude ``A`` and the DL constant.  When
+            ``oe_recenter`` is on, the fitted ``x0`` is folded back into the
+            window origin and the fit is repeated (up to ``max_recenter``
+            times) until ``|x0| <= one scan pixel``.  The device ``width`` is
+            held fixed throughout, so this only re-aligns the window; a
+            well-centred scan (``|x0| <= 1 pixel`` on the first pass) is
+            unchanged.
         """
         if oe_fit not in ('A0', 'x0'):
             raise ValueError(f"oe_fit must be 'A0' or 'x0', got {oe_fit!r}")
@@ -1930,65 +1941,18 @@ class analyze_SOT:
             width  = -width
         print(f'  Fit edges: x1={x1:.2f}, x2={x2:.2f}, width={width:.2f} {self.x_unit}')
 
-        position = position - x1      # shift: left edge → 0
+        # Keep the sorted, un-shifted positions so the fit window can be
+        # re-centred (origin shifted) and rebuilt below without re-sorting.
+        # One "scan pixel" = spacing between adjacent scan points (the median
+        # guards against a stray non-uniform step); it is the x0 re-centre
+        # threshold.
+        position_raw = position.copy()
+        scan_pixel   = float(np.median(np.diff(position_raw)))
+
         #print('artificial width increase by 1')
-        width    = round(width, 1) 
+        width    = round(width, 1)
 
         Ic  = self.calc_info.current * current_coefficient2   # actual total current (mA)
-
-        # ── build mask ────────────────────────────────────────────────────
-        mask = (position > 0) & (position < width)
-        true_idx = np.where(mask)[0]
-        if len(true_idx) > 2 * fit_edge_offset:
-            mask[true_idx[:fit_edge_offset]]  = False
-            mask[true_idx[-fit_edge_offset:]] = False
-        print(f'  {mask.sum()} points in fit window')
-
-        if mask.sum() < 3:
-            warnings.warn('eval_width_and_fit: not enough interior points for fit')
-            return self
-
-        pos_fit  = position[mask]
-        pos_mask = position[(~mask) & (position > 0) & (position < width)]
-
-        # Weighted fit only when real error bars exist.  With one scan per
-        # polarity the SEM is zero everywhere; clamping zeros to 1e-12 and
-        # using absolute_sigma=True would produce meaningless (absurdly
-        # small) parameter errors, so fall back to an unweighted fit whose
-        # errors are scaled from the fit residuals instead.
-        weighted = bool(np.any(error_bar[mask] > 0))
-        if weighted:
-            fit_kw = dict(sigma=np.maximum(error_bar[mask], 1e-12),
-                          absolute_sigma=True)
-        else:
-            warnings.warn('eval_width_and_fit: all error bars are zero '
-                          '(single scan per polarity?) — using an '
-                          'unweighted fit with residual-scaled errors.')
-            fit_kw = {}
-
-        # DL constant fit
-        try:
-            pConst, covConst = curve_fit(Const_fit, pos_fit, theta_DL[mask],
-                                          **fit_kw)
-            errConst = np.sqrt(np.diag(covConst))
-        except Exception as e:
-            warnings.warn(f'DL const fit failed: {e}')
-            pConst   = [float(np.mean(theta_DL[mask]))]
-            errConst = [float(np.std(theta_DL[mask]))]
-
-        # ── Oe log fit ─────────────────────────────────────────────────────
-        # The legacy 2-parameter fit (A, A0) always runs: it is the result in
-        # 'A0' mode and seeds the amplitude for the 'x0' fit.
-        try:
-            pLegacy, covLegacy = curve_fit(
-                lambda x, A, A0: Log_fit(x, A, A0, width),
-                pos_fit, theta_Oe[mask],
-                **fit_kw)
-            errLegacy = np.sqrt(np.diag(covLegacy))
-        except Exception as e:
-            warnings.warn(f'Oe log fit failed: {e}')
-            pLegacy   = [0.0, float(np.mean(theta_Oe[mask]))]
-            errLegacy = [0.0, 0.0]
 
         def Log_fit_x0(x, A, x0):
             # Offset pinned to 0 — the antisymmetric Oersted profile slides
@@ -2001,9 +1965,84 @@ class analyze_SOT:
             u = np.clip(x - x0, 1e-6, width - 1e-6)
             return A0 + A * np.log((width - u) / u)
 
-        x0_fit = x0_err = None            # only set in 'x0' mode
-        A0_check = A0_check_err = None    # 3-parameter consistency check
-        if oe_fit == 'x0':
+        # ── fit window + Oe/DL fits, with optional x0 re-centring ──────────
+        # In 'x0' mode a large fitted x0 means the grid-quantised argmin/argmax
+        # edge — and therefore the whole fit window — sits off the device
+        # centre, which biases the Oersted amplitude A and the DL constant.
+        # We fold the fitted x0 back into the window origin and refit, up to
+        # max_recenter times, until |x0| <= one scan pixel.  The device width
+        # is held FIXED the whole time, so this only re-aligns the window; a
+        # scan that is already centred (|x0| <= 1 pixel on the first pass) is
+        # left exactly as the single-shot fit would leave it.
+        recenter_shift = 0.0        # cumulative origin shift (µm); 'x0' mode only
+        n_recenter     = 0          # number of re-centring passes actually taken
+        x0_fit = x0_err = None      # residual offset after re-centring ('x0' mode)
+        for _it in range(max_recenter + 1):
+            # Shift the origin so the (possibly re-centred) left edge → 0, then
+            # (re)build the interior mask for this window.
+            position = position_raw - (x1 + recenter_shift)
+
+            # ── build mask ─────────────────────────────────────────────────
+            mask = (position > 0) & (position < width)
+            true_idx = np.where(mask)[0]
+            if len(true_idx) > 2 * fit_edge_offset:
+                mask[true_idx[:fit_edge_offset]]  = False
+                mask[true_idx[-fit_edge_offset:]] = False
+            if _it == 0:
+                print(f'  {mask.sum()} points in fit window')
+
+            if mask.sum() < 3:
+                warnings.warn('eval_width_and_fit: not enough interior points for fit')
+                return self
+
+            pos_fit  = position[mask]
+            pos_mask = position[(~mask) & (position > 0) & (position < width)]
+
+            # Weighted fit only when real error bars exist.  With one scan per
+            # polarity the SEM is zero everywhere; clamping zeros to 1e-12 and
+            # using absolute_sigma=True would produce meaningless (absurdly
+            # small) parameter errors, so fall back to an unweighted fit whose
+            # errors are scaled from the fit residuals instead.
+            weighted = bool(np.any(error_bar[mask] > 0))
+            if weighted:
+                fit_kw = dict(sigma=np.maximum(error_bar[mask], 1e-12),
+                              absolute_sigma=True)
+            else:
+                if _it == 0:
+                    warnings.warn('eval_width_and_fit: all error bars are zero '
+                                  '(single scan per polarity?) — using an '
+                                  'unweighted fit with residual-scaled errors.')
+                fit_kw = {}
+
+            # DL constant fit
+            try:
+                pConst, covConst = curve_fit(Const_fit, pos_fit, theta_DL[mask],
+                                              **fit_kw)
+                errConst = np.sqrt(np.diag(covConst))
+            except Exception as e:
+                warnings.warn(f'DL const fit failed: {e}')
+                pConst   = [float(np.mean(theta_DL[mask]))]
+                errConst = [float(np.std(theta_DL[mask]))]
+
+            # ── Oe log fit ─────────────────────────────────────────────────
+            # The legacy 2-parameter fit (A, A0) always runs: it is the result
+            # in 'A0' mode and seeds the amplitude for the 'x0' fit.
+            try:
+                pLegacy, covLegacy = curve_fit(
+                    lambda x, A, A0: Log_fit(x, A, A0, width),
+                    pos_fit, theta_Oe[mask],
+                    **fit_kw)
+                errLegacy = np.sqrt(np.diag(covLegacy))
+            except Exception as e:
+                warnings.warn(f'Oe log fit failed: {e}')
+                pLegacy   = [0.0, float(np.mean(theta_Oe[mask]))]
+                errLegacy = [0.0, 0.0]
+
+            # 'A0' mode: nothing to re-centre — one pass is all we need.
+            if oe_fit != 'x0':
+                break
+
+            # ── Oe log fit with a free horizontal offset x0 (A0 pinned to 0) ─
             try:
                 pX, covX = curve_fit(
                     Log_fit_x0, pos_fit, theta_Oe[mask],
@@ -2019,21 +2058,41 @@ class analyze_SOT:
                 warnings.warn(f'Oe x0 fit failed ({e}) — falling back to the '
                               f'legacy A0 fit.')
                 oe_fit = 'A0'
-            if x0_fit is not None:
-                # Consistency check: with A0 also free, is it compatible
-                # with 0?  If not, a genuine constant background exists in
-                # the Oersted sum and forcing A0=0 may bias x0 and A.
-                try:
-                    pC, covC = curve_fit(
-                        Log_fit_x0A0, pos_fit, theta_Oe[mask],
-                        p0=[A_fit, x0_fit, 0.0],
-                        bounds=([-np.inf, -width / 4, -np.inf],
-                                [np.inf,  width / 4,  np.inf]),
-                        **fit_kw)
-                    A0_check     = float(pC[2])
-                    A0_check_err = float(np.sqrt(np.diag(covC))[2])
-                except Exception as e:
-                    warnings.warn(f'A0 consistency-check fit failed: {e}')
+                x0_fit = None
+                break
+
+            # Re-centre decision: if the fitted offset is within one scan
+            # pixel, the window is centred → done.  Otherwise fold x0 into the
+            # origin and refit — unless re-centring is off or the pass budget
+            # is exhausted.
+            if (not oe_recenter or abs(x0_fit) <= scan_pixel
+                    or _it == max_recenter):
+                break
+            recenter_shift += x0_fit
+            n_recenter     += 1
+
+        # ── A0 consistency check on the final (converged) window ───────────
+        A0_check = A0_check_err = None    # 3-parameter consistency check
+        if oe_fit == 'x0' and x0_fit is not None:
+            if n_recenter:
+                print(f'  Re-centred  = {n_recenter}× by {recenter_shift:+.3f} '
+                      f'{self.x_unit} (fitted x0 was > 1 scan pixel = '
+                      f'{scan_pixel:.3f} {self.x_unit}); residual x0 = '
+                      f'{x0_fit:+.3f} {self.x_unit}')
+            # Consistency check: with A0 also free, is it compatible with 0?
+            # If not, a genuine constant background exists in the Oersted sum
+            # and forcing A0=0 may bias x0 and A.
+            try:
+                pC, covC = curve_fit(
+                    Log_fit_x0A0, pos_fit, theta_Oe[mask],
+                    p0=[A_fit, x0_fit, 0.0],
+                    bounds=([-np.inf, -width / 4, -np.inf],
+                            [np.inf,  width / 4,  np.inf]),
+                    **fit_kw)
+                A0_check     = float(pC[2])
+                A0_check_err = float(np.sqrt(np.diag(covC))[2])
+            except Exception as e:
+                warnings.warn(f'A0 consistency-check fit failed: {e}')
         if oe_fit == 'A0':
             A_fit, A0_fit = float(pLegacy[0]), float(pLegacy[1])
             A_err, A0_err = float(errLegacy[0]), float(errLegacy[1])
@@ -2055,12 +2114,13 @@ class analyze_SOT:
         print(f'  conconst    = {conconst:.4g} nrad/mT')
         print(f'  DL-field    = ({conDL:.4g} ± {conDL_error:.4g}) mT')
         if x0_fit is not None:
-            centre = x1 + x0_fit + width / 2.0
+            x1_eff = x1 + recenter_shift          # window origin after re-centring
+            centre = x1_eff + x0_fit + width / 2.0
             print(f'  Oe x0       = ({x0_fit:+.3f} ± {x0_err:.3f}) '
-                  f'{self.x_unit}  (edge-placement correction)')
+                  f'{self.x_unit}  (residual after re-centring)')
             print(f'  Oe centre   = {centre:.3f} {self.x_unit} in raw scan '
                   f'coords (zero crossing of the Oersted field); real edges '
-                  f'{x1 + x0_fit:.3f} .. {x1 + x0_fit + width:.3f}')
+                  f'{x1_eff + x0_fit:.3f} .. {x1_eff + x0_fit + width:.3f}')
             if A0_check is not None:
                 ok = abs(A0_check) <= 2 * (A0_check_err or np.inf)
                 print(f'  A0 check    = ({A0_check:+.3g} ± {A0_check_err:.3g})'
@@ -2188,7 +2248,10 @@ class analyze_SOT:
             Oe_A0_check_err=(None if A0_check_err is None
                              else float(A0_check_err)),
             Oe_center_raw=(None if x0_fit is None
-                           else float(x1 + x0_fit + width / 2.0)),
+                           else float(x1 + recenter_shift + x0_fit + width / 2.0)),
+            Oe_recenter_shift=(None if x0_fit is None else float(recenter_shift)),
+            Oe_recenter_passes=int(n_recenter),
+            scan_pixel_um=float(scan_pixel),
             conconst_nrad_per_mT=float(conconst),
             DL_field_mT=float(conDL), DL_field_err_mT=float(conDL_error),
             current_mA=float(self.calc_info.current),
@@ -2333,11 +2396,14 @@ class analyze_SOT:
     @staticmethod
     def import_analyze_SOT(scanlist_path, see_channels=None,
                             direction=None, ignorLines=(), fit_edge_offset=5,
-                            force_theta_0=False, oe_fit='A0', **kwargs):
+                            force_theta_0=False, oe_fit='x0',
+                            oe_recenter=True, max_recenter=3, **kwargs):
         """Full SOT analysis pipeline for a single scan direction.
 
         Equivalent to ``analyze_SHE_OHE.import_analyze_SOT`` from Jakub_methods.py.
         Pass ``see_channels=None`` (default) to auto-detect from the HDF5 file.
+        ``oe_fit``/``oe_recenter``/``max_recenter`` are forwarded to
+        :meth:`eval_width_and_fit` (default: 'x0' fit with re-centring on).
         """
         res = analyze_SOT(scanlist_path, direction=direction, **kwargs)
         see_channels = analyze_SOT._resolve_see_channels(see_channels, res._detected)
@@ -2354,12 +2420,14 @@ class analyze_SOT:
         res.evaluate_data(do_plot='negpos')
         res.evaluate_data(do_plot='realimag')
         res.eval_width_and_fit(fit_edge_offset=fit_edge_offset, nice_plot=True,
-                               oe_fit=oe_fit, **kwargs)
+                               oe_fit=oe_fit, oe_recenter=oe_recenter,
+                               max_recenter=max_recenter, **kwargs)
         return res
 
     @staticmethod
     def import_analyze_both(scanlist_path, see_channels=None,
-                             ignorLines=(), fit_edge_offset=5, oe_fit='A0',
+                             ignorLines=(), fit_edge_offset=5, oe_fit='x0',
+                             oe_recenter=True, max_recenter=3,
                              **kwargs):
         """Run the full pipeline for each direction available in the scanlist.
 
@@ -2381,7 +2449,8 @@ class analyze_SOT:
             res = analyze_SOT.import_analyze_SOT(
                 scanlist_path, see_channels=see_channels, direction=None,
                 ignorLines=ignorLines, fit_edge_offset=fit_edge_offset,
-                oe_fit=oe_fit, **kwargs)
+                oe_fit=oe_fit, oe_recenter=oe_recenter,
+                max_recenter=max_recenter, **kwargs)
             return res, None
 
         def _run(direction):
@@ -2392,7 +2461,8 @@ class analyze_SOT:
                 return analyze_SOT.import_analyze_SOT(
                     scanlist_path, see_channels=see_channels,
                     direction=direction, ignorLines=ignorLines,
-                    fit_edge_offset=fit_edge_offset, oe_fit=oe_fit, **kwargs)
+                    fit_edge_offset=fit_edge_offset, oe_fit=oe_fit,
+                    oe_recenter=oe_recenter, max_recenter=max_recenter, **kwargs)
             except Exception as e:
                 import traceback
                 print('=' * 60)
