@@ -1201,7 +1201,7 @@ class analyze_SOT:
                  analysis_base_dir=None,
                  save_dir=None, save_subdir=True,
                  use_calibration_file=True,
-                 Ms=None, t_stack_nm=None, t_fm_nm=None):
+                 Ms=None, t_stack_nm=None, t_fm_nm=None, use_Oe_as_edges=True):
         self.scanlist_path = str(scanlist_path)
         self.direction     = direction
         # ── auto-infer data_base_dir from scanlist location ───────────────
@@ -1930,8 +1930,9 @@ class analyze_SOT:
             width  = -width
         print(f'  Fit edges: x1={x1:.2f}, x2={x2:.2f}, width={width:.2f} {self.x_unit}')
 
-        position = position - x1    # shift: left edge → 0
-        width    = round(width, 1)
+        position = position - x1      # shift: left edge → 0
+        #print('artificial width increase by 1')
+        width    = round(width, 1) 
 
         Ic  = self.calc_info.current * current_coefficient2   # actual total current (mA)
 
@@ -2353,7 +2354,7 @@ class analyze_SOT:
         res.evaluate_data(do_plot='negpos')
         res.evaluate_data(do_plot='realimag')
         res.eval_width_and_fit(fit_edge_offset=fit_edge_offset, nice_plot=True,
-                               oe_fit=oe_fit)
+                               oe_fit=oe_fit, **kwargs)
         return res
 
     @staticmethod
