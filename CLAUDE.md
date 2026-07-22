@@ -2944,3 +2944,52 @@ the spin minimum 1e-6); over a 50000 nm span the derived N exceeded Qt's
 commit (Enter / focus-out / arrows), never on intermediate keystrokes.
 Regression test added (suite 69); verified against the real widgets with
 QTest keystrokes offscreen.
+
+---
+
+## 51. Recent Changes (July 2026) — MCS2 Stage Home Button (Auto-Zero)
+
+Branch `claude/device-plot-legend-colors-yifm6d` (SAMBA, 69 tests) + same
+branch on TANGO_Devices. User report: after hand-controller use the IR MCS2
+axes error with "movement finished, channel: 0 (invalid parameter)" until a
+restart / axis Init; requested use of the SmarAct AutoZero referencing option
+(position := 0 when the reference mark is found on Home). IR/MCS2 only — the
+Green Smaract control must not be touched.
+
+### Root cause of the sticky error (TANGO_Devices analysis)
+The MCS2 Ctrl latches the **last** SA_CTL event per axis; the Motor's
+`dev_state()` re-reads that latch on every State call and maps a failed
+MOVEMENT_FINISHED to FAULT with exactly that message. Only a new axis event
+(successful move/reference) clears it; motor `Init` recovers because
+`init_device` re-sends the sensor configuration and rebuilds the connection.
+The AutoZero chain (Motor `AutoZero` attr → Ctrl `SetAutoZero` →
+`SA_CTL_PKEY_REFERENCING_OPTIONS`/`SA_CTL_REF_OPT_BIT_AUTO_ZERO`) already
+existed — it was just unreachable from the stage device and SAMBA.
+
+### TANGO_Devices — stage `Home` command (**needs redeploy**)
+`SmarActMCS2Stage.py` gains `Home`: per axis (X→Y→Z sequentially) writes
+`AutoZero = True` on the motor, runs the motor's `Home` (`SA_CTL_Reference`),
+and waits (bounded by `MovementTimeout`) until not MOVING and `PositionKnown`
+— tolerating transient FAULTs, since the stale latched event is only cleared
+by the referencing's own events. Errors collected and raised together.
+
+### SAMBA — "⌂ Home" button (`core/calibration.py`)
+Next to "⟲ Reinitialise" in the Calibration tab's Stage-positioning group:
+- Shown **only** when the stage device exposes both `Home` and `Initialise`
+  commands — the SmarActMCS2Stage signature, probed in a background thread on
+  every `configure_stage()`. The Green setup's old Smaract server and the
+  Cryo Attocube stages never match, so they never see the button.
+- Confirmation dialog first (the stage MOVES to its reference marks and
+  positions read 0 there); runs in a daemon thread with a 120 s client
+  timeout (3 axes × MovementTimeout); on success re-reads all positions,
+  on failure shows the error in the status line; button disabled while
+  running and re-enabled either way.
+- Recommended recovery after hand-controller use: ⟲ Reinitialise, then
+  ⌂ Home.
+
+### Verification
+Offscreen-Qt run of the real `CalibrationPanel` (9 checks): button hidden
+initially / in sim mode / for a server without the command pair; shown for
+the MCS2 signature; Yes → exactly one `Home` dispatched + positions re-read +
+button re-enabled; No → nothing dispatched; failure path re-enables with an
+error. Both servers `py_compile` clean; `python test_runner.py` 69 OK.

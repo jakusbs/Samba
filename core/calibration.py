@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QSplitter,
-    QSizePolicy, QDoubleSpinBox, QSpinBox
+    QSizePolicy, QDoubleSpinBox, QSpinBox, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
@@ -647,7 +647,22 @@ class CalibrationPanel(QWidget):
             "axis after manual use with the hand controller.\n"
             "Sends the stage device's Initialise command (falls back to Init).")
         self.reinit_btn.clicked.connect(self._reinit_stage)
-        btn_row.addWidget(self.reinit_btn); btn_row.addStretch()
+        btn_row.addWidget(self.reinit_btn)
+        # ⌂ Home — MCS2 only: shown when the stage device exposes both the
+        # Home and Initialise commands (the SmarActMCS2Stage signature), so
+        # the Green setup's old Smaract server and the Cryo Attocube stages
+        # never see it.
+        self.home_btn = QPushButton("⌂ Home")
+        self.home_btn.setToolTip(
+            "Reference (home) all three MCS2 axes with auto-zero:\n"
+            "each axis drives to its reference mark and the position is set\n"
+            "to 0 there (SmarAct AutoZero referencing option).  Use after\n"
+            "Reinitialise to restore a consistent position frame following\n"
+            "manual hand-controller use.")
+        self.home_btn.clicked.connect(self._home_stage)
+        self.home_btn.setVisible(False)
+        btn_row.addWidget(self.home_btn)
+        btn_row.addStretch()
         ctrl_l.addLayout(btn_row)
 
         # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
@@ -894,6 +909,7 @@ class CalibrationPanel(QWidget):
             f"X: {x_dev or '—'}/{x_attr}   "
             f"Y: {y_dev or '—'}/{y_attr}   "
             f"Z: {z_dev or '—'}/{z_attr}")
+        self._probe_home_support(x_dev)
 
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
@@ -927,6 +943,81 @@ class CalibrationPanel(QWidget):
             except Exception as e:
                 last = str(e)
         self._set_pos_err(f"Reinitialise failed: {last[:80]}")
+
+    def _probe_home_support(self, dev: str):
+        """Show the ⌂ Home button only for the MCS2 stage server.
+
+        The SmarActMCS2Stage device exposes both Home and Initialise — that
+        pair is its signature.  Probed in a background thread so an
+        unreachable device can't freeze the GUI; anything else (old Green
+        Smaract server, Cryo Attocube stages, sim mode) keeps the button
+        hidden.
+        """
+        self.home_btn.setVisible(False)
+        if not dev:
+            return
+
+        def _do():
+            show = False
+            try:
+                p, err = fresh_proxy(dev)
+                if not err and not is_sim_proxy(p):
+                    cmds = {str(c).lower() for c in p.get_command_list()}
+                    show = "home" in cmds and "initialise" in cmds
+            except Exception:
+                pass
+            self._gui_apply.emit(lambda s=show: self.home_btn.setVisible(s))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _home_stage(self):
+        """Home all MCS2 axes with auto-zero (stage Home command).
+
+        The stage physically moves each axis to its reference mark and the
+        positions read 0 there afterwards — hence the confirmation dialog.
+        Runs in a background thread with a generous client timeout (the
+        stage homes X, Y, Z sequentially, each bounded by its
+        MovementTimeout).
+        """
+        info = self._get_axis_info()
+        dev = info.get("x", ("", ""))[0]
+        if not dev:
+            self._set_pos_err("No stage device configured"); return
+        ans = QMessageBox.question(
+            self, "Home stage?",
+            "Home all three MCS2 axes with auto-zero?\n\n"
+            "The stage will MOVE each axis to its reference mark and the\n"
+            "position will read 0 there afterwards.  Make sure nothing can\n"
+            "collide with the sample or objective.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.home_btn.setEnabled(False)
+        self._set_pos_ok("Homing stage (auto-zero)…")
+
+        def _do():
+            try:
+                p, err = fresh_proxy(dev)
+                if err:
+                    raise RuntimeError(err)
+                if is_sim_proxy(p):
+                    raise RuntimeError("Simulation mode")
+                p.set_timeout_millis(120000)   # 3 axes × MovementTimeout
+                p.command_inout("Home")
+                def _ok():
+                    self.home_btn.setEnabled(True)
+                    self._set_pos_ok("Stage homed — positions zeroed at reference marks")
+                    self._read_all()
+                self._gui_apply.emit(_ok)
+            except Exception as e:
+                msg = str(e)
+                def _err():
+                    self.home_btn.setEnabled(True)
+                    self._set_pos_err(f"Home failed: {msg[:120]}")
+                self._gui_apply.emit(_err)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── LED lights ────────────────────────────────────────────────────────────
     def set_lights_device(self, path: str):
