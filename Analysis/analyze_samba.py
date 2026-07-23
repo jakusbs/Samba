@@ -1959,8 +1959,15 @@ class analyze_SOT:
         position_raw = position.copy()
         scan_pixel   = float(np.median(np.diff(position_raw)))
 
+        # Keep width at its raw value x2 − x1 — do NOT round it.  Rounding made
+        # the mask's right boundary (position < width) land a fraction of a
+        # pixel PAST the right-edge grid point whenever the width rounded up, so
+        # that edge point slipped into the fit window while the left edge (at
+        # position 0, excluded by position > 0) never did — the fit_edge_offset
+        # trim then dropped one more point on the left than on the right.  With
+        # the raw width, position < width excludes the right-edge grid point
+        # exactly as position > 0 excludes the left, so the trim is symmetric.
         #print('artificial width increase by 1')
-        width    = round(width, 1)
 
         Ic  = self.calc_info.current * current_coefficient2   # actual total current (mA)
 
