@@ -1286,10 +1286,51 @@ failure, so one bad direction never silently loses the other.
 - `thermoreflectance` — `(pos − neg) / mean(intensity)`
 - `findphase` — diagnostic only
 
-`eval_width_and_fit()` runs an `erf`-edge fit, computes device width, writes
-`analyzed_data.csv` (semicolon-separated, includes 2ω columns when present)
-and `results.json` (all metadata + fit parameters, numpy/bytes/Inf coerced
-to JSON-safe).
+`eval_width_and_fit()` fits the Oersted **sum** to a log profile and the DL
+**diff** to a constant (see *Oersted fit modes* below), computes the device
+width, and writes `analyzed_data.csv` (semicolon-separated, includes 2ω
+columns when present) and `results.json` (all metadata + fit parameters,
+numpy/bytes/Inf coerced to JSON-safe).
+
+### Oersted fit modes (`oe_fit`), auto re-centring & escalation
+
+`eval_width_and_fit(..., oe_fit='x0', oe_recenter=True, max_recenter=3,
+oe_autoescalate=True)`. The DL field is `conDL = DL_const / conconst` with
+`conconst = A·width/(2·Ic)·10`, so a correct Oersted amplitude `A` is what
+makes the DL field correct. Three models for `A`:
+
+| `oe_fit` | model | free params | use |
+|----------|-------|-------------|-----|
+| `'A0'` | `A0 + A·ln((w−x)/x)` | A, A0 (x0≡0) | legacy; vertical offset only |
+| `'x0'` *(default)* | `A·ln((w−u)/u)`, `u=x−x0` | A, x0 (A0≡0) | horizontal offset; A0 pinned to 0 (the antisymmetric Oersted field must cross zero at the wire centre) |
+| `'x0A0'` | `A0 + A·ln((w−u)/u)` | A, x0, A0 | a horizontal offset **and** a field-even background together |
+
+- **Auto re-centring** (`oe_recenter`, `'x0'`/`'x0A0'`): the grid-quantised
+  argmin/argmax edge can sit off the device, mis-placing the fit window and
+  biasing `A`. If the fitted `x0` exceeds **one scan pixel** (adjacent-point
+  spacing), it is folded into the window origin and the fit repeats (≤
+  `max_recenter`) until `|x0| ≤ 1 pixel`. **`width` is held fixed** — a pure
+  re-alignment; a well-centred scan is unchanged. Re-centring is driven by the
+  **3-parameter** fit, because a constant `A0` masquerades as a shift on an
+  antisymmetric log and would otherwise make a 2-parameter x0 fit run away.
+- **Auto-escalation** (`oe_autoescalate`, `'x0'` mode): the 3-parameter fit
+  always runs as a check; if a free `A0` is **not consistent with 0 (>2σ)** a
+  field-even background sits on the Oersted sum (thermoreflectance, diode
+  offset, drift, imperfect polarity subtraction) — it is not Oersted, so
+  leaving it in biases `A` and the DL field. The fit then escalates to
+  `'x0A0'` and uses the background-corrected `A` (with a warning). Clean scans
+  (A0≈0) stay on the simple `'x0'` fit.
+- **Symmetric fit window**: `width` is the **raw** `x2−x1`, not rounded.
+  Rounding it up let the right-edge grid point slip into the window while the
+  left edge (position 0, excluded by `position > 0`) never did, so
+  `fit_edge_offset` trimmed one more point on the left than the right. The raw
+  width makes `position < width` exclude the right edge exactly as
+  `position > 0` excludes the left → symmetric trim.
+- `results.json` records `oe_fit`, `Oe_A`/`Oe_A_err`, `Oe_x0`/`Oe_x0_err`,
+  `Oe_A0`/`Oe_A0_err`, `Oe_A0_check`/`_err`, `Oe_autoescalated`,
+  `Oe_center_raw`, `Oe_recenter_shift`, `Oe_recenter_passes`, `scan_pixel_um`.
+  `oe_fit`/`oe_recenter`/`max_recenter`/`oe_autoescalate` thread through
+  `import_analyze_SOT` and `import_analyze_both`.
 
 ### Key helper functions
 
@@ -3035,3 +3076,57 @@ SAMBA just points its button at `SetZero`.
   hidden without the SetZero+Initialise signature, shown with it; Yes → one
   `SetZero` dispatched + positions re-read + button re-enabled; No → nothing.
 - Both servers `py_compile` clean; `python test_runner.py` 69 OK.
+
+---
+
+## 53. Recent Changes (July 2026) — Oersted Fit: x0/x0A0 Modes, Auto Re-centre & Symmetric Window
+
+Analysis module (`Analysis/analyze_samba.py`, mirrored in the standalone
+**Analyse_SOT** repo). `eval_width_and_fit` gains a horizontal-offset (`x0`)
+and a background (`A0`) correction to the Oersted log fit, made robust and
+self-selecting. Reference: §21 *Oersted fit modes*. Hardware-free; validated
+headless on synthetic profiles at the 15 mA scale (numpy/scipy/matplotlib/h5py
+only — the analysis module isn't part of `test_runner.py`).
+
+### `oe_fit` modes (default now `'x0'`)
+- `'A0'` (legacy) `A0 + A·ln((w−x)/x)` — vertical offset, x0≡0.
+- `'x0'` (**default**) `A·ln((w−u)/u)`, `u=x−x0` — A0 pinned to 0; the fitted
+  `x0` corrects the grid-quantised argmin/argmax edge and locates the real
+  device centre (`Oe_center_raw`).
+- `'x0A0'` `A0 + A·ln((w−u)/u)` — horizontal offset **and** field-even
+  background together (the background is not Oersted, so pinning A0=0 biases
+  the amplitude `A` and hence the DL field).
+
+### Auto re-centring (`oe_recenter=True`, `max_recenter=3`)
+A fitted `x0` beyond **one scan pixel** (adjacent-point spacing) means the fit
+window is mis-placed; the offset is folded into the window origin and the fit
+repeated until `|x0| ≤ 1 pixel`. **`width` held fixed** (pure re-alignment);
+a centred scan is unchanged. Driven by the **3-parameter** fit so a constant
+`A0` — which masquerades as a shift on the antisymmetric log — can't make it
+run away (a 2-parameter x0 fit did, and then under-reported A0 so escalation
+never fired).
+
+### Auto-escalation (`oe_autoescalate=True`, `'x0'` mode)
+The 3-parameter fit runs as a check; if a free `A0` is not consistent with 0
+(>2σ) the fit escalates to `'x0A0'` and the DL field uses the
+background-corrected `A` (with a warning). A clean scan stays on `'x0'`.
+Verified: a +280 nrad background biases the plain-x0 DL field 0.478→0.498 mT;
+explicit `x0A0` and auto-escalated `x0` both recover 0.478; a combined
+background + 4-pixel offset is fully recovered.
+
+### Symmetric fit window (raw width)
+`width` is now the **raw** `x2−x1`, not `round(·,1)`. Rounding up let the
+right-edge grid point slip into the fit window while the left edge (position
+0) was always excluded, so `fit_edge_offset` trimmed one more point on the
+left than the right (observed 6 vs 5). Raw width restores symmetry (6/6). The
+DL field uses the true measured width instead of a value rounded to 0.1 µm —
+a <0.25 % change (~1 µT at 15 mA), an order of magnitude below the fit error.
+
+### results.json / plumbing
+New keys: `oe_fit`, `Oe_x0`/`_err`, `Oe_A0`/`_err`, `Oe_A0_check`/`_err`,
+`Oe_autoescalated`, `Oe_center_raw`, `Oe_recenter_shift`,
+`Oe_recenter_passes`, `scan_pixel_um`. The fit plot legend shows the active
+model + A0 when present; `oe_fit`/`oe_recenter`/`max_recenter`/
+`oe_autoescalate` thread through `import_analyze_SOT` / `import_analyze_both`.
+The `import_analyze_SOT` `**kwargs` are forwarded to `eval_width_and_fit`
+(constructor accepts `use_Oe_as_edges` so the shared kwargs don't clash).
