@@ -25,6 +25,11 @@ class HardwarePanel(QGroupBox):
     _zi_err = pyqtSignal(str)
     _ks_ok  = pyqtSignal(object, object, object, object)  # (amp, frq, cpl, cur)
     _ks_err = pyqtSignal(str)
+    _mr_ok  = pyqtSignal(object, object)           # (magnet_current_A, relay_state)
+
+    # Emitted when the relay state shown here changed (user toggle or device
+    # readback) — lets the other tab's HardwarePanel mirror it.
+    relay_changed = pyqtSignal(int)
 
     def __init__(self, setup_getter, title: str = "Hardware", parent=None):
         super().__init__(title, parent)
@@ -153,6 +158,7 @@ class HardwarePanel(QGroupBox):
         self._zi_err.connect(lambda e: self._set_err(self.zi_status, e))
         self._ks_ok.connect(self._apply_keithley_readback)
         self._ks_err.connect(lambda e: self._set_err(self.ks_status, e))
+        self._mr_ok.connect(self._apply_magnet_relay_readback)
 
     def _setup(self): return self._setup_getter()
 
@@ -366,6 +372,63 @@ class HardwarePanel(QGroupBox):
                          f"amp={self.amp_spin.value():.4g} mA  "
                          f"freq={self.freq_spin.value():.4g} Hz")
 
+    # ── Magnet-current setpoint + relay readback ──────────────────────────────
+    def _read_magnet_relay(self):
+        """Read the magnet-current setpoint and relay state from the TANGO
+        devices (background thread) so the write windows show hardware truth
+        instead of a stale 0 after a restart or tab switch.
+
+        Skipped while a scan runs — a FIELD scan sweeps the current, and
+        capturing a mid-sweep value as the setpoint would be wrong.
+        """
+        if getattr(self, "_scan_running", False):
+            return
+        s = self._setup()
+        mag_dev  = s.get("magnet_device", "")
+        mag_attr = s.get("magnet_current_attr", "current_polar")
+        rel_dev  = s.get("relay_device", "")
+        rel_attr = s.get("relay_attr", "switchvar")
+
+        def _do():
+            cur = rel = None
+            if mag_dev:
+                p, conn_err = fresh_proxy(mag_dev)
+                if not conn_err and not is_sim_proxy(p):
+                    v, e = safe_read(p, mag_attr)
+                    if not e and v is not None:
+                        try:
+                            cur = float(v)
+                        except (TypeError, ValueError):
+                            pass
+            if rel_dev:
+                p, conn_err = fresh_proxy(rel_dev)
+                if not conn_err and not is_sim_proxy(p):
+                    v, e = safe_read(p, rel_attr)
+                    if not e and v is not None:
+                        try:
+                            rel = 1 if int(round(float(v))) else 0
+                        except (TypeError, ValueError):
+                            pass
+            if cur is not None or rel is not None:
+                self._mr_ok.emit(cur, rel)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_magnet_relay_readback(self, cur, rel):
+        """Apply magnet/relay readback to the UI (main thread).
+
+        setValue on the write spinbox does NOT write to hardware (only
+        Return/Enter does) — this only makes the window display what the
+        device is actually set to.
+        """
+        if cur is not None:
+            self.field_spin.setValue(cur)
+            self._set_ok(self.mag_status, f"setpoint read: {cur:.4f} A")
+        if rel is not None and rel != self._relay_state:
+            self._relay_state = rel
+            self._update_relay_label()
+            self.relay_changed.emit(rel)
+
     # ── Field ─────────────────────────────────────────────────────────────────
     def _write_field(self):
         s = self._setup(); dev = s.get("magnet_device", "")
@@ -463,6 +526,7 @@ class HardwarePanel(QGroupBox):
                          f"{relay_attr} → {self._relay_state}  "
                          f"({'−1' if self._relay_state else '+1'})")
         self._update_relay_label()
+        self.relay_changed.emit(self._relay_state)
 
     def _update_relay_label(self):
         if self._relay_state == 0:
@@ -493,6 +557,7 @@ class HardwarePanel(QGroupBox):
         """Re-read all hardware values (safe during scans — see set_scan_running)."""
         self._read_lockin()
         self._read_keithley()
+        self._read_magnet_relay()
 
     def get_relay_state(self) -> int: return self._relay_state
 

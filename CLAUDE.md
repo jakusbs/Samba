@@ -2824,3 +2824,214 @@ config") now contains its **own sensor picker rows**:
 - Verified with real Agg rendering at 9/20 pt and across a resize;
   calib-sensor row logic verified headlessly (round-trip, add/remove emit
   once, default row, cap 6). Suite: 61 tests.
+
+---
+
+## 49. Recent Changes (July 2026) — Per-Sensor Colored Y-Axis Titles
+
+Branch `claude/device-plot-legend-colors-yifm6d` (61 tests). User report: with
+two sensors on one axis the curves get different colors but the axis title is
+all one color (partially supersedes the §45 "several → axis color" behaviour).
+
+### `set_multicolor_ylabel` + `_MulticolorYLabel` (`core/plot_interact.py`)
+matplotlib's ylabel is a single `Text` and can only have one color, so the
+title is now drawn as **stacked rotated segments, one per sensor, each in its
+curve's color**:
+- The real ylabel keeps the full `"A (µV), B (µV)"` string but is made
+  invisible (`set_alpha(0.0)`) — it still reserves the correct
+  tight_layout/`_layout()` space and gives the segments a position to follow.
+- `_MulticolorYLabel` (an `Artist` added via `ax.add_artist`, so `cla()`
+  removes it) re-reads the label's position, font size and rotation **on every
+  draw** — segments track autoscaling tick-width changes, the Text spinbox and
+  resizes with no extra wiring. `zorder=5` so it draws *after* the `YAxis`
+  (zorder 1.5), which updates the label position during its own draw; at a
+  lower zorder the segments sat at the previous frame's label position.
+- Segments stack bottom→top (reading order of a 90°-rotated label), centred on
+  the label's extent, `","` appended to non-final segments plus a ≈one-space
+  gap. One sensor on an axis → plain ylabel in the curve color (unchanged);
+  empty → label cleared.
+- Module still imports without matplotlib (guarded `Artist` import — CI).
+- `render_light_figure` maps the segment colors Mocha→Latte like curves (the
+  segments are not in `ax.texts`, so the existing loops missed them); the
+  artist survives the figure pickle.
+
+### Call sites
+- `Live1DWidget.apply_config` (`core/plot_widgets.py`) — Y1 + Y2.
+- `FocusPlotWidget.setup_timescan` (`core/calibration.py`) — time-scan Y1 + Y2;
+  autofocus mode and `clear()` restore the plain "Focus signal (V)" label.
+
+### Verification
+Headless offscreen-Qt run of the real widgets (mpl 3.11, 27 checks): segment
+colors == line colors on both axes and in the calibration time scan; segments
+horizontally/vertically centred on the (invisible) label after a real draw
+with live data + autoscale; font-size change follows; re-apply/`clear()` never
+duplicate or leak the artist; single-sensor and empty axes keep the old
+behaviour; light export remaps segment colors and renders. `python
+test_runner.py` 61 OK; `plot_interact` imports with matplotlib blocked.
+
+---
+
+## 50. Recent Changes (July 2026) — N+Δ Always Visible & Hardware-Panel Truth/Sync
+
+Branch `claude/device-plot-legend-colors-yifm6d` (68 tests). Three-item user
+batch.
+
+### N and Δ-step both always visible, step as the base (`core/nstep.py`, new)
+The N / Δ radio toggles (only one spinbox visible at a time, the other as a
+grey computed label) are replaced everywhere by **both spinboxes always
+visible and editable**, coupled through the new shared `NStepPair`
+(+ `Samba_main/nstep.py` / `Cryo/nstep.py` shims):
+- Editing one box derives the other from the current span; when start/stop
+  change, the box the user edited **last** (the "anchor") keeps its value —
+  and the default anchor is the **step size** (per user request), including
+  after every config load.
+- N stays the authoritative value handed to the engine (typing a step rounds
+  to an integer point count); zero span (time scans) never clobbers N.
+- Guarded `setValue` — external `valueChanged` listeners (config save,
+  summary labels) still fire; Qt's no-change suppression prevents loops.
+- Converted: Samba_main `ActuatorGroup` (X/Y spatial) + `FieldSegmentList`
+  (per-segment Δ column, field sweeps); Cryo `ActuatorGroup` (direction-list
+  span), `FieldSegmentList` (had a per-row radio toggle) and the temperature
+  sweep group (N + ΔT; `temp_dT` stays persisted when the step is the anchor,
+  loads via `set_step`). TR-MOKE's Δt toggle untouched.
+- Dead code removed: `_on_field_mode` / `_upd_field_comp` / `_get_field_npts`
+  in both apps referenced `self.fs/fe/fn/fd` widgets that were never created.
+
+### Hardware panel — magnet current + relay read from the TANGO devices
+`refresh()` (startup + every Trajectory/Scanlist tab switch) already
+populated the Keithley spinboxes from the device, but the **magnet-current
+write window** and **relay state** were client-side only — always 0 after a
+restart. New `_read_magnet_relay()` (background thread + `_mr_ok` signal)
+reads `magnet_current_attr` and `relay_attr` and fills the window/label:
+- Skipped while a scan runs (a FIELD scan sweeps the current — capturing a
+  mid-sweep value as the setpoint would be wrong) and for sim proxies.
+- `setValue` on the write spinbox does not write hardware (only Return/Enter
+  does) — the window now just shows device truth.
+
+### Trajectory ↔ Scanlist hardware panels mirrored (`samba.py`)
+**Bug (user report):** 1 A set on the Trajectory tab left the Scanlist tab's
+magnet window at 0 A — and since §41, `apply_field_setpoint()` at scanlist
+start writes the *Scanlist tab's* spinbox to the magnet (and
+`get_settings()["magnet_current"]` feeds the field-flip magnitude), so the
+scanlist really ran at 0 field. New `MainWindow._link_hw_panels()`
+cross-connects the two `HardwarePanel`s:
+- `amp/freq/compl/field` spinboxes and the range combo mirror bidirectionally
+  (display only — writes still require Return/Enter in the edited panel);
+  Qt's no-change signal suppression makes the cross-connection loop-free.
+- New `HardwarePanel.relay_changed` signal (emitted on a successful/sim
+  toggle and on device readback) mirrors the relay state; `set_relay_state`
+  stays signal-free so the mirror can't loop.
+- Samba_main only; Cryo's AttoDRY panel already live-reads via
+  `ReadbackWorker` (linking its two tabs' panels is a possible follow-up).
+
+### Tests / verification
+- `test_runner.py` +7 → 68: `TestNStepPair` (load anchors step, step→N,
+  N→step, span change preserves step by default / N after an N edit,
+  zero-span safety, `set_step`).
+- Offscreen-Qt run of the real widgets (27 checks): both apps' actuator
+  groups and segment lists (derive/anchor/load round-trips), panel mirroring
+  via the real unbound `MainWindow._link_hw_panels`, relay mirroring on a
+  patched successful toggle, magnet/relay readback fills both tabs, sim
+  refresh never clobbers values.
+
+### Fix-up (same batch): OverflowError typing a step starting with "0"
+Typing "0.5" into a Δ box emitted an intermediate "0" keystroke (clamped to
+the spin minimum 1e-6); over a 50000 nm span the derived N exceeded Qt's
+32-bit int range and `QSpinBox.setValue` raised OverflowError → core dump.
+`NStepPair` now (a) clamps the derived N to the N box's own `maximum()`
+(and 2^31−1) **before** `setValue`, and (b) sets
+`setKeyboardTracking(False)` on both boxes, so derivation happens only on
+commit (Enter / focus-out / arrows), never on intermediate keystrokes.
+Regression test added (suite 69); verified against the real widgets with
+QTest keystrokes offscreen.
+
+---
+
+## 51. Recent Changes (July 2026) — MCS2 Stage Home Button (Auto-Zero)
+
+Branch `claude/device-plot-legend-colors-yifm6d` (SAMBA, 69 tests) + same
+branch on TANGO_Devices. User report: after hand-controller use the IR MCS2
+axes error with "movement finished, channel: 0 (invalid parameter)" until a
+restart / axis Init; requested use of the SmarAct AutoZero referencing option
+(position := 0 when the reference mark is found on Home). IR/MCS2 only — the
+Green Smaract control must not be touched.
+
+### Root cause of the sticky error (TANGO_Devices analysis)
+The MCS2 Ctrl latches the **last** SA_CTL event per axis; the Motor's
+`dev_state()` re-reads that latch on every State call and maps a failed
+MOVEMENT_FINISHED to FAULT with exactly that message. Only a new axis event
+(successful move/reference) clears it; motor `Init` recovers because
+`init_device` re-sends the sensor configuration and rebuilds the connection.
+The AutoZero chain (Motor `AutoZero` attr → Ctrl `SetAutoZero` →
+`SA_CTL_PKEY_REFERENCING_OPTIONS`/`SA_CTL_REF_OPT_BIT_AUTO_ZERO`) already
+existed — it was just unreachable from the stage device and SAMBA.
+
+### TANGO_Devices — stage `Home` command (**needs redeploy**)
+`SmarActMCS2Stage.py` gains `Home`: per axis (X→Y→Z sequentially) writes
+`AutoZero = True` on the motor, runs the motor's `Home` (`SA_CTL_Reference`),
+and waits (bounded by `MovementTimeout`) until not MOVING and `PositionKnown`
+— tolerating transient FAULTs, since the stale latched event is only cleared
+by the referencing's own events. Errors collected and raised together.
+
+### SAMBA — "⌂ Home" button (`core/calibration.py`)
+Next to "⟲ Reinitialise" in the Calibration tab's Stage-positioning group:
+- Shown **only** when the stage device exposes both `Home` and `Initialise`
+  commands — the SmarActMCS2Stage signature, probed in a background thread on
+  every `configure_stage()`. The Green setup's old Smaract server and the
+  Cryo Attocube stages never match, so they never see the button.
+- Confirmation dialog first (the stage MOVES to its reference marks and
+  positions read 0 there); runs in a daemon thread with a 120 s client
+  timeout (3 axes × MovementTimeout); on success re-reads all positions,
+  on failure shows the error in the status line; button disabled while
+  running and re-enabled either way.
+- Recommended recovery after hand-controller use: ⟲ Reinitialise, then
+  ⌂ Home.
+
+### Verification
+Offscreen-Qt run of the real `CalibrationPanel` (9 checks): button hidden
+initially / in sim mode / for a server without the command pair; shown for
+the MCS2 signature; Yes → exactly one `Home` dispatched + positions re-read +
+button re-enabled; No → nothing dispatched; failure path re-enables with an
+error. Both servers `py_compile` clean; `python test_runner.py` 69 OK.
+
+---
+
+## 52. Recent Changes (July 2026) — MCS2 Button: Zero-In-Place Instead of Referencing Home
+
+Branch `claude/device-plot-legend-colors-yifm6d` (SAMBA, 69 tests) + same
+branch on TANGO_Devices. User realised the §51 "⌂ Home" physically **moves**
+the stage (referencing routine that drives to the hardware mark and zeros
+there), and asked for a button that instead **sets the current position as 0
+without moving**.
+
+### TANGO_Devices — new stage `SetZero` command (**needs redeploy**)
+`SmarActMCS2Stage.py` `SetZero`: per axis, reaches the shared Ctrl's
+`SetOffset(channel, 0)` — `SA_CTL_PKEY_LOGICAL_SCALE_OFFSET` adjusted so the
+current reading becomes 0, **no travel**, move mode preserved (its
+closed-loop-holding branch only does a relative-0 re-peg). The motor devices
+don't expose `SetOffset`, so the stage discovers the Ctrl name + each axis'
+channel from the motor's own `SmarActMCS2CtrlDevice` / `AxisNumber` device
+properties. All axes attempted; errors collected and raised. The referencing
+`Home` command is **kept** on the server (valid in Jive for a true reference);
+SAMBA just points its button at `SetZero`.
+
+### SAMBA — button relabelled "⊘ Zero here" (`core/calibration.py`)
+- Same gating idea, new signature: shown only when the stage exposes both
+  `SetZero` **and** `Initialise` (probed in a background thread) — Green's old
+  Smaract server and the Cryo Attocube stages never match.
+- Calls `SetZero` (20 s client timeout, background thread), re-reads positions
+  after. Confirmation dialog reworded — **no movement**, but it redefines the
+  coordinate frame so previously saved positions shift.
+- Why zero-in-place is safe here: the IR axes keep their referenced /
+  PositionKnown status across hand-controller use (per-axis `Init` recovered
+  them, which only works when position is known), so SetOffset won't leave them
+  "not homed".
+
+### Verification
+- Stage `SetZero` via stubbed pytango (8 checks): `SetOffset(axis,0)` once per
+  axis with no motion; cached positions refreshed; per-axis failure → FAULT +
+  raise naming the axis.
+- Offscreen-Qt `CalibrationPanel` (8 checks): button relabelled "⊘ Zero here",
+  hidden without the SetZero+Initialise signature, shown with it; Yes → one
+  `SetZero` dispatched + positions re-read + button re-enabled; No → nothing.
+- Both servers `py_compile` clean; `python test_runner.py` 69 OK.

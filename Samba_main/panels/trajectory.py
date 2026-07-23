@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from config import X_NATURAL, X_TIME
+from nstep import NStepPair
 from panels._widgets import (
     NoScrollComboBox, NoScrollSpinBox, NoScrollDoubleSpinBox,
     MokeMetadataGroup
@@ -69,6 +70,10 @@ class FieldSegmentList(QWidget):
         hl.addWidget(QLabel("N:"))
         n = NoScrollSpinBox(); n.setRange(2, 10000); n.setValue(npts); n.setFixedWidth(58)
         hl.addWidget(n)
+        hl.addWidget(QLabel("Δ:"))
+        d = NoScrollDoubleSpinBox(); d.setRange(1e-6, 40); d.setDecimals(4)
+        d.setFixedWidth(70)
+        hl.addWidget(d)
         del_btn = QPushButton("×"); del_btn.setFixedSize(20, 20)
         del_btn.setStyleSheet(
             "QPushButton{color:#f38ba8;font-weight:bold;border:1px solid #45475a;"
@@ -77,13 +82,20 @@ class FieldSegmentList(QWidget):
         del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         hl.addWidget(del_btn); hl.addStretch()
 
-        tup = (s, e, n, row_w)
+        # N and Δ both stay visible/editable; the step is the base (start/stop
+        # edits keep Δ and recompute N).  N remains what the engine runs.
+        pair = NStepPair(n, d, lambda: e.value() - s.value())
+        pair.set_npts(npts)
+
+        tup = (s, e, n, row_w, pair)
         self._vlayout.addWidget(row_w)
         self._rows.append(tup)
 
         s.valueChanged.connect(self._on_changed)
         e.valueChanged.connect(self._on_changed)
         n.valueChanged.connect(self._on_changed)
+        s.valueChanged.connect(pair.span_changed)
+        e.valueChanged.connect(pair.span_changed)
         del_btn.clicked.connect(lambda: self._del_segment(tup))
         self._on_changed()
 
@@ -129,7 +141,6 @@ class ActuatorGroup(QGroupBox):
                  start: float, stop: float, npts: int, step_prefix: str = "Δ",
                  enabled: bool = True, parent=None):
         super().__init__(title, parent)
-        self._step_prefix = step_prefix
         g = QGridLayout(self); g.setSpacing(4); g.setContentsMargins(8, 8, 8, 8)
 
         # Row 0: Scan enabled checkbox
@@ -175,29 +186,23 @@ class ActuatorGroup(QGroupBox):
         self.stop  = NoScrollDoubleSpinBox(); self.stop.setRange(-1e9, 1e9);  self.stop.setDecimals(3)
         self.stop.setValue(stop);  g.addWidget(self.stop,  3, 4, 1, 2)
 
-        # Row 4: N / Δ step toggle
+        # Row 4: N + Δ step — both always visible and editable.  Editing one
+        # derives the other; the step is the base value (start/stop edits keep
+        # the step and recompute N — see NStepPair).
         ns_row = QWidget(); ns_lay = QHBoxLayout(ns_row)
         ns_lay.setContentsMargins(0, 0, 0, 0); ns_lay.setSpacing(4)
-        self._mode_bg = QButtonGroup(self)
-        self.rb_n    = QRadioButton("N:");    self.rb_n.setChecked(True)
-        self.rb_step = QRadioButton(f"{step_prefix}:")
-        self._mode_bg.addButton(self.rb_n,    0)
-        self._mode_bg.addButton(self.rb_step, 1)
-        self._mode_bg.idClicked.connect(self._on_mode)
         self.npts_spin = NoScrollSpinBox();       self.npts_spin.setRange(2, 10000); self.npts_spin.setValue(npts)
         self.step_spin = NoScrollDoubleSpinBox(); self.step_spin.setRange(1e-6, 1e9); self.step_spin.setDecimals(3)
         self.step_spin.setValue(abs(stop - start) / (npts - 1) if npts > 1 else 1.0)
-        self.step_spin.setVisible(False)
-        self.comp_lbl  = QLabel(); self.comp_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
-        for w in [self.rb_n, self.npts_spin, self.rb_step, self.step_spin, self.comp_lbl]:
+        for w in [QLabel("N:"), self.npts_spin,
+                  QLabel(f"{step_prefix}:"), self.step_spin]:
             ns_lay.addWidget(w)
         ns_lay.addStretch(); g.addWidget(ns_row, 4, 0, 1, 6)
 
+        self._pair = NStepPair(self.npts_spin, self.step_spin,
+                               lambda: self.stop.value() - self.start.value())
         for w in [self.start, self.stop]:
-            w.valueChanged.connect(self._upd)
-        self.npts_spin.valueChanged.connect(self._upd)
-        self.step_spin.valueChanged.connect(self._upd)
-        self._upd()
+            w.valueChanged.connect(self._pair.span_changed)
 
     # ── Update from setup defaults ────────────────────────────────────────────
     def set_defaults(self, dev: str, attr: str, lbl: str, unit: str):
@@ -208,24 +213,8 @@ class ActuatorGroup(QGroupBox):
         self.unit_edit.setText(unit)
 
     # ── Standard helpers ──────────────────────────────────────────────────────
-    def _on_mode(self, m):
-        self.npts_spin.setVisible(m == 0); self.step_spin.setVisible(m == 1); self._upd()
-
-    def _upd(self):
-        span = abs(self.stop.value() - self.start.value())
-        if self.rb_n.isChecked():
-            n    = max(2, self.npts_spin.value())
-            step = span / (n - 1) if n > 1 else span
-            self.comp_lbl.setText(f"{self._step_prefix} = {step:.4g}")
-        else:
-            step = max(1e-9, self.step_spin.value())
-            n    = max(2, int(round(span / step)) + 1)
-            self.comp_lbl.setText(f"N = {n}")
-
     def get_npts(self) -> int:
-        span = abs(self.stop.value() - self.start.value())
-        if self.rb_n.isChecked(): return max(2, self.npts_spin.value())
-        return max(2, int(round(span / max(1e-9, self.step_spin.value()))) + 1)
+        return max(2, self.npts_spin.value())
 
     def load(self, pfx: str, cfg: dict, enabled: bool = True):
         self.scan_cb.setChecked(enabled)
@@ -234,9 +223,7 @@ class ActuatorGroup(QGroupBox):
         self.unit_edit.setText(cfg.get(f"{pfx}_unit", self.unit_edit.text()))
         self.start.setValue(cfg.get(f"{pfx}_start",  0.0))
         self.stop.setValue( cfg.get(f"{pfx}_stop",  50000.0))
-        self.rb_n.setChecked(True)
-        self.npts_spin.setValue(int(cfg.get(f"{pfx}_npts", 51)))
-        self._upd()
+        self._pair.set_npts(int(cfg.get(f"{pfx}_npts", 51)))
 
     def get_partial(self, pfx: str) -> dict:
         """Return scan-geometry values (no device/attr — injected from defaults)."""
@@ -947,26 +934,6 @@ class TrajectoryPanel(QWidget):
                 "QGroupBox{border:1px solid #45475a;border-radius:6px;"
                 "margin-top:9px;padding-top:9px;font-weight:bold;color:#89b4fa;}"
                 "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}")
-
-    def _on_field_mode(self, m):
-        self.fn.setVisible(m == 0); self.fd.setVisible(m == 1)
-        self._upd_field_comp()
-
-    def _upd_field_comp(self):
-        span = abs(self.fe.value() - self.fs.value())
-        if self.rb_fn.isChecked():
-            n    = max(2, self.fn.value())
-            step = span / (n-1) if n > 1 else span
-            self.field_comp_lbl.setText(f"Δ A = {step:.4g}")
-        else:
-            step = max(1e-9, self.fd.value())
-            n    = max(2, int(round(span / step)) + 1)
-            self.field_comp_lbl.setText(f"N = {n}")
-
-    def _get_field_npts(self) -> int:
-        span = abs(self.fe.value() - self.fs.value())
-        if self.rb_fn.isChecked(): return max(2, self.fn.value())
-        return max(2, int(round(span / max(1e-9, self.fd.value()))) + 1)
 
     # ── Field / Hc convergence monitor ───────────────────────────────────────
     # ── Setup-defaults helpers (called from samba.py) ─────────────────────────

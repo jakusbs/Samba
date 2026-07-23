@@ -1420,5 +1420,103 @@ class TestSetupLoadStatus(unittest.TestCase):
         self.assertNotIn("_load_status", saved)
 
 
+class TestNStepPair(unittest.TestCase):
+    """core/nstep.py — N ↔ Δ-step coupling used by the trajectory panels."""
+
+    class _FakeSpin:
+        """Minimal spinbox: value()/setValue()/valueChanged.connect."""
+        def __init__(self, value, integer=False, lo=None, hi=None):
+            self._v = value; self._int = integer
+            self._lo = lo; self._hi = hi
+            self._subs = []
+        def value(self):
+            return self._v
+        def maximum(self):
+            return self._hi if self._hi is not None else 2147483647
+        def setValue(self, v):
+            v = int(v) if self._int else float(v)
+            if self._int and not (-2147483648 <= v <= 2147483647):
+                raise OverflowError("argument 1 overflowed")   # like Qt
+            if self._lo is not None: v = max(self._lo, v)
+            if self._hi is not None: v = min(self._hi, v)
+            if v == self._v:
+                return                       # Qt suppresses no-change signals
+            self._v = v
+            for fn in list(self._subs):
+                fn(v)
+        class _Sig:
+            def __init__(self, spin): self._spin = spin
+            def connect(self, fn):    self._spin._subs.append(fn)
+        @property
+        def valueChanged(self):
+            return self._Sig(self)
+
+    def _mk(self, start=0.0, stop=100.0, npts=51):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+        import nstep
+        span = {"v": stop - start}
+        n = self._FakeSpin(npts, integer=True, lo=2, hi=10000)
+        s = self._FakeSpin(1.0)
+        pair = nstep.NStepPair(n, s, lambda: span["v"])
+        pair.set_npts(npts)
+        return pair, n, s, span
+
+    def test_load_derives_step_and_anchors_step(self):
+        pair, n, s, _ = self._mk(0, 100, 51)
+        self.assertAlmostEqual(s.value(), 2.0)     # 100 / 50
+        self.assertEqual(pair.anchor, "step")
+
+    def test_edit_step_derives_n(self):
+        pair, n, s, _ = self._mk(0, 100, 51)
+        s.setValue(5.0)                            # user types Δ = 5
+        self.assertEqual(n.value(), 21)            # 100/5 + 1
+        self.assertEqual(pair.anchor, "step")
+
+    def test_edit_n_derives_step(self):
+        pair, n, s, _ = self._mk(0, 100, 51)
+        n.setValue(101)                            # user types N = 101
+        self.assertAlmostEqual(s.value(), 1.0)
+        self.assertEqual(pair.anchor, "n")
+
+    def test_span_change_preserves_step_by_default(self):
+        pair, n, s, span = self._mk(0, 100, 51)    # step = 2
+        span["v"] = 200.0
+        pair.span_changed()
+        self.assertAlmostEqual(s.value(), 2.0)     # step kept (the base)
+        self.assertEqual(n.value(), 101)           # N recomputed
+
+    def test_span_change_preserves_n_after_n_edit(self):
+        pair, n, s, span = self._mk(0, 100, 51)
+        n.setValue(11)                             # anchor → n, step = 10
+        span["v"] = 200.0
+        pair.span_changed()
+        self.assertEqual(n.value(), 11)            # N kept
+        self.assertAlmostEqual(s.value(), 20.0)    # step recomputed
+
+    def test_zero_span_leaves_values_untouched(self):
+        pair, n, s, span = self._mk(0, 100, 51)
+        span["v"] = 0.0
+        pair.span_changed()
+        self.assertEqual(n.value(), 51)            # time-scan safety: no clobber
+        s.setValue(3.0)                            # step edit with zero span
+        self.assertEqual(n.value(), 51)
+
+    def test_set_step_derives_n(self):
+        pair, n, s, _ = self._mk(0, 100, 51)
+        pair.set_step(4.0)                         # config load with stored ΔT
+        self.assertAlmostEqual(s.value(), 4.0)
+        self.assertEqual(n.value(), 26)
+        self.assertEqual(pair.anchor, "step")
+
+    def test_tiny_step_clamps_to_spin_max_no_overflow(self):
+        # Typing a step starting with "0" used to emit an intermediate value
+        # clamped to the spin minimum (1e-6); over a 50000 nm span the derived
+        # N exceeded Qt's 32-bit range and setValue raised OverflowError.
+        pair, n, s, span = self._mk(0, 50000.0, 51)
+        s.setValue(1e-6)                           # must not raise
+        self.assertEqual(n.value(), 10000)         # clamped to the N box max
+        self.assertEqual(pair.anchor, "step")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -34,6 +34,7 @@ from config import (
 )
 from hardware import fresh_proxy, is_sim_proxy, safe_write, safe_read, safe_read_str
 from device_registry import load_registry
+from nstep import NStepPair
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1217,17 +1218,13 @@ class FieldSegmentList(QWidget):
         arr = QLabel("→"); arr.setStyleSheet("color:#6c7086;"); hl.addWidget(arr)
         e = _dbl(stop);  hl.addWidget(e)
 
-        # N / Δ toggle
-        mode_bg = QButtonGroup(row_w)
-        rb_n = QRadioButton("N:"); rb_n.setChecked(True); rb_n.setFixedWidth(30)
-        rb_d = QRadioButton("Δ:"); rb_d.setFixedWidth(30)
-        mode_bg.addButton(rb_n, 0); mode_bg.addButton(rb_d, 1)
+        # N + Δ — both always visible and editable.  Editing one derives the
+        # other; the step is the base value (start/stop edits keep Δ and
+        # recompute N — see NStepPair).  N is what the engine runs.
         n = NoScrollSpinBox(); n.setRange(2, 10000); n.setValue(npts); n.setFixedWidth(58)
-        default_step = abs(stop - start) / (npts - 1) if npts > 1 else 0.01
         d = NoScrollDoubleSpinBox(); d.setRange(1e-6, 100); d.setDecimals(4)
-        d.setValue(max(1e-6, default_step)); d.setFixedWidth(68); d.setVisible(False)
-        comp = QLabel(); comp.setStyleSheet("color:#6c7086;font-size:10px;"); comp.setFixedWidth(80)
-        for w in [rb_n, n, rb_d, d, comp]: hl.addWidget(w)
+        d.setFixedWidth(68)
+        for w in [QLabel("N:"), n, QLabel("Δ:"), d]: hl.addWidget(w)
 
         del_btn = QPushButton("×"); del_btn.setFixedSize(20, 20)
         del_btn.setStyleSheet(
@@ -1237,31 +1234,20 @@ class FieldSegmentList(QWidget):
         del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         hl.addWidget(del_btn); hl.addStretch()
 
-        tup = (s, e, n, d, mode_bg, row_w)
+        pair = NStepPair(n, d, lambda: e.value() - s.value(), min_step=1e-6)
+        pair.set_npts(npts)
+
+        tup = (s, e, n, d, pair, row_w)
         self._vlayout.addWidget(row_w)
         self._rows.append(tup)
 
-        def _upd_comp():
-            span = abs(e.value() - s.value())
-            if rb_n.isChecked():
-                nn = max(2, n.value())
-                step = span / (nn - 1) if nn > 1 else span
-                comp.setText(f"Δ={step:.4g}")
-            else:
-                step = max(1e-6, d.value())
-                comp.setText(f"N={max(2, int(round(span/step))+1)}")
-            self._on_changed()
-
-        def _on_mode(m):
-            n.setVisible(m == 0); d.setVisible(m == 1); _upd_comp()
-
-        mode_bg.idClicked.connect(_on_mode)
-        s.valueChanged.connect(_upd_comp)
-        e.valueChanged.connect(_upd_comp)
-        n.valueChanged.connect(_upd_comp)
-        d.valueChanged.connect(_upd_comp)
+        s.valueChanged.connect(self._on_changed)
+        e.valueChanged.connect(self._on_changed)
+        n.valueChanged.connect(self._on_changed)
+        s.valueChanged.connect(pair.span_changed)
+        e.valueChanged.connect(pair.span_changed)
         del_btn.clicked.connect(lambda: self._del_segment(tup))
-        _upd_comp()
+        self._on_changed()
 
     def _del_segment(self, tup):
         if len(self._rows) <= 1: return
@@ -1276,11 +1262,7 @@ class FieldSegmentList(QWidget):
         self.changed.emit()
 
     def _seg_npts(self, tup) -> int:
-        s, e, n, d, bg, _ = tup
-        if bg.checkedId() == 0:
-            return max(2, n.value())
-        span = abs(e.value() - s.value())
-        return max(2, int(round(span / max(1e-6, d.value()))) + 1)
+        return max(2, tup[2].value())
 
     def get_segments(self) -> List[list]:
         return [[t[0].value(), t[1].value(), self._seg_npts(t)] for t in self._rows]
@@ -1429,7 +1411,6 @@ class ActuatorGroup(QGroupBox):
                  start: float, stop: float, npts: int, step_prefix: str = "Δ",
                  enabled: bool = True, registry: list = None, parent=None):
         super().__init__(title, parent)
-        self._step_prefix = step_prefix
         self._dev_path: str = dev
         self._dev_name: str = ""
         self._attr: str = attr
@@ -1472,29 +1453,24 @@ class ActuatorGroup(QGroupBox):
         # Row 3: Direction list (replaces fixed start/stop spinboxes)
         self.dir_list = ScanDirectionList(start, stop)
         g.addWidget(self.dir_list, 3, 0, 1, 6)
-        self.dir_list.changed.connect(self._upd)
 
-        # Row 4: N / Δ step toggle (shared npts across all directions)
+        # Row 4: N + Δ step (shared npts across all directions) — both always
+        # visible and editable.  Editing one derives the other; the step is
+        # the base value (range edits keep the step and recompute N).
         ns_row = QWidget(); ns_lay = QHBoxLayout(ns_row)
         ns_lay.setContentsMargins(0, 0, 0, 0); ns_lay.setSpacing(4)
-        self._mode_bg = QButtonGroup(self)
-        self.rb_n    = QRadioButton("N:");    self.rb_n.setChecked(True)
-        self.rb_step = QRadioButton(f"{step_prefix}:")
-        self._mode_bg.addButton(self.rb_n,    0)
-        self._mode_bg.addButton(self.rb_step, 1)
-        self._mode_bg.idClicked.connect(self._on_mode)
         self.npts_spin = NoScrollSpinBox();       self.npts_spin.setRange(2, 10000); self.npts_spin.setValue(npts)
         self.step_spin = NoScrollDoubleSpinBox(); self.step_spin.setRange(1e-6, 1e9); self.step_spin.setDecimals(3)
         self.step_spin.setValue(abs(stop - start) / (npts - 1) if npts > 1 else 1.0)
-        self.step_spin.setVisible(False)
-        self.comp_lbl  = QLabel(); self.comp_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
-        for w in [self.rb_n, self.npts_spin, self.rb_step, self.step_spin, self.comp_lbl]:
+        for w in [QLabel("N:"), self.npts_spin,
+                  QLabel(f"{step_prefix}:"), self.step_spin]:
             ns_lay.addWidget(w)
         ns_lay.addStretch(); g.addWidget(ns_row, 4, 0, 1, 6)
 
-        self.npts_spin.valueChanged.connect(self._upd)
-        self.step_spin.valueChanged.connect(self._upd)
-        self._upd()
+        self._pair = NStepPair(
+            self.npts_spin, self.step_spin,
+            lambda: self.dir_list.first_stop() - self.dir_list.first_start())
+        self.dir_list.changed.connect(self._pair.span_changed)
 
     # ── Device info ───────────────────────────────────────────────────────────
     def set_device_info(self, dev_path: str, dev_name: str, attr: str,
@@ -1509,24 +1485,8 @@ class ActuatorGroup(QGroupBox):
         pass   # device info comes from Setup Defaults
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-    def _on_mode(self, m):
-        self.npts_spin.setVisible(m == 0); self.step_spin.setVisible(m == 1); self._upd()
-
-    def _upd(self):
-        span = abs(self.dir_list.first_stop() - self.dir_list.first_start())
-        if self.rb_n.isChecked():
-            n    = max(2, self.npts_spin.value())
-            step = span / (n - 1) if n > 1 else span
-            self.comp_lbl.setText(f"{self._step_prefix} = {step:.4g}")
-        else:
-            step = max(1e-9, self.step_spin.value())
-            n    = max(2, int(round(span / step)) + 1)
-            self.comp_lbl.setText(f"N = {n}")
-
     def get_npts(self) -> int:
-        span = abs(self.dir_list.first_stop() - self.dir_list.first_start())
-        if self.rb_n.isChecked(): return max(2, self.npts_spin.value())
-        return max(2, int(round(span / max(1e-9, self.step_spin.value()))) + 1)
+        return max(2, self.npts_spin.value())
 
     def load(self, pfx: str, cfg: dict, enabled: bool = True):
         self.scan_cb.setChecked(enabled)
@@ -1538,9 +1498,7 @@ class ActuatorGroup(QGroupBox):
             s = cfg.get(f"{pfx}_start", 0.0)
             e = cfg.get(f"{pfx}_stop",  10.0)
             self.dir_list.load_directions([[s, e]])
-        self.rb_n.setChecked(True)
-        self.npts_spin.setValue(int(cfg.get(f"{pfx}_npts", 51)))
-        self._upd()
+        self._pair.set_npts(int(cfg.get(f"{pfx}_npts", 51)))
 
     def get_partial(self, pfx: str) -> dict:
         dirs = self.dir_list.get_directions()
@@ -1740,27 +1698,29 @@ class TrajectoryPanel(QWidget):
         dc_pgl.addWidget(QLabel("Stop (K):"),  2, 2)
         self._temp_stop  = _dbl(0.0, 400, 2, 300.0); dc_pgl.addWidget(self._temp_stop,  2, 3)
 
-        # Row 3: N ↔ ΔT toggle (settle time comes from the Timing panel)
+        # Row 3: N + ΔT — both always visible and editable; the step (ΔT) is
+        # the base value (start/stop edits keep ΔT and recompute N).
+        # Settle time comes from the Timing panel.
         ns_w = QWidget(); ns_l = QHBoxLayout(ns_w)
         ns_l.setContentsMargins(0, 0, 0, 0); ns_l.setSpacing(4)
-        self._temp_mode_bg = QButtonGroup(self)
-        self._temp_rb_n  = QRadioButton("N:"); self._temp_rb_n.setChecked(True)
-        self._temp_rb_dT = QRadioButton("ΔT (K):")
-        self._temp_mode_bg.addButton(self._temp_rb_n,  0)
-        self._temp_mode_bg.addButton(self._temp_rb_dT, 1)
         self._temp_npts = NoScrollSpinBox(); self._temp_npts.setRange(2, 10000); self._temp_npts.setValue(51)
         self._temp_dT   = NoScrollDoubleSpinBox(); self._temp_dT.setRange(0.01, 400); self._temp_dT.setDecimals(2)
-        self._temp_dT.setValue(10.0); self._temp_dT.setVisible(False)
-        self._temp_comp_lbl = QLabel(); self._temp_comp_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
-        for w in [self._temp_rb_n, self._temp_npts, self._temp_rb_dT, self._temp_dT, self._temp_comp_lbl]:
+        self._temp_dT.setValue(10.0)
+        for w in [QLabel("N:"), self._temp_npts,
+                  QLabel("ΔT (K):"), self._temp_dT]:
             ns_l.addWidget(w)
         ns_l.addStretch()
         dc_pgl.addWidget(ns_w, 3, 0, 1, 4)
-        self._temp_mode_bg.idClicked.connect(self._on_temp_mode)
+        self._temp_pair = NStepPair(
+            self._temp_npts, self._temp_dT,
+            lambda: self._temp_stop.value() - self._temp_start.value(),
+            min_step=0.01)
 
         self._temp_info = QLabel()
         self._temp_info.setStyleSheet("color:#6c7086;font-size:10px;")
         dc_pgl.addWidget(self._temp_info, 4, 0, 1, 4)
+        for w in [self._temp_start, self._temp_stop]:
+            w.valueChanged.connect(self._temp_pair.span_changed)
         for w in [self._temp_start, self._temp_stop, self._temp_npts, self._temp_dT]:
             w.valueChanged.connect(self._upd_temp_info)
         self._upd_temp_info()
@@ -1847,32 +1807,17 @@ class TrajectoryPanel(QWidget):
         self._dc_grp.setStyleSheet(_ACT  if mode_id == 1 else _IDLE)
         self.scan_mode_changed.emit("TEMP_SWEEP" if mode_id == 1 else "FIELD")
 
-    def _on_temp_mode(self, m: int):
-        self._temp_npts.setVisible(m == 0)
-        self._temp_dT.setVisible(m == 1)
-        self._upd_temp_info()
-
     def _temp_get_npts(self) -> int:
-        if self._temp_rb_n.isChecked():
-            return max(2, self._temp_npts.value())
-        span = abs(self._temp_stop.value() - self._temp_start.value())
-        return max(2, int(round(span / max(0.01, self._temp_dT.value()))) + 1)
+        return max(2, self._temp_npts.value())
 
     def _upd_temp_info(self):
-        """Show N/ΔT complement and range summary for the temperature sweep."""
+        """Show the range summary for the temperature sweep."""
         try:
             start = self._temp_start.value()
             stop  = self._temp_stop.value()
-            span  = abs(stop - start)
-            if self._temp_rb_n.isChecked():
-                nn     = max(2, self._temp_npts.value())
-                step_K = span / (nn - 1) if nn > 1 else span
-                self._temp_comp_lbl.setText(f"ΔT = {step_K:.2f} K")
-            else:
-                step_K = max(0.01, self._temp_dT.value())
-                nn     = max(2, int(round(span / step_K)) + 1)
-                self._temp_comp_lbl.setText(f"N = {nn}")
-            self._temp_info.setText(f"{start:.1f} → {stop:.1f} K  |  ΔT = {step_K:.2f} K/step")
+            self._temp_info.setText(
+                f"{start:.1f} → {stop:.1f} K  |  "
+                f"ΔT = {self._temp_dT.value():.2f} K/step")
         except Exception:
             pass
 
@@ -1915,26 +1860,6 @@ class TrajectoryPanel(QWidget):
             not y_has_retrace and len(self.act1_grp.dir_list._rows) < 2)
         self.act2_grp.dir_list._add_btn.setEnabled(
             not x_has_retrace and len(self.act2_grp.dir_list._rows) < 2)
-
-    def _on_field_mode(self, m):
-        self.fn.setVisible(m == 0); self.fd.setVisible(m == 1)
-        self._upd_field_comp()
-
-    def _upd_field_comp(self):
-        span = abs(self.fe.value() - self.fs.value())
-        if self.rb_fn.isChecked():
-            n    = max(2, self.fn.value())
-            step = span / (n-1) if n > 1 else span
-            self.field_comp_lbl.setText(f"Δ A = {step:.4g}")
-        else:
-            step = max(1e-9, self.fd.value())
-            n    = max(2, int(round(span / step)) + 1)
-            self.field_comp_lbl.setText(f"N = {n}")
-
-    def _get_field_npts(self) -> int:
-        span = abs(self.fe.value() - self.fs.value())
-        if self.rb_fn.isChecked(): return max(2, self.fn.value())
-        return max(2, int(round(span / max(1e-9, self.fd.value()))) + 1)
 
     # ── Field / Hc convergence monitor ───────────────────────────────────────
     def populate_monitor_combo(self, registry: list):
@@ -2229,11 +2154,9 @@ class TrajectoryPanel(QWidget):
         self._temp_start.setValue(cfg.get("temp_start",  4.0))
         self._temp_stop.setValue( cfg.get("temp_stop",   300.0))
         if cfg.get("temp_dT"):
-            self._temp_rb_dT.setChecked(True); self._on_temp_mode(1)
-            self._temp_dT.setValue(cfg["temp_dT"])
+            self._temp_pair.set_step(float(cfg["temp_dT"]))
         else:
-            self._temp_rb_n.setChecked(True);  self._on_temp_mode(0)
-            self._temp_npts.setValue(int(cfg.get("temp_npts", 51)))
+            self._temp_pair.set_npts(int(cfg.get("temp_npts", 51)))
         self._upd_temp_info()
         self._save_dir = os.path.expanduser(
             self._setup_getter().get("save_dir", "~/moke_data"))
@@ -2251,7 +2174,7 @@ class TrajectoryPanel(QWidget):
             start     = self._temp_start.value()
             stop      = self._temp_stop.value()
             npts      = self._temp_get_npts()
-            use_dT    = self._temp_rb_dT.isChecked()
+            use_dT    = self._temp_pair.anchor == "step"
             return {
                 "scan_type":    "FIELD",
                 "scan_x": False, "scan_y": False,

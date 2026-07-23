@@ -23,7 +23,8 @@ from PyQt6.QtCore import QTimer
 
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
-                           fix_toolbar_icons, make_light_export_btn)
+                           fix_toolbar_icons, make_light_export_btn,
+                           set_multicolor_ylabel)
 from theme import DIVERGING_CMAPS
 
 REDRAW_INTERVAL_MS = 80
@@ -373,20 +374,11 @@ class Live1DWidget(QWidget):
                             label=lbl, marker=".", markersize=4)
             self._lines[lbl] = (line, ax)
 
-        # Axis titles carry the sensor name(s) + unit, not just the unit.
-        # A single sensor on an axis colors the title like its curve; with
-        # several the title keeps the axis color and the legend maps
-        # name → color.
-        def _ylabel(entries):
-            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
-        if left_meta:
-            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
-            self.ax1.set_ylabel(_ylabel(left_meta), color=col,
-                                fontsize=self._font_pt)
-        if right_meta:
-            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
-            self.ax2.set_ylabel(_ylabel(right_meta), color=col,
-                                fontsize=self._font_pt)
+        # Axis titles carry the sensor name(s) + unit, not just the unit —
+        # and each sensor's name is drawn in its curve's color, so a shared
+        # axis stays readable at a glance.
+        set_multicolor_ylabel(self.ax1, left_meta, "#89b4fa", self._font_pt)
+        set_multicolor_ylabel(self.ax2, right_meta, "#f38ba8", self._font_pt)
 
         self._fill_lines(x_arr)
 

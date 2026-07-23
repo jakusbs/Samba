@@ -20,6 +20,11 @@ from typing import Callable, List
 
 import numpy as np
 
+try:                                   # keep the module import-safe without
+    from matplotlib.artist import Artist as _MplArtist   # matplotlib (tests)
+except Exception:                      # pragma: no cover
+    _MplArtist = object
+
 
 class ClickReadout:
     """Annotate the nearest data point to a left-click on a set of axes.
@@ -137,6 +142,104 @@ def eng_axis(axis):
         pass
 
 
+# ── Multi-colored y-axis titles ──────────────────────────────────────────────
+class _MulticolorYLabel(_MplArtist):
+    """Draws the y-axis title as stacked rotated segments, one per sensor,
+    each in its curve's color.
+
+    matplotlib's ylabel is a single Text and can only have one color, so the
+    real ylabel keeps the full "A (µV), B (µV)" string — invisible (alpha 0)
+    but still measured — to reserve the correct layout space and to give this
+    artist a position to follow.  Position, font size and rotation are read
+    from that label on every draw, so the colored segments track autoscaling
+    tick-width changes, font-size changes and resizes for free.
+    """
+
+    def __init__(self, ax, segments):
+        super().__init__()
+        import matplotlib.text as mtext
+        import matplotlib.transforms as mtransforms
+        self._host_ax = ax
+        # Draw after the YAxis (zorder 1.5): the axis updates its label
+        # position during its own draw (autoscaling changes tick widths),
+        # and the segments must read the fresh position in the same pass.
+        self.set_zorder(5)
+        self._texts = []
+        for s, c in segments:
+            t = mtext.Text(0, 0, s, color=c,
+                           rotation_mode="anchor", ha="left", va="center",
+                           clip_on=False)
+            t.set_transform(mtransforms.IdentityTransform())
+            self._texts.append(t)
+
+    def set_figure(self, fig):
+        super().set_figure(fig)
+        for t in self._texts:
+            t.set_figure(fig)
+
+    def draw(self, renderer):
+        if not self.get_visible() or not self._texts:
+            return
+        try:
+            lbl = self._host_ax.yaxis.label
+            bbox = lbl.get_window_extent(renderer)
+            fs   = lbl.get_fontsize()
+            rot  = lbl.get_rotation()
+            for t in self._texts:
+                if t.get_figure() is None:
+                    t.set_figure(self.get_figure())
+                t.set_fontsize(fs)
+                t.set_rotation(rot)
+            # Stack bottom→top (reading order of a 90°-rotated label),
+            # centred on the invisible label's extent.
+            heights = [t.get_window_extent(renderer).height
+                       for t in self._texts]
+            gap = 0.35 * fs * (self.get_figure().dpi / 72.0)  # ≈ one space
+            total = sum(heights) + gap * (len(self._texts) - 1)
+            x = 0.5 * (bbox.x0 + bbox.x1)
+            y = 0.5 * (bbox.y0 + bbox.y1) - 0.5 * total
+            for t, h in zip(self._texts, heights):
+                t.set_position((x, y))
+                t.draw(renderer)
+                y += h + gap
+        except Exception:
+            pass   # a label glitch must never break the canvas draw
+
+
+def set_multicolor_ylabel(ax, entries, axis_color, fontsize):
+    """Set a y-axis title of "name (unit)" parts, each in its curve's color.
+
+    entries: list of (label, unit, color) per sensor on this axis.  A single
+    entry is a plain ylabel in the curve's color; with several, each sensor
+    name is drawn in its own color via _MulticolorYLabel (the underlying
+    ylabel keeps *axis_color* but is invisible — it only reserves layout
+    space).  An empty list clears the label.
+    """
+    for ch in list(ax.get_children()):
+        if isinstance(ch, _MulticolorYLabel):
+            try:
+                ch.remove()
+            except Exception:
+                pass
+    text = ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
+    if not entries:
+        ax.set_ylabel("")
+        return
+    if len(entries) == 1:
+        ax.set_ylabel(text, color=entries[0][2], fontsize=fontsize)
+        ax.yaxis.label.set_alpha(None)
+        return
+    ax.set_ylabel(text, color=axis_color, fontsize=fontsize)
+    ax.yaxis.label.set_alpha(0.0)
+    segs = []
+    for i, (l, u, c) in enumerate(entries):
+        s = f"{l} ({u})" if u else l
+        if i < len(entries) - 1:
+            s += ","
+        segs.append((s, c))
+    ax.add_artist(_MulticolorYLabel(ax, segs))
+
+
 def fix_toolbar_icons(bar):
     """Invert the matplotlib nav-toolbar icons for dark backgrounds.
 
@@ -220,6 +323,11 @@ def render_light_figure(fig):
         for txt in ax.texts:
             if txt.get_color() in ("#cdd6f4", "#aaaacc", "white"):
                 txt.set_color(LIGHT_INK_SOFT)
+        # Multi-colored y-labels: map each segment like its curve
+        for ch in ax.get_children():
+            if isinstance(ch, _MulticolorYLabel):
+                for t in ch._texts:
+                    t.set_color(_map_color(t.get_color()))
     return fig2, canvas
 
 

@@ -19,12 +19,13 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QSplitter,
-    QSizePolicy, QDoubleSpinBox, QSpinBox
+    QSizePolicy, QDoubleSpinBox, QSpinBox, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
-                           fix_toolbar_icons, make_light_export_btn)
+                           fix_toolbar_icons, make_light_export_btn,
+                           set_multicolor_ylabel)
 from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
@@ -313,16 +314,11 @@ class FocusPlotWidget(QWidget):
             self._ts_lines[lbl] = line
             self._ts_yd[lbl] = np.full(n_pts, np.nan)
 
-        def _ylabel(entries):
-            return ", ".join(f"{l} ({u})" if u else l for l, u, _ in entries)
-        if left_meta:
-            col = left_meta[0][2] if len(left_meta) == 1 else "#89b4fa"
-            self.ax.set_ylabel(_ylabel(left_meta), color=col,
-                               fontsize=self._font_pt)
-        if right_meta:
-            col = right_meta[0][2] if len(right_meta) == 1 else "#f38ba8"
-            self._ts_ax2.set_ylabel(_ylabel(right_meta), color=col,
-                                    fontsize=self._font_pt)
+        # Each sensor's name in the axis title takes its curve's color
+        set_multicolor_ylabel(self.ax, left_meta, "#89b4fa", self._font_pt)
+        if self._ts_ax2 is not None:
+            set_multicolor_ylabel(self._ts_ax2, right_meta, "#f38ba8",
+                                  self._font_pt)
 
         # Combined legend (both axes) on the topmost axes
         handles = list(self._ts_lines.values())
@@ -651,7 +647,22 @@ class CalibrationPanel(QWidget):
             "axis after manual use with the hand controller.\n"
             "Sends the stage device's Initialise command (falls back to Init).")
         self.reinit_btn.clicked.connect(self._reinit_stage)
-        btn_row.addWidget(self.reinit_btn); btn_row.addStretch()
+        btn_row.addWidget(self.reinit_btn)
+        # ⊘ Zero here — MCS2 only: shown when the stage device exposes both
+        # the SetZero and Initialise commands (the SmarActMCS2Stage
+        # signature), so the Green setup's old Smaract server and the Cryo
+        # Attocube stages never see it.  Defines the CURRENT position as 0
+        # without any movement (SmarAct SetOffset), unlike a referencing Home.
+        self.home_btn = QPushButton("⊘ Zero here")
+        self.home_btn.setToolTip(
+            "Define the current stage position as 0 on all three axes.\n"
+            "No movement — this just re-labels where you are as the origin\n"
+            "(SmarAct SetOffset). Redefines the coordinate frame, so saved\n"
+            "positions shift accordingly.")
+        self.home_btn.clicked.connect(self._home_stage)
+        self.home_btn.setVisible(False)
+        btn_row.addWidget(self.home_btn)
+        btn_row.addStretch()
         ctrl_l.addLayout(btn_row)
 
         # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
@@ -898,6 +909,7 @@ class CalibrationPanel(QWidget):
             f"X: {x_dev or '—'}/{x_attr}   "
             f"Y: {y_dev or '—'}/{y_attr}   "
             f"Z: {z_dev or '—'}/{z_attr}")
+        self._probe_home_support(x_dev)
 
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
@@ -931,6 +943,81 @@ class CalibrationPanel(QWidget):
             except Exception as e:
                 last = str(e)
         self._set_pos_err(f"Reinitialise failed: {last[:80]}")
+
+    def _probe_home_support(self, dev: str):
+        """Show the ⊘ Zero-here button only for the MCS2 stage server.
+
+        The SmarActMCS2Stage device exposes both SetZero and Initialise —
+        that pair is its signature.  Probed in a background thread so an
+        unreachable device can't freeze the GUI; anything else (old Green
+        Smaract server, Cryo Attocube stages, sim mode) keeps the button
+        hidden.
+        """
+        self.home_btn.setVisible(False)
+        if not dev:
+            return
+
+        def _do():
+            show = False
+            try:
+                p, err = fresh_proxy(dev)
+                if not err and not is_sim_proxy(p):
+                    cmds = {str(c).lower() for c in p.get_command_list()}
+                    show = "setzero" in cmds and "initialise" in cmds
+            except Exception:
+                pass
+            self._gui_apply.emit(lambda s=show: self.home_btn.setVisible(s))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _home_stage(self):
+        """Define the current stage position as 0 on all axes (SetZero).
+
+        No movement — the SmarActMCS2Stage SetZero command re-labels the
+        current position as the origin (SmarAct SetOffset), unlike a
+        referencing Home.  A confirmation dialog is still shown because it
+        redefines the coordinate frame (saved positions shift).  Runs in a
+        background thread; positions are re-read afterwards.
+        """
+        info = self._get_axis_info()
+        dev = info.get("x", ("", ""))[0]
+        if not dev:
+            self._set_pos_err("No stage device configured"); return
+        ans = QMessageBox.question(
+            self, "Set current position as zero?",
+            "Define the current position of all three axes as 0?\n\n"
+            "No movement occurs — this re-labels where the stage is now as\n"
+            "the origin.  It redefines the coordinate frame, so previously\n"
+            "saved positions will shift accordingly.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.home_btn.setEnabled(False)
+        self._set_pos_ok("Setting current position as zero…")
+
+        def _do():
+            try:
+                p, err = fresh_proxy(dev)
+                if err:
+                    raise RuntimeError(err)
+                if is_sim_proxy(p):
+                    raise RuntimeError("Simulation mode")
+                p.set_timeout_millis(20000)
+                p.command_inout("SetZero")
+                def _ok():
+                    self.home_btn.setEnabled(True)
+                    self._set_pos_ok("Current position defined as 0 (no movement)")
+                    self._read_all()
+                self._gui_apply.emit(_ok)
+            except Exception as e:
+                msg = str(e)
+                def _err():
+                    self.home_btn.setEnabled(True)
+                    self._set_pos_err(f"Set-zero failed: {msg[:120]}")
+                self._gui_apply.emit(_err)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── LED lights ────────────────────────────────────────────────────────────
     def set_lights_device(self, path: str):
