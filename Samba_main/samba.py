@@ -1583,6 +1583,22 @@ class MainWindow(QMainWindow):
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         worker.finished.connect(self._on_worker_finished)
 
+    # ── Setup lock helper ─────────────────────────────────────────────────────
+    def _acquire_setup_lock(self) -> bool:
+        """Take the multi-computer setup lock; warn and return False if busy.
+
+        Used by every start path (single scan, scanlist, calibration time
+        scan) — each of them drives the same physical setup, so all of them
+        must hold the lock.
+        """
+        ok, who = acquire_lock(self._active_setup_name)
+        if not ok:
+            QMessageBox.warning(
+                self, "Setup busy",
+                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
+                "Abort that scan first, then retry.")
+        return ok
+
     # ── Single scan ───────────────────────────────────────────────────────────
     def _start_scan(self):
         if self._scan_running: return
@@ -1594,12 +1610,7 @@ class MainWindow(QMainWindow):
         if active is None: return
 
         # ── Setup lock ────────────────────────────────────────────────────────
-        ok, who = acquire_lock(self._active_setup_name)
-        if not ok:
-            QMessageBox.warning(
-                self, "Setup busy",
-                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
-                "Abort that scan first, then retry.")
+        if not self._acquire_setup_lock():
             return
 
         self._current_scan_cfg = cfg
@@ -1717,6 +1728,10 @@ class MainWindow(QMainWindow):
                 self, "No sensors",
                 "Enable at least one sensor in the Calibration tab's "
                 "Time-scan config."); return
+
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
@@ -1900,6 +1915,10 @@ class MainWindow(QMainWindow):
         active = self._prepare_scan(cfg)
         if active is None: return
 
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
+
         self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
@@ -2011,6 +2030,7 @@ class MainWindow(QMainWindow):
         self._alloc_scan_data(cfg, active); self._setup_live_display(cfg, active)
 
     def _on_sl_worker_finished(self):
+        release_lock(self._active_setup_name)
         self._set_running(False)
         self._scan_running = False
         self._sl_worker = None
