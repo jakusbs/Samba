@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QRadioButton, QAbstractItemView, QInputDialog,
     QStackedWidget
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QKeySequence, QIcon
 from PyQt6.QtWidgets import QAbstractSpinBox
 
@@ -1220,6 +1220,24 @@ class RightPanel(QWidget):
 class FieldSegmentList(QWidget):
     changed = pyqtSignal()
 
+    _MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+    def sizeHint(self) -> QSize:
+        """Height derived from the segment rows themselves.
+
+        QScrollArea does not report a content-based sizeHint reliably — when the
+        rows are built while the panel is still hidden (every config load
+        happens before the field row is shown) it can keep the ~28 px default.
+        The group box holding this list is top-aligned, so that stale hint
+        collapsed the box to the height of its dropdown column and only the
+        first couple of segments stayed visible.  Computing the height here
+        makes it deterministic on any Qt version / platform.
+        """
+        sh = super().sizeHint()
+        h = min(self._content.sizeHint().height(), self._MAX_LIST_H)
+        h += self._btn_row.sizeHint().height() + 2      # + root layout spacing
+        return QSize(sh.width(), h)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(2)
@@ -1227,17 +1245,20 @@ class FieldSegmentList(QWidget):
         self._content = QWidget()
         self._vlayout = QVBoxLayout(self._content)
         self._vlayout.setContentsMargins(0, 0, 0, 0); self._vlayout.setSpacing(2)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setWidget(self._content)
-        # Grows with the number of segments up to ~6 rows before scrolling (was
-        # a hard 108 px = 3 rows, so a 4-segment sweep always had a scrollbar).
-        scroll.setMaximumHeight(200)
-        scroll.setStyleSheet("QScrollArea{border:none;}")
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(self._content)
+        # Grows with the number of segments up to _MAX_LIST_H (~6 rows) before
+        # scrolling (was a hard 108 px = 3 rows, so a 4-segment sweep always
+        # had a scrollbar).
+        self._scroll.setMaximumHeight(self._MAX_LIST_H)
+        self._scroll.setMinimumHeight(34)          # never collapse below one row
+        self._scroll.setStyleSheet("QScrollArea{border:none;}")
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # The list sits in a non-stretching column, so state its own width:
         # one segment row (start → stop, N, Δ, ×) plus the scrollbar gutter.
         self.setMinimumWidth(408)
-        root.addWidget(scroll)
+        root.addWidget(self._scroll)
 
         btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 2, 0, 0); btn_row.setSpacing(6)
         add_btn = QPushButton("+ Segment"); add_btn.setFixedHeight(22)
@@ -1246,6 +1267,7 @@ class FieldSegmentList(QWidget):
         self._summary_lbl = QLabel()
         self._summary_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
         btn_row.addWidget(add_btn); btn_row.addWidget(self._summary_lbl); btn_row.addStretch()
+        self._btn_row = btn_row
         root.addLayout(btn_row)
 
         self._rows: List[tuple] = []   # (start_spin, stop_spin, n_spin, row_widget)
@@ -1301,6 +1323,7 @@ class FieldSegmentList(QWidget):
         self._on_changed()
 
     def _on_changed(self):
+        self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(self._seg_npts(t) for t in self._rows)
         n = len(self._rows)
         self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")

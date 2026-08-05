@@ -3196,3 +3196,38 @@ DC-hyst spinbox). Rendered PNGs inspected for both apps.
 segment scroll area's `sizeHint` stale (28 px instead of the content's 118),
 which skews geometry measurements. Load the config, select the scan type, size
 the panel, *then* `show()` — the order the app itself uses.
+
+### Fix-up: segment list collapsed to ~2 rows (stale QScrollArea sizeHint)
+The compaction above shipped a regression on the lab machine: with 5 segments
+only the first two rows were visible. **Cause:** the top-aligned group box takes
+its content's `sizeHint`, and `QScrollArea` does not report a content-based
+sizeHint reliably — when the rows are built while the panel is still hidden
+(every `load_config` runs before the field row is shown) it keeps the ~28 px
+default. The box then sized itself from the *dropdown column* (3 rows ≈ 115 px,
+exactly the height in the user's screenshot) and the list got whatever was left.
+It did not reproduce under the offscreen platform, which is why it slipped
+through.
+
+**Fix** — `FieldSegmentList` (both apps) computes its own height instead of
+trusting the scroll area:
+```python
+_MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+def sizeHint(self) -> QSize:
+    sh = super().sizeHint()
+    h  = min(self._content.sizeHint().height(), self._MAX_LIST_H)
+    h += self._btn_row.sizeHint().height() + 2
+    return QSize(sh.width(), h)
+```
+`self._content.sizeHint()` (the rows' own container) *is* reliable while hidden.
+`_on_changed` calls `updateGeometry()` so ancestors re-read the hint when the
+row count changes, and the scroll area keeps `setMinimumHeight(34)` so a
+squeezed panel degrades to scrolling rather than collapsing.
+
+**Verified** by forcing the failure mode instead of relying on the platform:
+the harness patches the instance's `_scroll.sizeHint` to the stale `(100, 28)`.
+Pre-fix that yields box 130 px / 2.3 of 5 rows visible (matching the report);
+post-fix box 210 px, 5/5 rows, no scrollbar, and 8 segments still cap the box at
+262 px and scroll. 10 checks, both apps. **Lesson: when a widget's size comes
+from a `sizeHint` we don't control, state the hint explicitly — and treat a
+harness anomaly as a finding, not an artifact.**
