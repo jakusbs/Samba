@@ -1229,8 +1229,14 @@ class FieldSegmentList(QWidget):
         self._vlayout.setContentsMargins(0, 0, 0, 0); self._vlayout.setSpacing(2)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setWidget(self._content)
-        scroll.setMaximumHeight(108)
+        # Grows with the number of segments up to ~6 rows before scrolling (was
+        # a hard 108 px = 3 rows, so a 4-segment sweep always had a scrollbar).
+        scroll.setMaximumHeight(200)
         scroll.setStyleSheet("QScrollArea{border:none;}")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The list sits in a non-stretching column, so state its own width:
+        # one segment row (start → stop, N, Δ, ×) plus the scrollbar gutter.
+        self.setMinimumWidth(408)
         root.addWidget(scroll)
 
         btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 2, 0, 0); btn_row.setSpacing(6)
@@ -1664,44 +1670,54 @@ class TrajectoryPanel(QWidget):
         # Main horizontal row
         horiz = QHBoxLayout(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
 
-        # ── Column 1: AC params ───────────────────────────────────────────────
-        self._ac_grp = QGroupBox("Field Sweep"); fgl = QGridLayout(self._ac_grp)
-        fgl.setSpacing(4); fgl.setContentsMargins(8, 8, 8, 8)
+        # ── Column 1: field-sweep params ──────────────────────────────────────
+        # Two inner columns so the width is actually used and the box stays
+        # short: the segment editor on the left (it grows downward as segments
+        # are added), the device / attribute / monitor dropdowns on the right.
+        self._ac_grp = QGroupBox("Field Sweep")
+        ac_row = QHBoxLayout(self._ac_grp)
+        ac_row.setSpacing(10); ac_row.setContentsMargins(8, 8, 8, 8)
 
-        # Row 0: Field device dropdown
-        fgl.addWidget(QLabel("Device:"), 0, 0)
+        # Left: multi-segment field list (natural width, no stretch)
+        self._seg_list = FieldSegmentList()
+        ac_row.addWidget(self._seg_list, stretch=0)
+
+        # Right: device / attribute / monitor dropdowns, packed to the top.  The
+        # two monitor combos are stacked (not side by side) so each gets the
+        # full column width — they hold registry device / channel names.
+        ac_side = QGridLayout(); ac_side.setSpacing(4)
+        ac_side.setColumnStretch(1, 1)
+        ac_side.addWidget(QLabel("Device:"), 0, 0)
         self._ac_dev_combo = NoScrollComboBox()
         self._ac_dev_combo.setStyleSheet("font-size:10px;")
         self._ac_dev_combo.addItem("(setup default)", "")
         self._ac_dev_combo.currentIndexChanged.connect(self._on_field_dev_changed)
-        fgl.addWidget(self._ac_dev_combo, 0, 1)
+        ac_side.addWidget(self._ac_dev_combo, 0, 1)
 
-        # Row 1: Attribute dropdown
-        fgl.addWidget(QLabel("Attr:"), 1, 0)
+        ac_side.addWidget(QLabel("Attr:"), 1, 0)
         self._ac_attr_combo = NoScrollComboBox()
         self._ac_attr_combo.setStyleSheet("font-size:10px;")
         self._ac_attr_combo.addItem("(setup default)", "")
-        fgl.addWidget(self._ac_attr_combo, 1, 1)
+        ac_side.addWidget(self._ac_attr_combo, 1, 1)
 
-        # Row 2: Multi-segment field list
-        self._seg_list = FieldSegmentList()
-        fgl.addWidget(self._seg_list, 2, 0, 1, 2)
-
-        # Row 2: AC monitor dropdowns
-        ac_mon_row = QHBoxLayout(); ac_mon_row.setSpacing(4)
-        ac_mon_row.addWidget(QLabel("Mon:"))
+        ac_side.addWidget(QLabel("Mon:"), 2, 0)
         self._ac_mon_dev = NoScrollComboBox(); self._ac_mon_dev.setStyleSheet("font-size:10px;")
         self._ac_mon_dev.currentIndexChanged.connect(lambda: self._on_mon_dev_changed("ac"))
-        ac_mon_row.addWidget(self._ac_mon_dev, stretch=1)
+        ac_side.addWidget(self._ac_mon_dev, 2, 1)
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
-        ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
-        fgl.addLayout(ac_mon_row, 3, 0, 1, 2)
+        ac_side.addWidget(self._ac_mon_ch, 3, 1)
+        ac_side.setRowStretch(4, 1)
+        ac_row.addLayout(ac_side, stretch=1)
+
         # Roughly twice the old width (min was 260, no cap).  A stretch factor
         # lets the group shrink towards its minimum on narrow screens instead
         # of clipping; the monitor canvas in the middle takes what is left.
+        # AlignTop shrink-wraps the box to its content — the row's spare height
+        # goes to the monitor plot instead of becoming dead space in here.
         self._ac_grp.setMinimumWidth(430)
         self._ac_grp.setMaximumWidth(620)
-        horiz.addWidget(self._ac_grp, stretch=3)
+        horiz.addWidget(self._ac_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
         self._field_hist_t: collections.deque = collections.deque(maxlen=120)
@@ -1715,6 +1731,10 @@ class TrajectoryPanel(QWidget):
         self._field_canvas = FigureCanvas(self._field_fig)
         self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(140)
         self._style_field_ax("ac")
+        # Lay out once here too: tight_layout otherwise only runs on the first
+        # monitor update, so with no field readback the axis labels stayed
+        # clipped (visible now that the canvas is shorter than the boxes).
+        self._field_fig.tight_layout(pad=0.4)
         horiz.addWidget(self._field_canvas, stretch=1)
 
         # ── Column 3: Temperature Sweep params ─────────────────────────────────
@@ -1784,11 +1804,15 @@ class TrajectoryPanel(QWidget):
         # Twice the old width (min was 280, no cap) — see the Field group above.
         self._dc_grp.setMinimumWidth(420)
         self._dc_grp.setMaximumWidth(600)
-        horiz.addWidget(self._dc_grp, stretch=3)
+        horiz.addWidget(self._dc_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         fw_root.addLayout(horiz)
         self.field_w.setVisible(False)
-        root.addWidget(self.field_w)
+        # stretch=1: now that the two parameter boxes shrink-wrap their content,
+        # the panel's spare height goes to the monitor plot in this row rather
+        # than spreading the Timing / Metadata / Hardware rows below apart.
+        root.addWidget(self.field_w, stretch=1)
         self._on_submode_changed(0)   # apply initial highlight
 
 

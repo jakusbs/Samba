@@ -3128,3 +3128,71 @@ visible for LMOKE±. Now (both apps' `MokeMetadataGroup` —
   per-incidence memory, single `changed` per switch, `get_values`/`load_values`
   round-trip, legacy-config fallback. Rendered PNGs checked visually; nested
   dict verified through both apps' setup save/load.
+
+---
+
+## 54. Recent Changes (August 2026) — Field Row Compaction (Both Apps)
+
+Branch `claude/scanlist-setup-lock`. Follow-up to §53: widening the two
+parameter groups left large unoccupied areas — with 4 field segments the boxes
+were ~330 px tall with a scrollbar on the segment list, an empty band above the
+"+ Segment" row, and ~200 px of unused width beside the segment rows.
+
+### Segment editor and dropdowns side by side
+`Samba_main/panels/trajectory.py` (AC Field Sweep) and `Cryo/panels.py`
+(Field Sweep) replaced the single-column grid with two inner columns:
+- **left** — the `FieldSegmentList` at its natural width (`stretch=0`),
+- **right** — `Device:` (+ `Attr:` in Cryo) and the two monitor combos in a
+  grid with `setColumnStretch(1, 1)` and a trailing stretch row. The monitor
+  device/channel combos are **stacked**, not side by side, so each gets the
+  full column width (they hold registry names).
+
+### Boxes shrink-wrap, the monitor plot takes the spare height
+Both groups are added with `alignment=Qt.AlignmentFlag.AlignTop`, so each box
+is only as tall as its content (horizontal stretch is unaffected — the widths
+from §53 still apply). `root.addWidget(self.field_w, stretch=1)` sends the
+panel's spare height to the monitor plot in that row instead of spreading the
+Timing / Metadata / Hardware groups below apart (which is where it went once
+the boxes stopped absorbing it).
+
+### Segment list grows before it scrolls
+`FieldSegmentList` (both apps): scroll `setMaximumHeight(108)` → `200`, so up
+to 6 segments are fully visible (a 4-segment sweep always had a scrollbar
+before); horizontal scrollbar disabled and `setMinimumWidth(408)` set — one
+segment row plus the scrollbar gutter — because the list now sits in a
+non-stretching column.
+
+### Field monitor axis labels
+`self._field_fig.tight_layout(pad=0.4)` is now also called at construction.
+It previously ran only inside `update_field_monitor`, so with no field readback
+(or before the first update) the x/y labels stayed clipped — newly visible once
+the canvas became shorter than the boxes.
+
+### Measured (Samba_main, 4 segments, 1908 px window)
+| | before | after |
+|---|---|---|
+| field row | ~330 px | 310 px |
+| AC box | ~330 px | 180 px |
+| DC box | ~330 px | 162 px |
+| monitor plot | 228 px | 284 px |
+| segment scrollbar | yes | no |
+
+Box height by segment count: 1–2 → 130 px, 4 → 180, 6 → 240, 7+ → 262 and the
+list scrolls. Cryo matches (Field 180 / Temperature 187 px). Spatial and
+TR-MOKE rows are untouched — `field_w` is hidden there, so its stretch
+reserves nothing.
+
+### Verification
+Offscreen-Qt runs of the real panels: Samba_main 51 checks (unchanged from
+§53) + 28 new (segment-count extremes 1/2/4/6/8/12 — box height, vertical
+scrollbar appears only past 6, never a horizontal one, plot never below its
+minimum; Spatial and TR-MOKE row visibility), Cryo 18 checks (widths at
+1180/1366/1600/1920 px with no clipping, both boxes shrink-wrapped, 4 segments
+without a scrollbar, spare height to the plot, sub-mode/title labels, no
+DC-hyst spinbox). Rendered PNGs inspected for both apps.
+`python test_runner.py` 74 OK.
+
+**Harness note:** showing `field_w` before the panel itself is shown leaves the
+segment scroll area's `sizeHint` stale (28 px instead of the content's 118),
+which skews geometry measurements. Load the config, select the scan type, size
+the panel, *then* `show()` — the order the app itself uses.
