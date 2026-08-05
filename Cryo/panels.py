@@ -557,6 +557,12 @@ class _NoUnderscoreValidator:
 # ─────────────────────────────────────────────────────────────────────────────
 # MokeMetadataGroup — reusable metadata widget (Trajectory + Scanlist)
 # ─────────────────────────────────────────────────────────────────────────────
+INCIDENCES = ["PMOKE", "LMOKE+", "LMOKE", "TMOKE"]
+# Standard mirror shift [mm], used for every incidence until the user changes
+# it — from then on each incidence keeps its own remembered value.
+DEFAULT_MIRROR_SHIFT = 12.50
+
+
 class MokeMetadataGroup(QGroupBox):
     """Metadata fields: operator, sample, device, notes, incidence, polarization,
     λ/2, λ/4, noDC, R4W, R2W.  Emits `changed` whenever any value changes."""
@@ -625,44 +631,53 @@ class MokeMetadataGroup(QGroupBox):
         # ── Right: Incidence / Polarization / checkboxes ──────────────────────
         right = QGridLayout(); right.setSpacing(2)
 
-        # Row 0: Incidence + mirror-shift
+        # Per-incidence mirror-shift memory — set up before the combo exists so
+        # a signal fired during construction can never see them missing.
+        self._shift_by_inc = {inc: DEFAULT_MIRROR_SHIFT for inc in INCIDENCES}
+        self._cur_inc = INCIDENCES[0]
+        self._inc_loading = False
+
+        # Row 0: Incidence
         right.addWidget(QLabel("Incidence:"), 0, 0)
         self.incidence_combo = NoScrollComboBox()
-        self.incidence_combo.addItems(["PMOKE", "LMOKE+", "LMOKE", "TMOKE"])
+        self.incidence_combo.addItems(INCIDENCES)
         self.incidence_combo.currentTextChanged.connect(self._on_incidence_changed)
         right.addWidget(self.incidence_combo, 0, 1)
 
-        self._mirror_shift_lbl = QLabel("shift:")
-        self._mirror_shift_lbl.setStyleSheet("font-size:9px;")
+        # Row 1: mirror shift — always visible, remembered per incidence
+        self._mirror_shift_lbl = QLabel("Mirror shift:")
         self.mirror_shift = NoScrollDoubleSpinBox()
         self.mirror_shift.setRange(-50, 50); self.mirror_shift.setDecimals(2)
-        self.mirror_shift.setValue(12.50); self.mirror_shift.setSuffix(" mm")
+        self.mirror_shift.setValue(DEFAULT_MIRROR_SHIFT)
+        self.mirror_shift.setSuffix(" mm")
         self.mirror_shift.setFixedWidth(85)
-        self._mirror_shift_lbl.setVisible(False)
-        self.mirror_shift.setVisible(False)
-        right.addWidget(self._mirror_shift_lbl, 0, 2)
-        right.addWidget(self.mirror_shift, 0, 3)
+        self.mirror_shift.setToolTip(
+            "Mirror shift — stored separately for each incidence, so switching "
+            "incidence brings back the value last used with it.")
+        self.mirror_shift.valueChanged.connect(self._on_shift_edited)
+        right.addWidget(self._mirror_shift_lbl, 1, 0)
+        right.addWidget(self.mirror_shift, 1, 1)
 
-        # Row 1: Polarization + custom
-        right.addWidget(QLabel("Polarization:"), 1, 0)
+        # Row 2: Polarization + custom
+        right.addWidget(QLabel("Polarization:"), 2, 0)
         self.pol_combo = NoScrollComboBox()
         self.pol_combo.addItems(["s", "45°", "p", "other"])
         self.pol_combo.currentTextChanged.connect(self._on_pol_changed)
-        right.addWidget(self.pol_combo, 1, 1)
+        right.addWidget(self.pol_combo, 2, 1)
         self.pol_custom = QLineEdit(); self.pol_custom.setPlaceholderText("custom")
         self.pol_custom.setFixedWidth(70)
         self.pol_custom.setVisible(False)
         _NoUnderscoreValidator.install(self.pol_custom)
-        right.addWidget(self.pol_custom, 1, 2, 1, 2)
+        right.addWidget(self.pol_custom, 2, 2, 1, 2)
 
-        # Row 2: checkboxes λ/2, λ/4, noDC — all in one line
+        # Row 3: checkboxes λ/2, λ/4, noDC — all in one line
         cb_row = QHBoxLayout(); cb_row.setSpacing(10)
         self.lam2_cb = QCheckBox("λ/2"); cb_row.addWidget(self.lam2_cb)
         self.lam4_cb = QCheckBox("λ/4"); cb_row.addWidget(self.lam4_cb)
         cb_row.addSpacing(12)
         self.nodc_cb = QCheckBox("noDC"); cb_row.addWidget(self.nodc_cb)
         cb_row.addStretch()
-        right.addLayout(cb_row, 2, 0, 1, 4)
+        right.addLayout(cb_row, 3, 0, 1, 4)
 
         top.addLayout(right)
 
@@ -679,14 +694,25 @@ class MokeMetadataGroup(QGroupBox):
         self.tfm_spin.valueChanged.connect(self.changed.emit)
         self.tstack_spin.valueChanged.connect(self.changed.emit)
 
-        # Trigger initial visibility
-        self._on_incidence_changed(self.incidence_combo.currentText())
-
-    # ── Visibility helpers ────────────────────────────────────────────────────
+    # ── Incidence / mirror-shift helpers ──────────────────────────────────────
     def _on_incidence_changed(self, text):
-        show = text in ("LMOKE+", "LMOKE")
-        self._mirror_shift_lbl.setVisible(show)
-        self.mirror_shift.setVisible(show)
+        """Park the shift under the incidence being left, then restore the one
+        remembered for the incidence just selected."""
+        if self._inc_loading:
+            return
+        if self._cur_inc and self._cur_inc != text:
+            self._shift_by_inc[self._cur_inc] = self.mirror_shift.value()
+        self._cur_inc = text
+        val = self._shift_by_inc.get(text, DEFAULT_MIRROR_SHIFT)
+        # The combo's own currentTextChanged → changed.emit covers the save;
+        # blocking here keeps it to a single emit per switch.
+        self.mirror_shift.blockSignals(True)
+        self.mirror_shift.setValue(val)
+        self.mirror_shift.blockSignals(False)
+
+    def _on_shift_edited(self, value: float):
+        if not self._inc_loading and self._cur_inc:
+            self._shift_by_inc[self._cur_inc] = float(value)
 
     def _on_pol_changed(self, text):
         self.pol_custom.setVisible(text == "other")
@@ -698,7 +724,9 @@ class MokeMetadataGroup(QGroupBox):
             pol = self.pol_custom.text().strip() or "other"
         inc = self.incidence_combo.currentText()
         ms  = self.mirror_shift.value()
+        shifts = dict(self._shift_by_inc); shifts[inc] = ms
         return {
+            "mirror_shift_by_incidence": shifts,
             "operator":     self.meta_operator.text().strip(),
             "sample_id":    self.meta_sample.text().strip(),
             "device_id":    self.meta_device.text().strip(),
@@ -721,9 +749,20 @@ class MokeMetadataGroup(QGroupBox):
         self.meta_device.setText(cfg.get("device_id", ""))
         self.meta_notes.setText(cfg.get("notes", ""))
         inc = cfg.get("incidence", "PMOKE")
-        idx = self.incidence_combo.findText(inc)
-        if idx >= 0: self.incidence_combo.setCurrentIndex(idx)
-        self.mirror_shift.setValue(cfg.get("mirror_shift", 12.50))
+        self._inc_loading = True
+        try:
+            idx = self.incidence_combo.findText(inc)
+            if idx >= 0: self.incidence_combo.setCurrentIndex(idx)
+            saved = cfg.get("mirror_shift_by_incidence") or {}
+            self._shift_by_inc = {
+                i: float(saved.get(i, DEFAULT_MIRROR_SHIFT)) for i in INCIDENCES}
+            ms = float(cfg.get("mirror_shift",
+                               self._shift_by_inc.get(inc, DEFAULT_MIRROR_SHIFT)))
+            self._cur_inc = inc if inc in self._shift_by_inc else INCIDENCES[0]
+            self._shift_by_inc[self._cur_inc] = ms
+            self.mirror_shift.setValue(ms)
+        finally:
+            self._inc_loading = False
         pol = cfg.get("polarization", "s")
         
         idx = self.pol_combo.findText(pol)

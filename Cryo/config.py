@@ -327,7 +327,7 @@ def make_default_config(name: str = "scan_x") -> dict:
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
         "hyst_device":   "hpp-N42/beckhoff/pyhystlongi",
-        "hyst_field_V":  1.0,      # peak field amplitude sent to power supply (V)
+        "hyst_field_A":  1.0,      # peak coil current sent to power supply (A)
         "hyst_int_time": 2.0,      # integration time per half-loop on Beckhoff (s)
         "hyst_npts":     100,      # number of field points per half-loop
         "hyst_cycles":   1,        # number of loops to average
@@ -365,7 +365,11 @@ def _migrate_config(cfg: dict):
         cfg.setdefault("scan_x", True); cfg.setdefault("scan_y", False)
     # Ensure DC_HYST fields exist on all configs (harmless on non-DC scans)
     cfg.setdefault("hyst_device",   "hpp-N42/beckhoff/hysteresis")
-    cfg.setdefault("hyst_field_V",  1.0)
+    # DC-hyst amplitude is a current [A] (PyHysteresis divides it by its
+    # AmperePerVolt property to get the DAC voltage); the old key said V.
+    if "hyst_field_A" not in cfg:
+        cfg["hyst_field_A"] = cfg.get("hyst_field_V", 1.0)
+    cfg.pop("hyst_field_V", None)
     cfg.setdefault("hyst_int_time", 2.0)
     cfg.setdefault("hyst_npts",     100)
     cfg.setdefault("hyst_cycles",   1)

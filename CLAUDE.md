@@ -3035,3 +3035,82 @@ SAMBA just points its button at `SetZero`.
   hidden without the SetZero+Initialise signature, shown with it; Yes → one
   `SetZero` dispatched + positions re-read + button re-enabled; No → nothing.
 - Both servers `py_compile` clean; `python test_runner.py` 69 OK.
+
+---
+
+## 53. Recent Changes (August 2026) — Scanlist Setup Lock, Field-Panel Width, DC-Hyst Ampere, Per-Incidence Mirror Shift
+
+Branch `claude/scanlist-setup-lock` (SAMBA, 74 tests).
+
+### Setup lock taken by every start path (bug fix)
+`acquire_lock()` was called **only** from `_start_scan()`, so a **scanlist** ran
+with the setup's busy flag still `False` — another computer could start a scan
+on the same rig mid-scanlist. The calibration time scan had the same gap, and
+`_on_sl_worker_finished()` never released the lock. (`ScanlistWorker`'s
+`setup_name` argument only builds the `ScanLists_<Setup>` path — it never took
+the lock either.)
+- New `_acquire_setup_lock()` helper in both apps (same "Setup busy" dialog),
+  called from `_start_scan`, `_start_scanlist` **and** `_start_calib_timescan`.
+  Taken after validation but before any hardware write, so a refused start
+  never touches the rig.
+- `release_lock()` added to `_on_sl_worker_finished()` (both apps), mirroring
+  `_on_worker_finished()`. Wired to the QThread `finished` signal → covers
+  normal completion and abort. Calibration time scans run through `ScanWorker`
+  → `_on_worker_finished`, which already released.
+
+### DC hysteresis field is a CURRENT [A], not a voltage
+`HysteresisThread.py:55` does `field = MagneticField / AmperePerVolt`
+("Power Supply output current for 1 V programming voltage"), i.e. the number
+SAMBA sends has always been an **Ampere** — only the label said V. Pure
+relabel, no numeric or device change:
+- UI: `Field (V):` → `Field (A):`, spinbox suffix `" A"`, tooltip explaining the
+  device-side conversion; widget renamed `dc_field_V` → `dc_field_A`.
+- Config key `hyst_field_V` → `hyst_field_A` (both apps). Samba_main schema
+  bumped to **v6** with `_migrate_v5_to_v6` carrying the value over unchanged
+  and dropping the old key; Cryo's `_migrate_config` does the same inline.
+  `runner.py` still reads `hyst_field_V` as a fallback for configs replayed
+  from disk.
+- HDF5: DC-hyst metadata attr `MagneticField_V` → `MagneticField_A`. The data
+  browser reads `_A` and falls back to `_V` for older files, and prints "A".
+
+### AC Field Sweep / DC Hysteresis groups ~2× wider
+`Samba_main/panels/trajectory.py`: the two groups were capped at 310 / 300 px
+(rendering 310 / 266). Now `min 430 / max 620` and `min 420 / max 600` with
+layout stretch **3 : 1 : 3** across `[AC][monitor plot][DC]`; the monitor
+canvas minimum drops 160 → 140 px. Measured: groups 575→620 / 575→600 px from
+a 1368 px panel up to 2560 px, plot shrinks (766 → 192 px at minimum width) —
+the trade-off the user chose. The panel's own minimum width is unchanged at
+1368 px (set by the metadata top row, not this row), so nothing new clips.
+
+### Mirror shift moved below incidence + remembered per incidence
+The shift spinbox sat to the *right* of the incidence combo and was only
+visible for LMOKE±. Now (both apps' `MokeMetadataGroup` —
+`Samba_main/panels/_widgets.py`, `Cryo/panels.py`):
+- Layout rows are `Incidence` / `Mirror shift` / `Polarization` / checkboxes;
+  the shift is **always visible** (the LMOKE-only show/hide is gone).
+- Per-incidence memory: `_shift_by_inc` maps each of `INCIDENCES`
+  (PMOKE / LMOKE+ / LMOKE / TMOKE) to its own shift. Switching incidence parks
+  the current value under the incidence being left and restores the new one
+  (spin signals blocked → still exactly one `changed` emit per switch). Editing
+  the spin updates the entry for the live incidence.
+- `DEFAULT_MIRROR_SHIFT = 12.50` (the old hardcoded standard) seeds every
+  incidence on first start. New metadata key `mirror_shift_by_incidence`
+  round-trips through `get_values` / `load_values`, so it persists in the
+  per-setup shared metadata block (§32); configs without it fall back to the
+  defaults plus their own `mirror_shift`. The HDF5 metadata allowlist and the
+  lab-notebook column list are explicit, so the dict never reaches an HDF5
+  attr or a CSV column.
+
+### Tests / verification
+- `test_runner.py` 69 → 74: `TestDcHystFieldAmpere` (Ampere key written to
+  `MagneticField` + recorded as `MagneticField_A`, legacy `hyst_field_V` still
+  honoured), `TestHystFieldKeyMigration` (v5→v6 carry-over, new key wins,
+  default config uses the Ampere key), plus a `MagneticField` write assertion
+  in `TestDcHystSourceWrite`.
+- Offscreen-Qt run of the real widgets (51 checks): group widths/stretch at
+  1180 / 1400 / 1920 px with no clipping, `Field (A):` label + suffix +
+  `hyst_field_A` round-trip (and legacy load), and for **both** apps' metadata
+  groups — shift one row below incidence, visible for every incidence,
+  per-incidence memory, single `changed` per switch, `get_values`/`load_values`
+  round-trip, legacy-config fallback. Rendered PNGs checked visually; nested
+  dict verified through both apps' setup save/load.

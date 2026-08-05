@@ -147,8 +147,12 @@ class ScanFile:
                     src = f.get("metadata", f)
                     for s in ("Hc", "Hshift", "Mr", "Ms"):
                         self.meta[s] = float(src.attrs.get(s, float("nan")))
-                    self.meta["MagneticField_V"] = float(
-                        src.attrs.get("MagneticField_V", float("nan")))
+                    # Peak coil current [A].  Files written before the unit fix
+                    # stored the same number under "MagneticField_V".
+                    self.meta["MagneticField_A"] = float(
+                        src.attrs.get("MagneticField_A",
+                                      src.attrs.get("MagneticField_V",
+                                                    float("nan"))))
                     self.meta["Cycles"] = int(src.attrs.get("Cycles", 0))
                     self.meta["NumberOfPoints"] = int(
                         src.attrs.get("NumberOfPoints", 0))
@@ -778,7 +782,7 @@ class DataBrowserPanel(QWidget):
         ]
         if is_dc:
             lines += [
-                f"Field:    {m.get('MagneticField_V', float('nan')):.3f} V  "
+                f"Field:    {m.get('MagneticField_A', float('nan')):.3f} A  "
                 f"× {m.get('NumberOfPoints', 0)} pts/half  "
                 f"× {m.get('Cycles', 0)} cycles",
                 f"Int.time: {m['integration_time']:.3g} s/half-loop",

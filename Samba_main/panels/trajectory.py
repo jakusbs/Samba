@@ -396,8 +396,12 @@ class TrajectoryPanel(QWidget):
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
         ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
         fgl.addLayout(ac_mon_row, 2, 0, 1, 2)
-        self._ac_grp.setMaximumWidth(310)
-        horiz.addWidget(self._ac_grp)
+        # Roughly twice the old width (was capped at 310).  A stretch factor
+        # lets the group shrink towards its minimum on narrow screens instead
+        # of clipping; the monitor canvas in the middle takes what is left.
+        self._ac_grp.setMinimumWidth(430)
+        self._ac_grp.setMaximumWidth(620)
+        horiz.addWidget(self._ac_grp, stretch=3)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
         self._field_hist_t: collections.deque = collections.deque(maxlen=120)
@@ -409,9 +413,9 @@ class TrajectoryPanel(QWidget):
         self._field_fig = Figure(figsize=(2.8, 1.8), dpi=90, facecolor="#1e1e2e")
         self._field_ax  = self._field_fig.add_subplot(111)
         self._field_canvas = FigureCanvas(self._field_fig)
-        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(160)
+        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(140)
         self._style_field_ax("ac")
-        horiz.addWidget(self._field_canvas, stretch=2)
+        horiz.addWidget(self._field_canvas, stretch=1)
 
         # ── Column 3: DC Hysteresis params ────────────────────────────────────
         self._dc_grp = QGroupBox("DC Hysteresis"); dc_pgl = QGridLayout(self._dc_grp)
@@ -429,8 +433,17 @@ class TrajectoryPanel(QWidget):
         def _int(lo, hi, v):
             w = NoScrollSpinBox(); w.setRange(lo, hi); w.setValue(v); return w
 
-        dc_pgl.addWidget(QLabel("Field (V):"), 1, 0)
-        self.dc_field_V = _dbl(0.001, 20, 3, 1.0);  dc_pgl.addWidget(self.dc_field_V, 1, 1)
+        # Peak coil CURRENT in Ampere — the PyHysteresis device divides this by
+        # its AmperePerVolt property to get the DAC programming voltage, so the
+        # number entered here has always been an Ampere (it was labelled "V").
+        dc_pgl.addWidget(QLabel("Field (A):"), 1, 0)
+        self.dc_field_A = _dbl(0.001, 20, 3, 1.0)
+        self.dc_field_A.setSuffix(" A")
+        self.dc_field_A.setToolTip(
+            "Peak coil current per half-loop [A] — written to the PyHysteresis "
+            "MagneticField attribute, which converts it to the supply's "
+            "programming voltage via its AmperePerVolt property.")
+        dc_pgl.addWidget(self.dc_field_A, 1, 1)
         dc_pgl.addWidget(QLabel("Int (s):"),   1, 2)
         self.dc_int_t   = _dbl(0.01, 600, 2, 2.0);   dc_pgl.addWidget(self.dc_int_t,   1, 3)
         dc_pgl.addWidget(QLabel("Pts/half:"),  2, 0)
@@ -452,8 +465,10 @@ class TrajectoryPanel(QWidget):
         self._dc_mon_ch = NoScrollComboBox(); self._dc_mon_ch.setStyleSheet("font-size:10px;")
         dc_mon_row.addWidget(self._dc_mon_ch, stretch=1)
         dc_pgl.addLayout(dc_mon_row, 4, 0, 1, 4)
-        self._dc_grp.setMaximumWidth(300)
-        horiz.addWidget(self._dc_grp)
+        # Twice the old width (was capped at 300) — see the AC group above.
+        self._dc_grp.setMinimumWidth(420)
+        self._dc_grp.setMaximumWidth(600)
+        horiz.addWidget(self._dc_grp, stretch=3)
 
         fw_root.addLayout(horiz)
         self.field_w.setVisible(False)
@@ -1529,7 +1544,8 @@ class TrajectoryPanel(QWidget):
             if self.dc_dev_combo.itemData(i) == hyst_path:
                 self.dc_dev_combo.setCurrentIndex(i); break
         # DC hyst numeric params
-        self.dc_field_V.setValue(cfg.get("hyst_field_V",  1.0))
+        self.dc_field_A.setValue(
+            cfg.get("hyst_field_A", cfg.get("hyst_field_V", 1.0)))
         self.dc_int_t.setValue(  cfg.get("hyst_int_time", 2.0))
         self.dc_npts.setValue(   cfg.get("hyst_npts",     100))
         self.dc_cycles.setValue( cfg.get("hyst_cycles",   1))
@@ -1609,7 +1625,7 @@ class TrajectoryPanel(QWidget):
                 "scan_type":    "DC_HYST",
                 "scan_x": False, "scan_y": False,
                 "hyst_device":   self.dc_dev_combo.currentData() or "",
-                "hyst_field_V":  self.dc_field_V.value(),
+                "hyst_field_A":  self.dc_field_A.value(),
                 "hyst_int_time": self.dc_int_t.value(),
                 "hyst_npts":     self.dc_npts.value(),
                 "hyst_cycles":   self.dc_cycles.value(),

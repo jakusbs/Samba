@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -206,7 +206,7 @@ def make_default_config(name: str = "scan_x") -> dict:
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
         "hyst_device":   "hpp-N42/beckhoff/pyhystlongi",
-        "hyst_field_V":  1.0,      # peak field amplitude sent to power supply (V)
+        "hyst_field_A":  1.0,      # peak coil current sent to power supply (A)
         "hyst_int_time": 2.0,      # integration time per half-loop on Beckhoff (s)
         "hyst_npts":     100,      # number of field points per half-loop
         "hyst_cycles":   1,        # number of loops to average
@@ -278,7 +278,7 @@ def _migrate_v0_to_v1(cfg: dict):
         cfg.setdefault("scan_x", True); cfg.setdefault("scan_y", False)
     # DC hyst defaults
     cfg.setdefault("hyst_device",   "hpp-N42/beckhoff/hysteresis")
-    cfg.setdefault("hyst_field_V",  1.0)
+    cfg.setdefault("hyst_field_A",  1.0)
     cfg.setdefault("hyst_int_time", 2.0)
     cfg.setdefault("hyst_npts",     100)
     cfg.setdefault("hyst_cycles",   1)
@@ -361,12 +361,26 @@ def _migrate_v4_to_v5(cfg: dict):
     cfg.setdefault("hyst_sources", [1, 2, 3, 4, 5, 6])
 
 
+def _migrate_v5_to_v6(cfg: dict):
+    """v5→v6: DC-hyst field amplitude is a CURRENT in Ampere, not Volt.
+
+    The value has always been written to the PyHysteresis `MagneticField`
+    attribute, which the device divides by its `AmperePerVolt` property to get
+    the DAC programming voltage — i.e. the number was already in A and only
+    the label said V.  Rename the key; the value is carried over unchanged.
+    """
+    if "hyst_field_A" not in cfg:
+        cfg["hyst_field_A"] = cfg.get("hyst_field_V", 1.0)
+    cfg.pop("hyst_field_V", None)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
+    (6, _migrate_v5_to_v6),
 ]
 
 
