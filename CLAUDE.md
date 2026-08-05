@@ -3231,3 +3231,62 @@ post-fix box 210 px, 5/5 rows, no scrollbar, and 8 segments still cap the box at
 262 px and scroll. 10 checks, both apps. **Lesson: when a widget's size comes
 from a `sizeHint` we don't control, state the hint explicitly — and treat a
 harness anomaly as a finding, not an artifact.**
+
+---
+
+## 55. Recent Changes (August 2026) — Field Devices Come From Setup Defaults
+
+Branch `claude/scanlist-setup-lock` (Samba_main only; 74 tests).
+
+### The magnet and the PyHysteresis controller are rig properties, not scan properties
+The AC Field Sweep box had a **Device** combo (`field_device`, "" = setup
+default) and the DC Hysteresis box had its own **Device** combo
+(`hyst_device`) — both per *scan config*, so the same rig could be described
+differently by two configs and the real magnet lived in a third place
+(Setup Defaults → `magnet_device`).
+
+- **New setup key `hyst_device`** (`Samba_main/config.py`, Green
+  `pyhystlongi` / IR `pyhystpolar`), edited in **Setup Defaults → Magnet →
+  "DC hyst device:"** (`setup_defaults.py`, combo filtered to registry type
+  `"hysteresis"`, round-tripped through `load()` / `get_defaults()`).
+- **Migration:** `load_setup` seeds a missing setup-level `hyst_device` from
+  the first saved config that has one, *before* the `SETUP_HW_DEFAULTS`
+  `setdefault` — so an existing setup keeps the device it was using instead of
+  jumping to the compiled default.
+- **Panel** (`panels/trajectory.py`): both combos are gone; each box shows a
+  read-only teal path label (same style as the TR-MOKE DG645 label), fed by the
+  new `set_field_device()` / `set_hyst_device()` from `samba.py` on setup load
+  and on every Setup Defaults edit. `get_config_partial` now writes
+  `field_device: ""` / `hyst_device: ""` — i.e. "no per-config override" — which
+  also clears any stale value already stored in a config (`_save_active_config`
+  merges with `update`).
+- **`_build_full_config`** injects the resolved paths into the scan config, the
+  same way stage device/attr/label/unit are injected (§35): FIELD gets
+  `field_device` + `field_current_attr` from `magnet_device` /
+  `magnet_current_attr`, DC_HYST gets `hyst_device` (falling back to the first
+  enabled channel's device if the setup key is empty). The runner and the HDF5
+  metadata are unchanged — they still read `cfg["field_device"]` /
+  `cfg["hyst_device"]`, now always truthful.
+- Cryo is untouched: its Field Sweep / Temperature Sweep device+attr combos are
+  how the sub-mode picks *which quantity* (AttoDRY field vs temperature) is
+  swept, not a duplicate of a setup default.
+
+### Segment box did not resize when a saved config was loaded
+Reported right after §54: switching to another saved config left the AC box
+small until a segment was added by hand (which called `updateGeometry()`).
+`sizeHint()` was reading `self._content.sizeHint()`, and that container can hand
+out a cached height right after `load_segments()` rebuilt the rows. It now sums
+the **row widgets' own** sizeHints (`_rows_height()`), which are correct
+immediately, and `showEvent` re-asserts the hint when the field row is revealed
+(config loads happen while it is hidden). Both apps.
+
+### Verification
+20 offscreen checks (`check_devices.py`): no device combos left in either box
+(only the two monitor combos), labels fed from the setup, `get_config_partial`
+emits `""` for both keys, Setup Defaults round-trip + registry filtering,
+`load_setup` seeding from an old file, `MainWindow._build_full_config`
+(driven with a stub self over the real panels) injecting both devices, and the
+config-switch resize: 1 segment → 105 px box, load a 5-segment config → 212 px
+with all five rows visible and no scrollbar (with the scroll area's sizeHint
+pinned stale), then back to 105 px. Plus the earlier 51/18/28/10 harness checks
+and `python test_runner.py` 74 OK.

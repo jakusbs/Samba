@@ -27,11 +27,31 @@ from panels._widgets import (
 )
 from panels.hardware_panel import HardwarePanel
 
+# Read-only device readback (same look as the TR-MOKE DG645 device label):
+# these paths come from Setup Defaults and are shown, not edited, here.
+_DEV_LBL_STYLE = "color:#94e2d5;font-family:'Courier New',monospace;font-size:9px;"
+
 
 class FieldSegmentList(QWidget):
     changed = pyqtSignal()
 
     _MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+    def _rows_height(self) -> int:
+        """Total height of the segment rows, summed from the row widgets.
+
+        Read straight off the row widgets rather than from the scroll area or
+        its content container: a freshly created row reports its own sizeHint
+        immediately, while the containers can still hand out a cached value
+        right after the rows were rebuilt (load_segments) or while the panel is
+        hidden — which is what collapsed the box on a config switch.
+        """
+        heights = [self._vlayout.itemAt(i).widget().sizeHint().height()
+                   for i in range(self._vlayout.count())
+                   if self._vlayout.itemAt(i).widget() is not None]
+        if not heights:
+            return 0
+        return sum(heights) + self._vlayout.spacing() * (len(heights) - 1)
 
     def sizeHint(self) -> QSize:
         """Height derived from the segment rows themselves.
@@ -45,9 +65,15 @@ class FieldSegmentList(QWidget):
         makes it deterministic on any Qt version / platform.
         """
         sh = super().sizeHint()
-        h = min(self._content.sizeHint().height(), self._MAX_LIST_H)
-        h += self._btn_row.sizeHint().height() + 2      # + root layout spacing
+        h = min(self._rows_height() + 2, self._MAX_LIST_H)   # + viewport padding
+        h += self._btn_row.sizeHint().height() + 2           # + root spacing
         return QSize(sh.width(), h)
+
+    def showEvent(self, ev):
+        # Re-assert the hint when the field row is revealed: config loads
+        # rebuild the rows while this widget is still hidden.
+        super().showEvent(ev)
+        self.updateGeometry()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -413,16 +439,20 @@ class TrajectoryPanel(QWidget):
         self._seg_list = FieldSegmentList()
         ac_row.addWidget(self._seg_list, stretch=0)
 
-        # Right: field device + monitor dropdowns, packed to the top.  The two
-        # monitor combos are stacked (not side by side) so each gets the full
-        # column width — they hold registry device / channel names.
+        # Right: field device (read-only, from Setup Defaults) + monitor
+        # dropdowns, packed to the top.  The two monitor combos are stacked
+        # (not side by side) so each gets the full column width — they hold
+        # registry device / channel names.
         ac_side = QGridLayout(); ac_side.setSpacing(4)
         ac_side.setColumnStretch(1, 1)
         ac_side.addWidget(QLabel("Device:"), 0, 0)
-        self._ac_dev_combo = NoScrollComboBox()
-        self._ac_dev_combo.setStyleSheet("font-size:10px;")
-        self._ac_dev_combo.addItem("(setup default)", "")
-        ac_side.addWidget(self._ac_dev_combo, 0, 1)
+        # The magnet is a property of the rig, not of the scan — it comes from
+        # Setup Defaults (magnet_device) and is shown here read-only so there
+        # is exactly one place to change it.
+        self._ac_dev_lbl = QLabel("— set in Setup Defaults —")
+        self._ac_dev_lbl.setStyleSheet(_DEV_LBL_STYLE)
+        self._ac_dev_lbl.setToolTip("Magnet device — edit in Setup Defaults")
+        ac_side.addWidget(self._ac_dev_lbl, 0, 1)
 
         ac_side.addWidget(QLabel("Mon:"), 1, 0)
         self._ac_mon_dev = NoScrollComboBox(); self._ac_mon_dev.setStyleSheet("font-size:10px;")
@@ -465,12 +495,13 @@ class TrajectoryPanel(QWidget):
         self._dc_grp = QGroupBox("DC Hysteresis"); dc_pgl = QGridLayout(self._dc_grp)
         dc_pgl.setSpacing(3); dc_pgl.setContentsMargins(8, 8, 8, 8)
         dc_pgl.addWidget(QLabel("Device:"), 0, 0)
-        self.dc_dev_combo = NoScrollComboBox()
-        self.dc_dev_combo.setStyleSheet("font-size:10px;")
-        # Populate later via populate_monitor_combo; add placeholder for now
-        self.dc_dev_combo.addItem("hpp-N42/beckhoff/pyhystlongi",
-                                  "hpp-N42/beckhoff/pyhystlongi")
-        dc_pgl.addWidget(self.dc_dev_combo, 0, 1, 1, 3)
+        # PyHysteresis device — a property of the rig, so it comes from Setup
+        # Defaults (hyst_device) and is shown here read-only.
+        self._dc_dev_lbl = QLabel("— set in Setup Defaults —")
+        self._dc_dev_lbl.setStyleSheet(_DEV_LBL_STYLE)
+        self._dc_dev_lbl.setToolTip(
+            "DC hysteresis (PyHysteresis) device — edit in Setup Defaults")
+        dc_pgl.addWidget(self._dc_dev_lbl, 0, 1, 1, 3)
 
         def _dbl(lo, hi, dec, v):
             w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
@@ -1013,6 +1044,14 @@ class TrajectoryPanel(QWidget):
         if path:
             self._tr_dev_lbl.setText(path)
 
+    def set_field_device(self, path: str):
+        """Update the AC field-sweep device label from setup defaults (magnet)."""
+        self._ac_dev_lbl.setText(path or "— set in Setup Defaults —")
+
+    def set_hyst_device(self, path: str):
+        """Update the DC-hysteresis device label from setup defaults."""
+        self._dc_dev_lbl.setText(path or "— set in Setup Defaults —")
+
     def set_rtv40_device(self, path: str):
         """Update the RTV40 device label and stored path from setup defaults."""
         if path:
@@ -1101,33 +1140,8 @@ class TrajectoryPanel(QWidget):
             dev_combo.blockSignals(False)
         self._on_mon_dev_changed("ac")
         self._on_mon_dev_changed("dc")
-
-        # ── DC hyst device combo (hysteresis-type devices preferred) ──────────
-        hyst_devs = [d for d in registry if d.get("type") == "hysteresis"]
-        show_dc = hyst_devs if hyst_devs else registry
-        prev_dc = self.dc_dev_combo.currentData() or ""
-        self.dc_dev_combo.blockSignals(True); self.dc_dev_combo.clear()
-        for d in show_dc:
-            self.dc_dev_combo.addItem(d["name"], d["tango_path"])
-        if prev_dc:
-            for i in range(self.dc_dev_combo.count()):
-                if self.dc_dev_combo.itemData(i) == prev_dc:
-                    self.dc_dev_combo.setCurrentIndex(i); break
-        self.dc_dev_combo.blockSignals(False)
-
-        # ── AC field device combo (magnet-type devices + setup-default option) ─
-        mag_devs = [d for d in registry if d.get("type") == "magnet"]
-        show_ac = mag_devs if mag_devs else registry
-        prev_ac = self._ac_dev_combo.currentData()
-        self._ac_dev_combo.blockSignals(True); self._ac_dev_combo.clear()
-        self._ac_dev_combo.addItem("(setup default)", "")
-        for d in show_ac:
-            self._ac_dev_combo.addItem(d["name"], d["tango_path"])
-        if prev_ac is not None:
-            for i in range(self._ac_dev_combo.count()):
-                if self._ac_dev_combo.itemData(i) == prev_ac:
-                    self._ac_dev_combo.setCurrentIndex(i); break
-        self._ac_dev_combo.blockSignals(False)
+        # The magnet and PyHysteresis devices are NOT picked here — they come
+        # from Setup Defaults via set_field_device() / set_hyst_device().
 
     def _on_mon_dev_changed(self, which: str = "ac"):
         """Populate channel dropdown from the selected device's channels."""
@@ -1575,10 +1589,6 @@ class TrajectoryPanel(QWidget):
                 cfg.get("field_npts",     101),
             ]])
         # AC field device
-        field_dev = cfg.get("field_device", "")
-        for i in range(self._ac_dev_combo.count()):
-            if self._ac_dev_combo.itemData(i) == field_dev:
-                self._ac_dev_combo.setCurrentIndex(i); break
         self.zigzag_cb.setChecked(cfg.get("zigzag", False))
         _fa_id = 1 if cfg.get("fast_axis", "act1") == "act2" else 0
         self.fast_axis_bg.button(_fa_id).setChecked(True)
@@ -1587,10 +1597,6 @@ class TrajectoryPanel(QWidget):
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
         self.meta.load_values(cfg)
         # DC hyst device
-        hyst_path = cfg.get("hyst_device", "")
-        for i in range(self.dc_dev_combo.count()):
-            if self.dc_dev_combo.itemData(i) == hyst_path:
-                self.dc_dev_combo.setCurrentIndex(i); break
         # DC hyst numeric params
         self.dc_field_A.setValue(
             cfg.get("hyst_field_A", cfg.get("hyst_field_V", 1.0)))
@@ -1672,7 +1678,9 @@ class TrajectoryPanel(QWidget):
             return {
                 "scan_type":    "DC_HYST",
                 "scan_x": False, "scan_y": False,
-                "hyst_device":   self.dc_dev_combo.currentData() or "",
+                # "" = use the setup's hyst_device (Setup Defaults); samba.py
+                # injects the resolved path into the scan config.
+                "hyst_device":   "",
                 "hyst_field_A":  self.dc_field_A.value(),
                 "hyst_int_time": self.dc_int_t.value(),
                 "hyst_npts":     self.dc_npts.value(),
@@ -1703,7 +1711,8 @@ class TrajectoryPanel(QWidget):
             "field_start_A":     segs[0][0]                 if segs else -1.0,
             "field_stop_A":      segs[-1][1]                if segs else  1.0,
             "field_npts":        sum(int(s[2]) for s in segs) if segs else 101,
-            "field_device":      self._ac_dev_combo.currentData() or "",
+            # "" = use the setup's magnet_device (Setup Defaults)
+            "field_device":      "",
             # Beckhoff magnet: command current [A], read corrected field [mT]
             # (the Magnet device returns mT — matches the DC-Hyst convention).
             "field_x_label":     "Field",

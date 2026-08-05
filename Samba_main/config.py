@@ -44,6 +44,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
         "magnet_current_attr":   "current_longitudinal",
         "magnet_field_attr":     "field_longitudinal_corr",
+        # DC-hysteresis controller (PyHysteresis) — one per setup, not per scan
+        "hyst_device":           "hpp-N42/beckhoff/pyhystlongi",
         "relay_device":          "hpp-N42/current/PyRelais",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley",
@@ -83,6 +85,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
         "magnet_current_attr":   "current_polar",
         "magnet_field_attr":     "field_polar_corr",
+        # DC-hysteresis controller (PyHysteresis) — one per setup, not per scan
+        "hyst_device":           "hpp-N42/beckhoff/pyhystpolar",
         "relay_device":          "hpp-N42/current/PyRelais",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley2",
@@ -122,6 +126,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "",
         "magnet_current_attr":   "current_polar",
         "magnet_field_attr":     "field_polar_corr",
+        "hyst_device":           "",
         "relay_device":          "",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley2",
@@ -407,6 +412,16 @@ def load_setup(name: str) -> dict:
                 log.info("Migrated save_dir → %s", d["save_dir"])
             d.setdefault("notebook_dir", "~/moke_data")
             d.setdefault("server_sync_dir", SETUP_HW_DEFAULTS[name]["server_sync_dir"])
+            # hyst_device moved from the scan config to the setup.  Seed it from
+            # whatever the saved configs were using, so an existing setup keeps
+            # its PyHysteresis device instead of jumping to the compiled default.
+            if "hyst_device" not in d:
+                for _cfg in d.get("configs") or []:
+                    if _cfg.get("hyst_device"):
+                        d["hyst_device"] = _cfg["hyst_device"]
+                        log.info("Setup [%s]: hyst_device seeded from config → %s",
+                                 name, d["hyst_device"])
+                        break
             for k, v in SETUP_HW_DEFAULTS[name].items():
                 if k in HW_WARN_KEYS:
                     saved = d.get(k)

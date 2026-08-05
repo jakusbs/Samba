@@ -1037,6 +1037,9 @@ class MainWindow(QMainWindow):
             setup.get("act2_label",  "Y"), setup.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
+        # Field-sweep magnet and DC-hyst controller are per-setup, not per-scan
+        self.traj_panel.set_field_device(setup.get("magnet_device", ""))
+        self.traj_panel.set_hyst_device(setup.get("hyst_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(setup.get("lights_device", ""))
         self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
@@ -1333,6 +1336,8 @@ class MainWindow(QMainWindow):
             defaults.get("act2_label",  "Y"), defaults.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
+        self.traj_panel.set_field_device(defaults.get("magnet_device", ""))
+        self.traj_panel.set_hyst_device(defaults.get("hyst_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
         self.calib_panel.configure_stage(
@@ -1435,6 +1440,11 @@ class MainWindow(QMainWindow):
             partial["act1_unit"]   = setup.get("act1_unit",  partial.get("act1_unit",  "nm"))
             partial["act2_label"]  = setup.get("act2_label", partial.get("act2_label", "Y"))
             partial["act2_unit"]   = setup.get("act2_unit",  partial.get("act2_unit",  "nm"))
+        # Field sweep: the magnet is the setup's, never a per-config override —
+        # the AC Field Sweep box only displays it (Setup Defaults owns it).
+        if scan_type == "FIELD":
+            partial["field_device"]       = setup.get("magnet_device", "")
+            partial["field_current_attr"] = setup.get("magnet_current_attr", "")
         # DC hyst channels live in the right panel now
         if partial.get("scan_type") == "DC_HYST":
             dc_sensors = self.right_panel.get_dc_channels()
@@ -1446,7 +1456,9 @@ class MainWindow(QMainWindow):
                 hyst_chs.append(ch)
             partial["hyst_channels"] = hyst_chs
             partial["hyst_sources"]  = self.right_panel.get_dc_sources()
-            # Use device from first enabled channel if hyst_device not set
+            # PyHysteresis device from Setup Defaults (was a combo in the panel)
+            partial["hyst_device"] = setup.get("hyst_device", "")
+            # Fall back to the first enabled channel's device if unset
             if not partial.get("hyst_device"):
                 for ch in hyst_chs:
                     if ch.get("enabled") and ch.get("device"):

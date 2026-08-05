@@ -151,6 +151,12 @@ class SetupDefaultsPanel(QWidget):
         self.magnet_fld_attr = _attr_combo(_MAGNET_FLD_ATTRS)
         mg.addWidget(self.magnet_fld_attr,        2, 1)
 
+        # DC-hysteresis controller (PyHysteresis).  It drives the same magnet
+        # coils, so it lives in this group; the Trajectory tab only displays it.
+        mg.addWidget(_label("DC hyst device:"),  3, 0)
+        self.hyst_dev = _combo()
+        mg.addWidget(self.hyst_dev,               3, 1)
+
         hw_row.addWidget(mag_grp)
 
         # --- Relay ---
@@ -304,6 +310,7 @@ class SetupDefaultsPanel(QWidget):
 
         stage_entries    = _entries({"stage"})
         magnet_entries   = _entries({"magnet"})
+        hyst_entries     = _entries({"hysteresis"})
         relay_entries    = _entries({"relay"})
         keithley_entries = _entries({"current", "keithley"})
         focus_entries    = _entries({"sensor", "beckhoff", "averageIn"})
@@ -316,6 +323,7 @@ class SetupDefaultsPanel(QWidget):
             (self.act2_dev,     stage_entries),
             (self.z_dev,        stage_entries),
             (self.magnet_dev,   magnet_entries),
+            (self.hyst_dev,     hyst_entries),
             (self.relay_dev,    relay_entries),
             (self.keithley_dev, keithley_entries),
             (self.focus_dev,    focus_entries),
@@ -431,6 +439,7 @@ class SetupDefaultsPanel(QWidget):
                  setup_data.get("magnet_current_attr", "current_polar"))
             _set(self.magnet_fld_attr,
                  setup_data.get("magnet_field_attr",   "field_polar_corr"))
+            _set_by_path(self.hyst_dev,    setup_data.get("hyst_device",        ""))
 
             _set_by_path(self.relay_dev,   setup_data.get("relay_device",       ""))
             _set(self.relay_attr,           setup_data.get("relay_attr",         "switchvar"))
@@ -482,6 +491,7 @@ class SetupDefaultsPanel(QWidget):
             "magnet_device":            _get_path(self.magnet_dev),
             "magnet_current_attr":      self.magnet_cur_attr.currentText(),
             "magnet_field_attr":        self.magnet_fld_attr.currentText(),
+            "hyst_device":              _get_path(self.hyst_dev),
             "relay_device":             _get_path(self.relay_dev),
             "relay_attr":               self.relay_attr.currentText(),
             "focus_averagein":          _get_path(self.focus_dev),

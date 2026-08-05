@@ -1222,6 +1222,22 @@ class FieldSegmentList(QWidget):
 
     _MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
 
+    def _rows_height(self) -> int:
+        """Total height of the segment rows, summed from the row widgets.
+
+        Read straight off the row widgets rather than from the scroll area or
+        its content container: a freshly created row reports its own sizeHint
+        immediately, while the containers can still hand out a cached value
+        right after the rows were rebuilt (load_segments) or while the panel is
+        hidden — which is what collapsed the box on a config switch.
+        """
+        heights = [self._vlayout.itemAt(i).widget().sizeHint().height()
+                   for i in range(self._vlayout.count())
+                   if self._vlayout.itemAt(i).widget() is not None]
+        if not heights:
+            return 0
+        return sum(heights) + self._vlayout.spacing() * (len(heights) - 1)
+
     def sizeHint(self) -> QSize:
         """Height derived from the segment rows themselves.
 
@@ -1234,9 +1250,15 @@ class FieldSegmentList(QWidget):
         makes it deterministic on any Qt version / platform.
         """
         sh = super().sizeHint()
-        h = min(self._content.sizeHint().height(), self._MAX_LIST_H)
-        h += self._btn_row.sizeHint().height() + 2      # + root layout spacing
+        h = min(self._rows_height() + 2, self._MAX_LIST_H)   # + viewport padding
+        h += self._btn_row.sizeHint().height() + 2           # + root spacing
         return QSize(sh.width(), h)
+
+    def showEvent(self, ev):
+        # Re-assert the hint when the field row is revealed: config loads
+        # rebuild the rows while this widget is still hidden.
+        super().showEvent(ev)
+        self.updateGeometry()
 
     def __init__(self, parent=None):
         super().__init__(parent)
