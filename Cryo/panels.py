@@ -1640,8 +1640,12 @@ class TrajectoryPanel(QWidget):
 
         # ── Field panel ───────────────────────────────────────────────────────
         # Layout (all always visible, side-by-side):
-        #   [AC params]  |  [Field / Hc monitor]  |  [DC params]  |  [DC live plot]
+        #   [Field Sweep params]  |  [field/temperature monitor]  |  [Temp Sweep params]
         # A compact sub-mode selector at the top selects which scan Start runs.
+        # Cryo has NO DC hysteresis: the second sub-mode is the Temperature
+        # Sweep (FIELD engine, AttoDRY temperature setpoint as the axis).  The
+        # `_ac_grp` / `_dc_grp` / `rb_dc_hy` names are inherited from the shared
+        # Samba_main layout and kept only because samba_cryo.py refers to them.
         self.field_w = QWidget(); fw_root = QVBoxLayout(self.field_w)
         fw_root.setContentsMargins(0, 0, 0, 0); fw_root.setSpacing(3)
 
@@ -1692,8 +1696,12 @@ class TrajectoryPanel(QWidget):
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
         ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
         fgl.addLayout(ac_mon_row, 3, 0, 1, 2)
-        self._ac_grp.setMinimumWidth(260)
-        horiz.addWidget(self._ac_grp)
+        # Roughly twice the old width (min was 260, no cap).  A stretch factor
+        # lets the group shrink towards its minimum on narrow screens instead
+        # of clipping; the monitor canvas in the middle takes what is left.
+        self._ac_grp.setMinimumWidth(430)
+        self._ac_grp.setMaximumWidth(620)
+        horiz.addWidget(self._ac_grp, stretch=3)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
         self._field_hist_t: collections.deque = collections.deque(maxlen=120)
@@ -1705,9 +1713,9 @@ class TrajectoryPanel(QWidget):
         self._field_fig = Figure(figsize=(2.8, 1.8), dpi=90, facecolor="#1e1e2e")
         self._field_ax  = self._field_fig.add_subplot(111)
         self._field_canvas = FigureCanvas(self._field_fig)
-        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(160)
+        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(140)
         self._style_field_ax("ac")
-        horiz.addWidget(self._field_canvas, stretch=2)
+        horiz.addWidget(self._field_canvas, stretch=1)
 
         # ── Column 3: Temperature Sweep params ─────────────────────────────────
         self._dc_grp = QGroupBox("Temperature Sweep"); dc_pgl = QGridLayout(self._dc_grp)
@@ -1773,8 +1781,10 @@ class TrajectoryPanel(QWidget):
         self._dc_mon_ch = NoScrollComboBox(); self._dc_mon_ch.setStyleSheet("font-size:10px;")
         dc_mon_row.addWidget(self._dc_mon_ch, stretch=1)
         dc_pgl.addLayout(dc_mon_row, 5, 0, 1, 4)
-        self._dc_grp.setMinimumWidth(280)
-        horiz.addWidget(self._dc_grp)
+        # Twice the old width (min was 280, no cap) — see the Field group above.
+        self._dc_grp.setMinimumWidth(420)
+        self._dc_grp.setMaximumWidth(600)
+        horiz.addWidget(self._dc_grp, stretch=3)
 
         fw_root.addLayout(horiz)
         self.field_w.setVisible(False)

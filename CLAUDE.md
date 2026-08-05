@@ -3082,6 +3082,20 @@ a 1368 px panel up to 2560 px, plot shrinks (766 → 192 px at minimum width) �
 the trade-off the user chose. The panel's own minimum width is unchanged at
 1368 px (set by the metadata top row, not this row), so nothing new clips.
 
+### Cryo Field Sweep / Temperature Sweep groups widened too
+Same treatment in `Cryo/panels.py` (they were `min 260` / `min 280` with no cap,
+rendering 379 / 280 px): `min 430 / max 620` and `min 420 / max 600`, stretch
+**3 : 1 : 3**, canvas minimum 160 → 140. Measured 575 → 620 / 575 → 600 px from
+1368 px up to 1920 px; the Cryo panel minimum width is also unchanged (1368 px).
+**Cryo has no DC hysteresis** — its second field sub-mode is the Temperature
+Sweep (FIELD engine + AttoDRY temperature setpoint). The `_ac_grp` / `_dc_grp` /
+`rb_dc_hy` attribute names there are inherited from the shared Samba_main
+layout and are kept only because `samba_cryo.py` refers to them; the stale
+"[DC params] | [DC live plot]" layout comment was corrected to say so. The
+`hyst_*` config keys still exist in `Cryo/config.py` (and were renamed in step 2
+for cross-app consistency) but no Cryo scan path uses them — `samba_cryo.py`
+calls `right_panel.set_dc_mode(False)`.
+
 ### Mirror shift moved below incidence + remembered per incidence
 The shift spinbox sat to the *right* of the incidence combo and was only
 visible for LMOKE±. Now (both apps' `MokeMetadataGroup` —
