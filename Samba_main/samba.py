@@ -42,8 +42,9 @@ try:
 except ImportError:
     TANGO_AVAILABLE = False
 
-from config  import SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup, make_default_config
-from hardware import get_proxy, safe_read, evict_proxy
+from config  import (SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup,
+                    make_default_config, APP_VERSION)
+from hardware import get_proxy, fresh_proxy, safe_read, safe_write, evict_proxy
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
@@ -217,7 +218,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Samba v3 — ETH Zürich")
+        self.setWindowTitle(f"Samba v{APP_VERSION} — ETH Zürich")
         try:
             from core.easter_egg import install_easter_egg
             install_easter_egg(self)
@@ -231,6 +232,10 @@ class MainWindow(QMainWindow):
         self._worker:            Optional[ScanWorker]     = None
         self._sl_worker:         Optional[ScanlistWorker] = None
         self._scan_running:      bool                     = False
+        # "Zero after scan": axes to return to 0, resolved at scan start.
+        # Disarmed on abort/close so stopping a scan never triggers new motion.
+        self._zero_plan:         list                     = []
+        self._zero_armed:        bool                     = False
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
         self._active_setup_name: str                      = "Green"
@@ -856,6 +861,10 @@ class MainWindow(QMainWindow):
         self.sl_panel.settle.valueChanged.connect(self._sync_sl_timing_to_traj)
         self.sl_panel.timeout.valueChanged.connect(self._sync_sl_timing_to_traj)
 
+        # ── Polarity control → persist into the active config ────────────────
+        # Only user toggles reach this; load_config() sets the buttons silently.
+        self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
+
         # ── BD Calibration panel callbacks ────────────────────────────────────
         self.bd_cal_panel.set_callbacks(
             save_cb=self._bd_cal_save,
@@ -1071,6 +1080,8 @@ class MainWindow(QMainWindow):
         self.right_panel.load_dc_sources(cfg.get("hyst_sources", [1, 2, 3, 4, 5, 6]))
         self.right_panel.set_dc_mode(cfg.get("scan_type") == "DC_HYST")
         self.sl_panel.set_active_name(cfg.get("name","—"))
+        # Polarity control (relay / field flip) — silent load, no re-save
+        self.sl_panel.load_config(cfg)
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
@@ -1096,6 +1107,7 @@ class MainWindow(QMainWindow):
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1)
         old = configs[idx]; old.update(self.traj_panel.get_config_partial())
+        old.update(self.sl_panel.get_config_partial())   # polarity control
         old["sensors"]        = self.right_panel.get_sensors()
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
@@ -1256,6 +1268,18 @@ class MainWindow(QMainWindow):
             self.traj_panel.timeout.setValue(self.sl_panel.timeout.value())
         finally:
             self._timing_syncing = False
+
+    # ── Polarity control ──────────────────────────────────────────────────────
+    def _on_polarity_changed(self):
+        """Persist a user toggle of Relay/Field flip into the active config.
+
+        Skipped while a scan runs: the running worker holds its own polarity
+        settings, so writing a mid-run change to disk would misdescribe the
+        measurement in progress.
+        """
+        if self._scan_running:
+            return
+        self._save_active_config()
 
     # ── BD Calibration callbacks ──────────────────────────────────────────────
     def _bd_cal_save(self, vals: list):
@@ -1584,6 +1608,58 @@ class MainWindow(QMainWindow):
             self._log_append(f"Field setpoint {val:.4g} A applied to magnet "
                              f"(scan start)", level="info")
 
+    # ── "Zero after scan" ─────────────────────────────────────────────────────
+    def _arm_zero_after_scan(self, cfg: dict):
+        """Resolve which axes return to 0 when this run finishes.
+
+        An axis qualifies only if the scan actually moves it, so a disabled
+        axis never causes unexpected motion.  Field, DC-hyst, TR-MOKE and
+        calibration time scans carry no per-axis zero keys (or no enabled
+        axis), so they resolve to an empty plan.  Resolved once at start:
+        editing the config mid-scan cannot retarget a pending move.
+        """
+        plan = []
+        for pfx, scan_key in (("act1", "scan_x"), ("act2", "scan_y")):
+            if not (cfg.get(scan_key) and cfg.get(f"{pfx}_zero_after")):
+                continue
+            dev  = str(cfg.get(f"{pfx}_device", "")).strip()
+            attr = str(cfg.get(f"{pfx}_attr",   "")).strip()
+            if dev and attr:
+                plan.append({"device": dev, "attr": attr,
+                             "label": cfg.get(f"{pfx}_label", pfx)})
+        self._zero_plan  = plan
+        self._zero_armed = bool(plan)
+
+    def _run_zero_after_scan(self):
+        """Send the armed axes back to 0 (background thread — TANGO writes block)."""
+        plan, self._zero_plan = self._zero_plan, []
+        armed, self._zero_armed = self._zero_armed, False
+        if not (armed and plan):
+            return
+        self._log_append(
+            "Zero after scan — returning "
+            f"{', '.join(p['label'] for p in plan)} to 0…", level="info")
+
+        def _work():
+            out = []
+            for p in plan:
+                proxy, err = fresh_proxy(p["device"])
+                # A SimProxy would silently swallow the write on real hardware.
+                if err and TANGO_AVAILABLE:
+                    out.append((f"⚠ Zero after scan: {p['label']} device "
+                                f"'{p['device']}' unreachable — not moved ({err})",
+                                "warning"))
+                    continue
+                werr = safe_write(proxy, p["attr"], 0.0)
+                out.append(
+                    (f"⚠ Zero after scan: {p['label']} → 0 failed ({werr})", "warning")
+                    if werr else
+                    (f"✓ Zero after scan: {p['label']} → 0", "info"))
+            self._post_to_main.emit(
+                lambda: [self._log_append(m, level=lv) for m, lv in out])
+
+        threading.Thread(target=_work, daemon=True, name="zero_after_scan").start()
+
     def _wire_worker(self, worker: ScanWorker):
         """Connect the standard signals shared by all scan workers."""
         worker.point_done.connect(self._on_point)
@@ -1626,6 +1702,7 @@ class MainWindow(QMainWindow):
             return
 
         self._current_scan_cfg = cfg
+        self._arm_zero_after_scan(cfg)
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
         # DC_HYST: reset DC live-plot accumulators
         if cfg.get("scan_type") == "DC_HYST":
@@ -1747,6 +1824,7 @@ class MainWindow(QMainWindow):
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
+        self._arm_zero_after_scan(cfg)   # no axis enabled → empty plan
         self._calib_timescan = True
 
         # Plot the sensors marked visible in the right panel; they keep their
@@ -1869,6 +1947,7 @@ class MainWindow(QMainWindow):
         if cfg_type == "DC_HYST":
             self._log_append("DC hyst complete — auto-zeroing field…", level="info")
             self.traj_panel.hw.demagnetize()
+        self._run_zero_after_scan()
         try: self.data_browser.refresh()
         except Exception:
             log.debug("Data browser refresh failed after scan", exc_info=True)
@@ -1915,6 +1994,7 @@ class MainWindow(QMainWindow):
 
     def _abort_scan(self):
         if not self._scan_running: return
+        self._zero_armed = False   # Abort must never start new stage motion
         if self._worker: self._worker.abort()
         self.status_lbl.setText("Aborting…")
 
@@ -1927,11 +2007,41 @@ class MainWindow(QMainWindow):
         active = self._prepare_scan(cfg)
         if active is None: return
 
+        sl = self.sl_panel.get_settings()
+        # ── Polarity-control reminder ────────────────────────────────────────
+        # Checked before anything with a side effect (plot buffers cleared,
+        # field setpoint written), so Cancel leaves the app exactly as it was.
+        # Deliberately ahead of the setup lock: cancelling after acquiring it
+        # would leave the setup marked busy to every other computer, since the
+        # lock is only released when a scan finishes.
+        if not (sl["relay_flip"] or sl["field_flip"]):
+            if QMessageBox.warning(
+                    self, "No polarity control",
+                    "Neither Relay flip nor Field flip is enabled.\n\n"
+                    "Every scan in this list will be measured at the same "
+                    "polarity, so the analysis cannot separate the positive "
+                    "and negative groups.\n\n"
+                    "Start the scanlist anyway?",
+                    QMessageBox.StandardButton.Ok
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel
+            ) != QMessageBox.StandardButton.Ok:
+                self.status_lbl.setText(
+                    "Scanlist not started — no polarity control selected")
+                return
+
         # ── Setup lock ────────────────────────────────────────────────────────
         if not self._acquire_setup_lock():
             return
 
-        self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
+        # Record the polarity configuration in every file of this list.  Set
+        # here rather than in _build_full_config() so single scans — which
+        # never flip anything — don't claim a flip setting that never applied.
+        cfg["relay_flip"] = sl["relay_flip"]
+        cfg["field_flip"] = sl["field_flip"]
+
+        self._current_scan_cfg = cfg
+        self._arm_zero_after_scan(cfg)
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         # BD calibration is injected in _build_full_config() (shared path).
@@ -1993,6 +2103,7 @@ class MainWindow(QMainWindow):
 
     def _on_scanlist_done(self, txt_path: str):
         self._status_bar_run_finish()
+        self._run_zero_after_scan()
         try: self.data_browser.refresh()
         except Exception:
             log.debug("Data browser refresh failed after scanlist", exc_info=True)
@@ -2049,6 +2160,7 @@ class MainWindow(QMainWindow):
 
     def _abort_scanlist(self):
         if not self._scan_running: return
+        self._zero_armed = False   # Abort must never start new stage motion
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting scanlist…")
 
@@ -2258,6 +2370,7 @@ class MainWindow(QMainWindow):
             r = QMessageBox.question(self, "Scan running", "Abort and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if r == QMessageBox.StandardButton.No: ev.ignore(); return
+            self._zero_armed = False   # quitting must never start new stage motion
             for w in [self._worker, self._sl_worker]:
                 if w: w.abort(); w.wait(2000)
         self._save_active_config()

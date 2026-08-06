@@ -3290,3 +3290,188 @@ config-switch resize: 1 segment → 105 px box, load a 5-segment config → 212 
 with all five rows visible and no scrollbar (with the scroll area's sizeHint
 pinned stale), then back to 105 px. Plus the earlier 51/18/28/10 harness checks
 and `python test_runner.py` 74 OK.
+
+## 56. Recent Changes (August 2026) — Per-Axis "Zero after scan" Toggle (Samba_main)
+
+Branch `claude/zero-after-scan-toggle` (72 tests). User request: a toggle next
+to each Spatial axis' "Scan enabled" checkbox that sends the stage back to 0
+once the measurement is over — for a map, back to (0, 0).
+
+### UI (`Samba_main/panels/trajectory.py`)
+`ActuatorGroup` row 0 became an HBox holding the existing "Scan enabled"
+checkbox plus a new checkable **"Zero after scan"** pill (`zero_after_btn`,
+green `#a6e3a1` when armed, matching the fast-axis pills). Both the X and Y
+groups get one, so a 2-D map with both armed returns to (0, 0).
+`_on_axis_toggled` greys the pill out when its axis is not scanned — the
+toggle only means anything for an axis the scan actually moves.
+
+### Persistence (`Samba_main/config.py`)
+Per-axis keys `act1_zero_after` / `act2_zero_after`, round-tripped by
+`ActuatorGroup.load()` / `get_partial()` (so they ride the existing
+`p.update(self.act1_grp.get_partial("act1"))` path — no special-casing in
+`get_config_partial`). Added to `make_default_config`; schema bumped to **v7**
+with `_migrate_v6_to_v7` backfilling `False` on old configs (renumbered from
+v5→v6 when merging: `main` published its own v5→v6 for the DC-hyst Ampere
+rename).
+
+### Execution (`Samba_main/samba.py`)
+- `_arm_zero_after_scan(cfg)` resolves the axes **once at scan start** into
+  `_zero_plan`, so editing the config mid-scan cannot retarget a pending move.
+  An axis qualifies only when `scan_x`/`scan_y` **and** its `*_zero_after` key
+  are set, which is what keeps every other scan type out: FIELD / DC_HYST /
+  TR-MOKE return their own dicts from `get_config_partial()` that carry no
+  `*_zero_after` keys, and the calibration time scan forces both axes off.
+  **This matters for TR-MOKE**, whose `act1_device` is the DG645 and whose
+  `scan_type` is rewritten to `SPATIAL` in `_start_scan` — a `scan_type` check
+  alone would have driven the delay generator to 0.
+- `_run_zero_after_scan()` writes 0.0 to each planned axis on a **daemon
+  thread** (a TANGO write blocks up to 10 s; two axes would freeze the GUI),
+  reporting back through the existing `_post_to_main` signal. Uses
+  `fresh_proxy()` so a cached `SimProxy` cannot silently swallow the write on
+  real hardware; an unreachable device is logged and skipped, never faked.
+- Called from `_on_worker_finished` (single scan) and `_on_scanlist_done`
+  (whole list only — not between scanlist items).
+- **Aborting never moves the stage**: `_abort_scan`, `_abort_scanlist` and
+  `closeEvent` clear `_zero_armed`. Abort means stop, so it must not start new
+  motion — the log says so instead.
+
+### Scope / tests
+Samba_main only (per user); `Cryo/panels.py` has its own independent
+`ActuatorGroup` copy and is untouched. `test_runner.py` +3 → 72
+(`TestZeroAfterScanConfig`: defaults off, v6→v7 backfill, existing choice
+preserved). The plan/execute logic and the panel round-trip were verified
+against the real shipped methods with PyQt6 stubbed (PyQt6 is absent from the
+CI env, so that scaffolding is not committed): both-axes/one-axis/disabled-axis
+arming, TR-MOKE and time scans arming nothing, re-arm clearing a stale plan,
+writes reaching both attrs, disarmed abort writing nothing, and unreachable
+device / write failure surfacing as warnings.
+
+---
+
+## 57. Recent Changes (August 2026) — Scanlist Polarity Control Persisted + Start Reminder
+
+Branch `claude/zero-after-scan-toggle` (77 tests). Samba_main only — Cryo has
+its own independent `ScanlistPanel` (`Cryo/panels.py:2249`) and is untouched.
+
+### Polarity control is now persisted and recorded
+The Scanlist tab's "Polarity control" group (Relay flip / Field flip) was
+**session-only UI state**: `ScanlistPanel` had no load/save path at all, so both
+toggles silently reset to OFF on every restart, and nothing in the saved data
+recorded whether flipping had been enabled.
+
+- **Config keys** `relay_flip` / `field_flip`, round-tripped through the new
+  `ScanlistPanel.load_config()` / `get_config_partial()`. Wired in `samba.py`
+  via `_load_active_config` (silent load) and `_save_active_config`
+  (`old.update(self.sl_panel.get_config_partial())`, applied after the
+  trajectory partial — the two key sets are disjoint).
+- **Saved on toggle**: new `ScanlistPanel.polarity_changed` signal →
+  `MainWindow._on_polarity_changed` → `_save_active_config()`. Skipped while a
+  scan runs, so a mid-run toggle can't rewrite the config describing the
+  measurement in progress.
+- `_load_flip()` sets the button through `blockSignals` **and refreshes the
+  caption explicitly** — the `toggled` handler that normally keeps the ON/OFF
+  text in sync is suppressed by the block, so a plain silent `setChecked` would
+  leave the caption showing the previous state. The previous block state is
+  restored rather than forced to False.
+- **Schema v8** with `_migrate_v7_to_v8` backfilling `False`, preserving the old
+  "starts OFF" behaviour for existing configs.
+
+### Recorded in HDF5 — scanlist scans only
+`_write_hw_metadata` (`core/scan/runner.py`) writes `relay_flip` / `field_flip`
+**only when the key is present**. `_start_scanlist` injects them into the config
+after the reminder dialog; `_build_full_config()` deliberately does **not**, so a
+single scan — which flips nothing — has the attributes absent rather than
+recorded as `False`, which would claim a polarity configuration that never
+applied. The write sits in the shared `_write_hw_metadata`, so both `_open_hdf5`
+(SPATIAL/FIELD/TIME) and `_run_dc_hyst` pick it up from one edit. Cryo never
+sets the keys, so its files are unchanged.
+
+### Start-of-scanlist reminder
+Starting a scanlist with **neither** flip enabled pops a warning: every scan in
+the list is measured at one polarity, so the analysis cannot separate the
+positive and negative groups (it groups by `relay_sign × sign(field)`). Ok
+starts anyway; **Cancel is the default button** and aborts the start.
+
+The check sits after `_prepare_scan` (hard validation errors surface first —
+no point confirming a scan that cannot run) but **before every side effect**:
+plot buffers cleared, zero-after plan armed, field setpoint written to the
+magnet. Cancel therefore leaves the application exactly as it was.
+
+### Tests / verification
+- `test_runner.py` +5 → 77: `TestPolarityControlConfig` — defaults off, v6→v7
+  backfill, existing choice preserved, HDF5 records the flags when set, and
+  omits them entirely when absent.
+- The GUI paths were verified against the real shipped methods with PyQt6
+  stubbed (38 checks, not committed — PyQt6 is absent from the env): panel
+  round-trip incl. caption/blockSignals behaviour and silence on load; Cancel
+  producing no side effects, no hardware write and an unmutated config; Ok
+  proceeding and injecting the flags; no popup when either flip is on; and the
+  dialog defaulting to Cancel.
+
+---
+
+## 58. Recent Changes (August 2026) — App Version Scheme & "Recent" Y-Scale Mode
+
+Branch `claude/zero-after-scan-toggle` (85 tests).
+
+### Application version in the title (`Samba_main`)
+The window title was the static `"Samba v3 — ETH Zürich"`. It now reads
+`Samba v{APP_VERSION} — ETH Zürich`, with **`APP_VERSION = "13.01"`** in
+`Samba_main/config.py` (the numbering deliberately skips ahead from v3).
+
+**Convention: bump the decimal part on every regular commit** — v13.01 → v13.02
+→ … — and the major part only for a release or breaking change. `APP_VERSION`
+is separate from `SCHEMA_VERSION` in the same file, which tracks the on-disk
+scan-config format and must only move when that format changes.
+
+Cryo's title (`"Samba Cryo — ETH Zürich"`) never carried a version and is
+unchanged.
+
+### Full / Recent y-scale pill (both apps — shared `core/`)
+The **"Auto-scale" checkbox** on the live 1D plot is **replaced** by a two-pill
+group in the same toolbar slot, and the same control is **added to the
+calibration plot**, which previously had no scale control at all:
+
+- **Full** (default) — rescale y to all data on every update; the historic
+  behaviour.
+- **Recent** — y-limits become **symmetric ±max|y| over the last 50 points**.
+  Zero therefore sits exactly in the middle and the range *shrinks as the
+  signal is nulled*, which is the point: following a value down through
+  several orders of magnitude while hunting for zero. A full-range autoscale
+  cannot do this, because one early large value keeps the axis wide forever.
+
+The **x-axis always follows the full data range** in both modes — only the y
+rule changes.
+
+**Note (supersedes §27):** the checkbox's *unchecked* state — which froze the
+limits so a manual zoom/pan survived live updates — is gone. A manual zoom is
+now reset on the next update in both modes.
+
+**Implementation** — `core/plot_interact.py` (shared, Qt imported lazily so the
+module stays import-safe headless):
+- `recent_symmetric_ylim(y_arrays, window=RECENT_WINDOW)` — max|y| over each
+  array's tail, combined across the curves sharing an axis. Returns `None`
+  when there is no finite data (caller leaves the limits alone), and a tiny
+  non-zero symmetric range when the tail is all exactly zero — matplotlib
+  rejects a zero-width range, and a fully nulled signal must not crash the
+  live plot.
+- `make_scale_pills(on_change, parent)` → `(widget, mode_getter)`;
+  `SCALE_FULL` / `SCALE_RECENT` / `RECENT_WINDOW = 50`.
+
+Call sites: `Live1DWidget.__init__` + `_throttled_draw`
+(`core/plot_widgets.py`), and `FocusPlotWidget.__init__` +
+`_rescale_focus_y` / `_ts_throttled_draw` (`core/calibration.py`) — the latter
+covers **both** calibration modes, autofocus and time scan. The 2D widget's
+separate "Auto color" checkbox is untouched.
+
+### Tests / verification
+- `test_runner.py` +8 → 85: `TestRecentSymmetricYlim` (symmetry about zero,
+  the window boundary ignoring older points, per-axis combination, NaN
+  handling, no-data → `None`, all-zero tail staying non-degenerate) and
+  `TestAppVersion` (title version matches the `X.YZ` scheme).
+- The wiring was verified against the real shipped draw methods with **real
+  matplotlib (Agg) axes** and Qt stubbed (29 checks, not committed): pill
+  defaults to Full and switches exclusively; Recent ignores an early 1000×
+  transient and centres zero while Full still spans it; Y1/Y2 scale
+  independently; x still autoscales; all-NaN data and a not-yet-created curve
+  are survivable.

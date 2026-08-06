@@ -1504,6 +1504,104 @@ class TestSetupLoadStatus(unittest.TestCase):
         self.assertNotIn("_load_status", saved)
 
 
+class TestZeroAfterScanConfig(unittest.TestCase):
+    """Per-axis 'Zero after scan' persistence contract.
+
+    The flag decides whether real stage motion happens once a scan ends, so
+    it must default to False everywhere: a config that predates the feature
+    must never come back armed."""
+
+    def _fresh_config(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_zero",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_defaults_present_and_off(self):
+        cfgmod = self._fresh_config()
+        cfg = cfgmod.make_default_config("scan")
+        self.assertIs(cfg["act1_zero_after"], False)
+        self.assertIs(cfg["act2_zero_after"], False)
+
+    def test_migration_backfills_old_config(self):
+        cfgmod = self._fresh_config()
+        old = {"_schema_version": 5, "scan_type": "SPATIAL"}
+        cfgmod._migrate_config(old)
+        self.assertIs(old["act1_zero_after"], False)
+        self.assertIs(old["act2_zero_after"], False)
+        self.assertEqual(old["_schema_version"], cfgmod.SCHEMA_VERSION)
+
+    def test_migration_preserves_existing_choice(self):
+        cfgmod = self._fresh_config()
+        cfg = {"_schema_version": 5, "act1_zero_after": True}
+        cfgmod._migrate_config(cfg)
+        self.assertIs(cfg["act1_zero_after"], True)
+        self.assertIs(cfg["act2_zero_after"], False)
+
+
+class TestPolarityControlConfig(unittest.TestCase):
+    """Scanlist polarity control (relay / field flip) persistence + metadata.
+
+    The flags decide whether the analysis can separate positive and negative
+    polarity groups, so they must round-trip into the config and be recorded
+    in the HDF5 file of every scanlist scan — but stay absent on single scans,
+    which flip nothing."""
+
+    def _fresh_config(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_polarity",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_defaults_present_and_off(self):
+        cfg = self._fresh_config().make_default_config("scan")
+        self.assertIs(cfg["relay_flip"], False)
+        self.assertIs(cfg["field_flip"], False)
+
+    def test_migration_backfills_old_config(self):
+        cfgmod = self._fresh_config()
+        old = {"_schema_version": 6, "scan_type": "SPATIAL"}
+        cfgmod._migrate_config(old)
+        self.assertIs(old["relay_flip"], False)
+        self.assertIs(old["field_flip"], False)
+        self.assertEqual(old["_schema_version"], cfgmod.SCHEMA_VERSION)
+
+    def test_migration_preserves_existing_choice(self):
+        cfgmod = self._fresh_config()
+        cfg = {"_schema_version": 6, "field_flip": True}
+        cfgmod._migrate_config(cfg)
+        self.assertIs(cfg["field_flip"], True)
+        self.assertIs(cfg["relay_flip"], False)
+
+    def _meta_attrs(self, cfg):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "pol.h5")
+        with h5py.File(p, "w") as f:
+            _runner_mod._write_hw_metadata(f.create_group("metadata"), cfg)
+        with h5py.File(p, "r") as f:
+            return dict(f["metadata"].attrs)
+
+    def test_hdf5_records_flags_when_set(self):
+        a = self._meta_attrs({"relay_flip": True, "field_flip": False})
+        self.assertTrue(bool(a["relay_flip"]))
+        self.assertFalse(bool(a["field_flip"]))
+
+    def test_hdf5_omits_flags_for_single_scan(self):
+        """A single scan never sets the keys — recording False would claim a
+        polarity configuration that was never applied."""
+        a = self._meta_attrs({})
+        self.assertNotIn("relay_flip", a)
+        self.assertNotIn("field_flip", a)
+
+
 class TestNStepPair(unittest.TestCase):
     """core/nstep.py — N ↔ Δ-step coupling used by the trajectory panels."""
 
@@ -1600,6 +1698,78 @@ class TestNStepPair(unittest.TestCase):
         s.setValue(1e-6)                           # must not raise
         self.assertEqual(n.value(), 10000)         # clamped to the N box max
         self.assertEqual(pair.anchor, "step")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. Live plots — "Recent" y-scale mode (±max|y| over the last N points)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import plot_interact as _pi_mod                          # noqa: E402
+
+
+class TestRecentSymmetricYlim(unittest.TestCase):
+    """core/plot_interact.recent_symmetric_ylim — the maths behind the
+    Full/Recent y-scale pill on the 1D and calibration plots.
+
+    The mode exists to follow a signal down to zero across orders of
+    magnitude, so the two properties that matter are: zero stays exactly
+    centred, and old large values must not keep the axis wide."""
+
+    def test_symmetric_about_zero(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[-3.0, 1.0, 2.0]])
+        self.assertAlmostEqual(lo, -hi)
+        self.assertGreaterEqual(hi, 3.0)        # covers max|y|, plus padding
+
+    def test_ignores_points_before_the_window(self):
+        """A huge early transient must not hold the axis open — that is the
+        whole point of the mode."""
+        y = [1000.0] * 50 + [1e-6] * 50         # settles to µ-scale
+        lo, hi = _pi_mod.recent_symmetric_ylim(y and [y], window=50)
+        self.assertLess(hi, 1e-5)
+        self.assertAlmostEqual(lo, -hi)
+
+    def test_window_shorter_than_data_available(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[5.0, 4.0, 3.0]], window=2)
+        self.assertGreaterEqual(hi, 4.0)        # last two are 4 and 3
+        self.assertLess(hi, 5.0)                # the 5.0 is outside the window
+
+    def test_combines_across_curves_on_one_axis(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[0.1, 0.2], [-7.0, 0.3]])
+        self.assertGreaterEqual(hi, 7.0)
+        self.assertAlmostEqual(lo, -hi)
+
+    def test_nan_is_ignored(self):
+        y = [np.nan, 2.0, np.nan, 1.0]
+        lo, hi = _pi_mod.recent_symmetric_ylim([y])
+        self.assertGreaterEqual(hi, 2.0)
+        self.assertTrue(np.isfinite(lo) and np.isfinite(hi))
+
+    def test_no_finite_data_returns_none(self):
+        """Caller leaves the existing limits alone rather than collapsing."""
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([]))
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([[]]))
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([[np.nan, np.inf]]))
+
+    def test_all_zero_tail_stays_non_degenerate(self):
+        """matplotlib rejects a zero-width range; a nulled signal must not
+        crash the live plot."""
+        lo, hi = _pi_mod.recent_symmetric_ylim([[0.0, 0.0, 0.0]])
+        self.assertLess(lo, hi)
+        self.assertAlmostEqual(lo, -hi)
+
+
+class TestAppVersion(unittest.TestCase):
+    """Samba_main window title carries the vX.YZ application version."""
+
+    def test_version_matches_scheme(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_version",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertRegex(mod.APP_VERSION, r"^\d+\.\d{2}$")
 
 
 if __name__ == '__main__':

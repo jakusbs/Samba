@@ -24,7 +24,8 @@ from PyQt6.QtCore import QTimer
 from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
-                           set_multicolor_ylabel)
+                           set_multicolor_ylabel, make_scale_pills,
+                           recent_symmetric_ylim, SCALE_RECENT)
 from theme import DIVERGING_CMAPS
 
 REDRAW_INTERVAL_MS = 80
@@ -189,13 +190,10 @@ class Live1DWidget(QWidget):
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
-        self.autoscale_cb = QCheckBox("Auto-scale"); self.autoscale_cb.setChecked(True)
-        self.autoscale_cb.setToolTip(
-            "Rescale axes to the data on every update.\n"
-            "Uncheck to keep your zoom/pan during a live scan.")
-        self.autoscale_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
-        self.autoscale_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
-        top.addWidget(self.autoscale_cb)
+        # Y-scale mode: Full (all data) or Recent (±max|y| of the last N pts)
+        self._scale_w, self._scale_mode = make_scale_pills(
+            lambda: setattr(self, "_dirty", True), self)
+        top.addWidget(self._scale_w)
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -302,32 +300,37 @@ class Live1DWidget(QWidget):
                 m = np.isfinite(y)
                 if m.any(): line.set_data(np.arange(len(y))[m], y[m])
 
-        # Autoscale (skip entirely when the user has unchecked it, so a manual
-        # zoom/pan survives live updates instead of being reset every frame).
-        if self.autoscale_cb.isChecked():
-            # Manually compute limits — relim() is unreliable on twinx.
-            # X-axis is shared between ax1 and ax2, so compute x from all lines.
-            all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
-                         for l in ax.get_lines()
-                         if len(l.get_xdata()) > 0]
-            if all_lines:
-                all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
-                mx = np.isfinite(all_x)
-                if mx.any():
-                    xlo, xhi = all_x[mx].min(), all_x[mx].max()
-                    pad = max(abs(xhi - xlo) * 0.02, 1e-12)
-                    self.ax1.set_xlim(xlo - pad, xhi + pad)
-            # Y-limits per axis (independent)
-            for ax in [self.ax1, self.ax2]:
-                lines = [l for l in ax.get_lines()
-                         if len(l.get_ydata()) > 0]
-                if not lines: continue
-                all_y = np.concatenate([l.get_ydata() for l in lines])
-                my = np.isfinite(all_y)
-                if my.any():
-                    ylo, yhi = all_y[my].min(), all_y[my].max()
-                    pad = max(abs(yhi - ylo) * 0.05, 1e-12)
-                    ax.set_ylim(ylo - pad, yhi + pad)
+        # Autoscale.  X always follows the full data range; only the y-scale
+        # rule changes with the Full/Recent pill.
+        recent = self._scale_mode() == SCALE_RECENT
+        # Manually compute limits — relim() is unreliable on twinx.
+        # X-axis is shared between ax1 and ax2, so compute x from all lines.
+        all_lines = [(l, ax) for ax in [self.ax1, self.ax2]
+                     for l in ax.get_lines()
+                     if len(l.get_xdata()) > 0]
+        if all_lines:
+            all_x = np.concatenate([l.get_xdata() for l, _ in all_lines])
+            mx = np.isfinite(all_x)
+            if mx.any():
+                xlo, xhi = all_x[mx].min(), all_x[mx].max()
+                pad = max(abs(xhi - xlo) * 0.02, 1e-12)
+                self.ax1.set_xlim(xlo - pad, xhi + pad)
+        # Y-limits per axis (independent)
+        for ax in [self.ax1, self.ax2]:
+            lines = [l for l in ax.get_lines()
+                     if len(l.get_ydata()) > 0]
+            if not lines: continue
+            if recent:
+                lim = recent_symmetric_ylim([l.get_ydata() for l in lines])
+                if lim is not None:
+                    ax.set_ylim(*lim)
+                continue
+            all_y = np.concatenate([l.get_ydata() for l in lines])
+            my = np.isfinite(all_y)
+            if my.any():
+                ylo, yhi = all_y[my].min(), all_y[my].max()
+                pad = max(abs(yhi - ylo) * 0.05, 1e-12)
+                ax.set_ylim(ylo - pad, yhi + pad)
         self.canvas.draw_idle()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────

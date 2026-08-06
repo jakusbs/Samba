@@ -25,7 +25,8 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
-                           set_multicolor_ylabel)
+                           set_multicolor_ylabel, make_scale_pills,
+                           recent_symmetric_ylim, SCALE_RECENT)
 from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
@@ -173,6 +174,10 @@ class FocusPlotWidget(QWidget):
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
+        # Y-scale mode: Full (all data) or Recent (±max|y| of the last N pts)
+        self._scale_w, self._scale_mode = make_scale_pills(
+            self._on_scale_mode, self)
+        top.addWidget(self._scale_w)
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -203,6 +208,25 @@ class FocusPlotWidget(QWidget):
         self.ax.set_title("Autofocus", color="#6c7086", fontsize=self._font_pt)
         # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
         eng_axis(self.ax.yaxis)
+
+    def _on_scale_mode(self):
+        """Y-scale pill changed — re-apply the limits immediately."""
+        self._ts_dirty = True        # time scan picks it up on the next tick
+        self._rescale_focus_y()      # autofocus curve rescales right away
+        self.canvas.draw_idle()
+
+    def _rescale_focus_y(self):
+        """Apply the current y-scale mode to the autofocus curve.
+
+        X always follows the full data range; only the y rule changes.
+        """
+        if self._line is None:
+            return
+        self.ax.relim(); self.ax.autoscale_view()
+        if self._scale_mode() == SCALE_RECENT:
+            lim = recent_symmetric_ylim([self._fl_data])
+            if lim is not None:
+                self.ax.set_ylim(*lim)
 
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
@@ -248,7 +272,7 @@ class FocusPlotWidget(QWidget):
                                         marker=".", markersize=5)
         else:
             self._line.set_data(self._z_data, self._fl_data)
-        self.ax.relim(); self.ax.autoscale_view()
+        self._rescale_focus_y()
         self.canvas.draw_idle()
 
     def mark_best(self, z: float, fl: float):
@@ -368,10 +392,16 @@ class FocusPlotWidget(QWidget):
                 xlo, xhi = ax_x[mx].min(), ax_x[mx].max()
                 pad = max(abs(xhi - xlo) * 0.02, 1e-12)
                 self.ax.set_xlim(xlo - pad, xhi + pad)
+            recent = self._scale_mode() == SCALE_RECENT
             for axis in (self.ax, self._ts_ax2):
                 if axis is None: continue
                 ys = [l.get_ydata() for l in all_lines if l.axes is axis]
                 if not ys: continue
+                if recent:
+                    lim = recent_symmetric_ylim(ys)
+                    if lim is not None:
+                        axis.set_ylim(*lim)
+                    continue
                 ay = np.concatenate(ys)
                 my = np.isfinite(ay)
                 if my.any():

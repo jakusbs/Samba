@@ -8,8 +8,14 @@ from typing import Dict, List, TypedDict, Optional
 
 log = logging.getLogger(__name__)
 
+# Application version, shown in the main window title as "Samba vX.YZ".
+# Convention: bump the decimal part on every regular commit; the major part
+# only for a release/breaking change.  Independent of SCHEMA_VERSION below,
+# which tracks the on-disk scan-config format.
+APP_VERSION = "13.01"
+
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -193,9 +199,11 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act1_device": "smaract2/control/IR-controller",
         "act1_attr": "x", "act1_label": "X", "act1_unit": "nm",
         "act1_start": -10.0, "act1_stop": 10.0, "act1_npts": 51,
+        "act1_zero_after": False,
         "act2_device": "smaract2/control/IR-controller",
         "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
+        "act2_zero_after": False,
         "zigzag": True,
         "fast_axis": "act1",   # which axis is swept per line: act1 (X) or act2 (Y)
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
@@ -207,6 +215,11 @@ def make_default_config(name: str = "scan_x") -> dict:
         "field_x_unit":        "mT",             # Beckhoff magnet returns mT
         "field_setpoint_unit": "A",              # current commanded in Ampere
         "integration_time": 0.1, "settle_time": 0.05, "move_timeout": 15.0,
+        # Scanlist polarity control — alternate the optical relay and/or the
+        # magnet polarity between cycles.  The analysis groups scans by
+        # relay_sign × sign(field), so with neither enabled every scan in a
+        # list is measured at one polarity.
+        "relay_flip": False, "field_flip": False,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
@@ -379,6 +392,21 @@ def _migrate_v5_to_v6(cfg: dict):
     cfg.pop("hyst_field_V", None)
 
 
+def _migrate_v6_to_v7(cfg: dict):
+    """v6→v7: Add the per-axis 'Zero after scan' toggles.  Default False
+    preserves the old behaviour of leaving the stage where the scan ended."""
+    cfg.setdefault("act1_zero_after", False)
+    cfg.setdefault("act2_zero_after", False)
+
+
+def _migrate_v7_to_v8(cfg: dict):
+    """v7→v8: Persist the scanlist polarity control (relay / field flip).
+    These used to be session-only UI state that reset to OFF on restart;
+    False keeps that as the default for existing configs."""
+    cfg.setdefault("relay_flip", False)
+    cfg.setdefault("field_flip", False)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -386,6 +414,8 @@ _MIGRATIONS = [
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
     (6, _migrate_v5_to_v6),
+    (7, _migrate_v6_to_v7),
+    (8, _migrate_v7_to_v8),
 ]
 
 

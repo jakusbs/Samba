@@ -198,10 +198,30 @@ class ActuatorGroup(QGroupBox):
         super().__init__(title, parent)
         g = QGridLayout(self); g.setSpacing(4); g.setContentsMargins(8, 8, 8, 8)
 
-        # Row 0: Scan enabled checkbox
+        # Row 0: Scan enabled checkbox + "Zero after scan" toggle
+        row0 = QWidget(); r0 = QHBoxLayout(row0)
+        r0.setContentsMargins(0, 0, 0, 0); r0.setSpacing(6)
         self.scan_cb = QCheckBox("Scan enabled"); self.scan_cb.setChecked(enabled)
         self.scan_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        g.addWidget(self.scan_cb, 0, 0, 1, 6)
+        r0.addWidget(self.scan_cb); r0.addStretch()
+
+        self.zero_after_btn = QPushButton("Zero after scan")
+        self.zero_after_btn.setCheckable(True)
+        self.zero_after_btn.setFixedHeight(22)
+        self.zero_after_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.zero_after_btn.setToolTip(
+            f"Return the {lbl} axis to position 0 once the scan — or the whole "
+            f"scanlist — has finished.\nSkipped when the scan is aborted.")
+        self.zero_after_btn.setStyleSheet(
+            "QPushButton{background:#252538;border:1px solid #45475a;"
+            "color:#6c7086;font-size:10px;font-weight:bold;padding:0 10px;"
+            "border-radius:6px;}"
+            "QPushButton:hover:enabled{background:#313244;color:#cdd6f4;}"
+            "QPushButton:checked{background:#a6e3a1;color:#1e1e2e;border-color:#a6e3a1;}"
+            "QPushButton:disabled{background:#1e1e2e;color:#45475a;border-color:#313244;}")
+        self.zero_after_btn.setEnabled(enabled)
+        r0.addWidget(self.zero_after_btn)
+        g.addWidget(row0, 0, 0, 1, 6)
 
         _ro_style = ("background:#1e1e2e;color:#6c7086;border:1px solid #313244;"
                      "border-radius:4px;padding:2px 4px;")
@@ -273,6 +293,7 @@ class ActuatorGroup(QGroupBox):
 
     def load(self, pfx: str, cfg: dict, enabled: bool = True):
         self.scan_cb.setChecked(enabled)
+        self.zero_after_btn.setChecked(bool(cfg.get(f"{pfx}_zero_after", False)))
         # label and unit come from setup defaults (may be in cfg if already merged)
         self.lbl.setText(cfg.get(f"{pfx}_label", self.lbl.text()))
         self.unit_edit.setText(cfg.get(f"{pfx}_unit", self.unit_edit.text()))
@@ -288,6 +309,7 @@ class ActuatorGroup(QGroupBox):
             f"{pfx}_start": self.start.value(),
             f"{pfx}_stop":  self.stop.value(),
             f"{pfx}_npts":  self.get_npts(),
+            f"{pfx}_zero_after": self.zero_after_btn.isChecked(),
         }
 
 
@@ -1012,6 +1034,10 @@ class TrajectoryPanel(QWidget):
 
         # Zigzag container: only visible when both axes are active
         self.zigzag_w.setVisible(both_on)
+
+        # "Zero after scan" only applies to an axis the scan actually moves
+        self.act1_grp.zero_after_btn.setEnabled(x_on)
+        self.act2_grp.zero_after_btn.setEnabled(y_on)
 
         # Time-scan banner inside the X axis group
         self.time_scan_lbl.setVisible(time_mode)
