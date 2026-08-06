@@ -1758,6 +1758,49 @@ class TestRecentSymmetricYlim(unittest.TestCase):
         self.assertAlmostEqual(lo, -hi)
 
 
+class TestNulByteStringAttrs(unittest.TestCase):
+    """_wsa strips embedded NULs before writing an HDF5 string attribute.
+
+    HDF5 VLEN strings cannot contain NUL bytes — h5py raises ValueError.
+    TANGO DevString readbacks come from fixed-size C buffers and are often
+    null-padded ("20mA\\x00\\x00\\x00"), and those land in the hardware
+    snapshot.  Most string attrs are written by _open_hdf5 at scan START, so
+    without stripping, one padded device string aborts the whole measurement
+    with an error that points nowhere near the real cause."""
+
+    def _attrs(self, cfg_val):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "nul.h5")
+        with h5py.File(p, "w") as f:
+            g = f.create_group("metadata")
+            _runner_mod._wsa(g, "device_id", cfg_val)
+        with h5py.File(p, "r") as f:
+            return dict(f["metadata"].attrs)
+
+    def test_null_padded_string_is_written(self):
+        a = self._attrs("PyKeithley2\x00\x00\x00")
+        self.assertEqual(a["device_id"], "PyKeithley2")
+
+    def test_interior_null_is_removed(self):
+        a = self._attrs("20mA\x00range")
+        self.assertEqual(a["device_id"], "20mArange")
+
+    def test_clean_string_is_untouched(self):
+        a = self._attrs("20mA")
+        self.assertEqual(a["device_id"], "20mA")
+
+    def test_raw_h5py_would_reject_it(self):
+        """Guards the premise: if h5py ever accepts NULs the strip is moot,
+        but until then removing it re-breaks scan start."""
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "raw.h5")
+        with h5py.File(p, "w") as f:
+            g = f.create_group("m")
+            with self.assertRaises(ValueError):
+                g.attrs.create("x", data="a\x00b",
+                               dtype=h5py.string_dtype())
+
+
 class TestAppVersion(unittest.TestCase):
     """Samba_main window title carries the vX.YZ application version."""
 

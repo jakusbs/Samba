@@ -54,8 +54,13 @@ import h5py as _h5py
 _H5STR = _h5py.string_dtype()
 
 def _wsa(target, key, val):
-    """Write a string HDF5 attribute, compatible with all h5py/Python versions."""
-    target.attrs.create(key, data=str(val), dtype=_H5STR)
+    """Write a string HDF5 attribute, compatible with all h5py/Python versions.
+
+    Strips embedded NUL bytes first: h5py's VLEN string encoder raises
+    "VLEN strings do not support embedded NULLs" on them, and some TANGO
+    DevString readbacks (fixed-size C buffers) come back null-padded.
+    """
+    target.attrs.create(key, data=str(val).replace("\x00", ""), dtype=_H5STR)
 
 
 def _make_filename(cfg: dict) -> str:

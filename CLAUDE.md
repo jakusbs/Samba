@@ -3475,3 +3475,38 @@ separate "Auto color" checkbox is untouched.
   transient and centres zero while Full still spans it; Y1/Y2 scale
   independently; x still autoscales; all-NaN data and a not-yet-created curve
   are survivable.
+
+---
+
+## 59. Recent Changes (August 2026) — HDF5 NUL-Byte Guard in String Attributes
+
+Branch `claude/hdf5-nul-byte-fix` (94 tests). App version → **v13.02**.
+
+`_wsa()` (`core/scan/runner.py`) writes every string attribute in a scan's
+HDF5 file — sample id, operator, notes, incidence, device paths, the Keithley
+range — 61 call sites in total. HDF5 **variable-length strings cannot contain
+NUL bytes**: h5py raises `ValueError: VLEN strings do not support embedded
+NULLs` (confirmed on h5py 3.16.0).
+
+TANGO `DevString` readbacks come from fixed-size C character buffers and are
+frequently null-padded — the Keithley range arriving as `"20mA\x00\x00\x00"`
+rather than `"20mA"`. That value flows into the hardware snapshot
+(`_read_hw_snapshot`, `samba.py`) and on into the HDF5 metadata.
+
+Because most string attributes are written by `_open_hdf5` at **scan start**,
+a single padded device string made the file impossible to create and **aborted
+the measurement before it began**, with an error that points nowhere near the
+Keithley. `_wsa` now strips NULs before writing:
+
+```python
+target.attrs.create(key, data=str(val).replace("\x00", ""), dtype=_H5STR)
+```
+
+Lossless — trailing padding carries no information — and it covers both writers
+(`_open_hdf5` and `_run_dc_hyst`) plus `_write_hw_metadata` in one place.
+
+### Tests
+`test_runner.py` +4 → 94: `TestNulByteStringAttrs` — a null-padded string is
+written stripped, an interior NUL is removed, a clean string is untouched, and
+a guard test asserting raw h5py still *rejects* embedded NULs (so the strip
+cannot be quietly deleted as redundant).
