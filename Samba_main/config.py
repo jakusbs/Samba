@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -188,9 +188,11 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act1_device": "smaract2/control/IR-controller",
         "act1_attr": "x", "act1_label": "X", "act1_unit": "nm",
         "act1_start": -10.0, "act1_stop": 10.0, "act1_npts": 51,
+        "act1_zero_after": False,
         "act2_device": "smaract2/control/IR-controller",
         "act2_attr": "y", "act2_label": "Y", "act2_unit": "nm",
         "act2_start": -10.0, "act2_stop": 10.0, "act2_npts": 51,
+        "act2_zero_after": False,
         "zigzag": True,
         "fast_axis": "act1",   # which axis is swept per line: act1 (X) or act2 (Y)
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
@@ -361,12 +363,20 @@ def _migrate_v4_to_v5(cfg: dict):
     cfg.setdefault("hyst_sources", [1, 2, 3, 4, 5, 6])
 
 
+def _migrate_v5_to_v6(cfg: dict):
+    """v5→v6: Add the per-axis 'Zero after scan' toggles.  Default False
+    preserves the old behaviour of leaving the stage where the scan ended."""
+    cfg.setdefault("act1_zero_after", False)
+    cfg.setdefault("act2_zero_after", False)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
+    (6, _migrate_v5_to_v6),
 ]
 
 

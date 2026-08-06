@@ -3035,3 +3035,58 @@ SAMBA just points its button at `SetZero`.
   hidden without the SetZero+Initialise signature, shown with it; Yes → one
   `SetZero` dispatched + positions re-read + button re-enabled; No → nothing.
 - Both servers `py_compile` clean; `python test_runner.py` 69 OK.
+
+---
+
+## 53. Recent Changes (August 2026) — Per-Axis "Zero after scan" Toggle (Samba_main)
+
+Branch `claude/zero-after-scan-toggle` (72 tests). User request: a toggle next
+to each Spatial axis' "Scan enabled" checkbox that sends the stage back to 0
+once the measurement is over — for a map, back to (0, 0).
+
+### UI (`Samba_main/panels/trajectory.py`)
+`ActuatorGroup` row 0 became an HBox holding the existing "Scan enabled"
+checkbox plus a new checkable **"Zero after scan"** pill (`zero_after_btn`,
+green `#a6e3a1` when armed, matching the fast-axis pills). Both the X and Y
+groups get one, so a 2-D map with both armed returns to (0, 0).
+`_on_axis_toggled` greys the pill out when its axis is not scanned — the
+toggle only means anything for an axis the scan actually moves.
+
+### Persistence (`Samba_main/config.py`)
+Per-axis keys `act1_zero_after` / `act2_zero_after`, round-tripped by
+`ActuatorGroup.load()` / `get_partial()` (so they ride the existing
+`p.update(self.act1_grp.get_partial("act1"))` path — no special-casing in
+`get_config_partial`). Added to `make_default_config`; schema bumped to **v6**
+with `_migrate_v5_to_v6` backfilling `False` on old configs.
+
+### Execution (`Samba_main/samba.py`)
+- `_arm_zero_after_scan(cfg)` resolves the axes **once at scan start** into
+  `_zero_plan`, so editing the config mid-scan cannot retarget a pending move.
+  An axis qualifies only when `scan_x`/`scan_y` **and** its `*_zero_after` key
+  are set, which is what keeps every other scan type out: FIELD / DC_HYST /
+  TR-MOKE return their own dicts from `get_config_partial()` that carry no
+  `*_zero_after` keys, and the calibration time scan forces both axes off.
+  **This matters for TR-MOKE**, whose `act1_device` is the DG645 and whose
+  `scan_type` is rewritten to `SPATIAL` in `_start_scan` — a `scan_type` check
+  alone would have driven the delay generator to 0.
+- `_run_zero_after_scan()` writes 0.0 to each planned axis on a **daemon
+  thread** (a TANGO write blocks up to 10 s; two axes would freeze the GUI),
+  reporting back through the existing `_post_to_main` signal. Uses
+  `fresh_proxy()` so a cached `SimProxy` cannot silently swallow the write on
+  real hardware; an unreachable device is logged and skipped, never faked.
+- Called from `_on_worker_finished` (single scan) and `_on_scanlist_done`
+  (whole list only — not between scanlist items).
+- **Aborting never moves the stage**: `_abort_scan`, `_abort_scanlist` and
+  `closeEvent` clear `_zero_armed`. Abort means stop, so it must not start new
+  motion — the log says so instead.
+
+### Scope / tests
+Samba_main only (per user); `Cryo/panels.py` has its own independent
+`ActuatorGroup` copy and is untouched. `test_runner.py` +3 → 72
+(`TestZeroAfterScanConfig`: defaults off, v5→v6 backfill, existing choice
+preserved). The plan/execute logic and the panel round-trip were verified
+against the real shipped methods with PyQt6 stubbed (PyQt6 is absent from the
+CI env, so that scaffolding is not committed): both-axes/one-axis/disabled-axis
+arming, TR-MOKE and time scans arming nothing, re-arm clearing a stale plan,
+writes reaching both attrs, disarmed abort writing nothing, and unreachable
+device / write failure surfacing as warnings.

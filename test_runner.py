@@ -1420,6 +1420,45 @@ class TestSetupLoadStatus(unittest.TestCase):
         self.assertNotIn("_load_status", saved)
 
 
+class TestZeroAfterScanConfig(unittest.TestCase):
+    """Per-axis 'Zero after scan' persistence contract.
+
+    The flag decides whether real stage motion happens once a scan ends, so
+    it must default to False everywhere: a config that predates the feature
+    must never come back armed."""
+
+    def _fresh_config(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_zero",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_defaults_present_and_off(self):
+        cfgmod = self._fresh_config()
+        cfg = cfgmod.make_default_config("scan")
+        self.assertIs(cfg["act1_zero_after"], False)
+        self.assertIs(cfg["act2_zero_after"], False)
+
+    def test_migration_backfills_old_config(self):
+        cfgmod = self._fresh_config()
+        old = {"_schema_version": 5, "scan_type": "SPATIAL"}
+        cfgmod._migrate_config(old)
+        self.assertIs(old["act1_zero_after"], False)
+        self.assertIs(old["act2_zero_after"], False)
+        self.assertEqual(old["_schema_version"], cfgmod.SCHEMA_VERSION)
+
+    def test_migration_preserves_existing_choice(self):
+        cfgmod = self._fresh_config()
+        cfg = {"_schema_version": 5, "act1_zero_after": True}
+        cfgmod._migrate_config(cfg)
+        self.assertIs(cfg["act1_zero_after"], True)
+        self.assertIs(cfg["act2_zero_after"], False)
+
+
 class TestNStepPair(unittest.TestCase):
     """core/nstep.py — N ↔ Δ-step coupling used by the trajectory panels."""
 
