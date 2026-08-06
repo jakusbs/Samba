@@ -3090,3 +3090,65 @@ CI env, so that scaffolding is not committed): both-axes/one-axis/disabled-axis
 arming, TR-MOKE and time scans arming nothing, re-arm clearing a stale plan,
 writes reaching both attrs, disarmed abort writing nothing, and unreachable
 device / write failure surfacing as warnings.
+
+---
+
+## 54. Recent Changes (August 2026) — Scanlist Polarity Control Persisted + Start Reminder
+
+Branch `claude/zero-after-scan-toggle` (77 tests). Samba_main only — Cryo has
+its own independent `ScanlistPanel` (`Cryo/panels.py:2249`) and is untouched.
+
+### Polarity control is now persisted and recorded
+The Scanlist tab's "Polarity control" group (Relay flip / Field flip) was
+**session-only UI state**: `ScanlistPanel` had no load/save path at all, so both
+toggles silently reset to OFF on every restart, and nothing in the saved data
+recorded whether flipping had been enabled.
+
+- **Config keys** `relay_flip` / `field_flip`, round-tripped through the new
+  `ScanlistPanel.load_config()` / `get_config_partial()`. Wired in `samba.py`
+  via `_load_active_config` (silent load) and `_save_active_config`
+  (`old.update(self.sl_panel.get_config_partial())`, applied after the
+  trajectory partial — the two key sets are disjoint).
+- **Saved on toggle**: new `ScanlistPanel.polarity_changed` signal →
+  `MainWindow._on_polarity_changed` → `_save_active_config()`. Skipped while a
+  scan runs, so a mid-run toggle can't rewrite the config describing the
+  measurement in progress.
+- `_load_flip()` sets the button through `blockSignals` **and refreshes the
+  caption explicitly** — the `toggled` handler that normally keeps the ON/OFF
+  text in sync is suppressed by the block, so a plain silent `setChecked` would
+  leave the caption showing the previous state. The previous block state is
+  restored rather than forced to False.
+- **Schema v7** with `_migrate_v6_to_v7` backfilling `False`, preserving the old
+  "starts OFF" behaviour for existing configs.
+
+### Recorded in HDF5 — scanlist scans only
+`_write_hw_metadata` (`core/scan/runner.py`) writes `relay_flip` / `field_flip`
+**only when the key is present**. `_start_scanlist` injects them into the config
+after the reminder dialog; `_build_full_config()` deliberately does **not**, so a
+single scan — which flips nothing — has the attributes absent rather than
+recorded as `False`, which would claim a polarity configuration that never
+applied. The write sits in the shared `_write_hw_metadata`, so both `_open_hdf5`
+(SPATIAL/FIELD/TIME) and `_run_dc_hyst` pick it up from one edit. Cryo never
+sets the keys, so its files are unchanged.
+
+### Start-of-scanlist reminder
+Starting a scanlist with **neither** flip enabled pops a warning: every scan in
+the list is measured at one polarity, so the analysis cannot separate the
+positive and negative groups (it groups by `relay_sign × sign(field)`). Ok
+starts anyway; **Cancel is the default button** and aborts the start.
+
+The check sits after `_prepare_scan` (hard validation errors surface first —
+no point confirming a scan that cannot run) but **before every side effect**:
+plot buffers cleared, zero-after plan armed, field setpoint written to the
+magnet. Cancel therefore leaves the application exactly as it was.
+
+### Tests / verification
+- `test_runner.py` +5 → 77: `TestPolarityControlConfig` — defaults off, v6→v7
+  backfill, existing choice preserved, HDF5 records the flags when set, and
+  omits them entirely when absent.
+- The GUI paths were verified against the real shipped methods with PyQt6
+  stubbed (38 checks, not committed — PyQt6 is absent from the env): panel
+  round-trip incl. caption/blockSignals behaviour and silence on load; Cancel
+  producing no side effects, no hardware write and an unmutated config; Ok
+  proceeding and injecting the flags; no popup when either flip is on; and the
+  dialog defaulting to Cancel.

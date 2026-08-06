@@ -9,7 +9,7 @@ from typing import Dict, List, TypedDict, Optional
 log = logging.getLogger(__name__)
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -204,6 +204,11 @@ def make_default_config(name: str = "scan_x") -> dict:
         "field_x_unit":        "mT",             # Beckhoff magnet returns mT
         "field_setpoint_unit": "A",              # current commanded in Ampere
         "integration_time": 0.1, "settle_time": 0.05, "move_timeout": 15.0,
+        # Scanlist polarity control — alternate the optical relay and/or the
+        # magnet polarity between cycles.  The analysis groups scans by
+        # relay_sign × sign(field), so with neither enabled every scan in a
+        # list is measured at one polarity.
+        "relay_flip": False, "field_flip": False,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
@@ -370,6 +375,14 @@ def _migrate_v5_to_v6(cfg: dict):
     cfg.setdefault("act2_zero_after", False)
 
 
+def _migrate_v6_to_v7(cfg: dict):
+    """v6→v7: Persist the scanlist polarity control (relay / field flip).
+    These used to be session-only UI state that reset to OFF on restart;
+    False keeps that as the default for existing configs."""
+    cfg.setdefault("relay_flip", False)
+    cfg.setdefault("field_flip", False)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -377,6 +390,7 @@ _MIGRATIONS = [
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
     (6, _migrate_v5_to_v6),
+    (7, _migrate_v6_to_v7),
 ]
 
 

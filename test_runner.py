@@ -1459,6 +1459,65 @@ class TestZeroAfterScanConfig(unittest.TestCase):
         self.assertIs(cfg["act2_zero_after"], False)
 
 
+class TestPolarityControlConfig(unittest.TestCase):
+    """Scanlist polarity control (relay / field flip) persistence + metadata.
+
+    The flags decide whether the analysis can separate positive and negative
+    polarity groups, so they must round-trip into the config and be recorded
+    in the HDF5 file of every scanlist scan — but stay absent on single scans,
+    which flip nothing."""
+
+    def _fresh_config(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_polarity",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_defaults_present_and_off(self):
+        cfg = self._fresh_config().make_default_config("scan")
+        self.assertIs(cfg["relay_flip"], False)
+        self.assertIs(cfg["field_flip"], False)
+
+    def test_migration_backfills_old_config(self):
+        cfgmod = self._fresh_config()
+        old = {"_schema_version": 6, "scan_type": "SPATIAL"}
+        cfgmod._migrate_config(old)
+        self.assertIs(old["relay_flip"], False)
+        self.assertIs(old["field_flip"], False)
+        self.assertEqual(old["_schema_version"], cfgmod.SCHEMA_VERSION)
+
+    def test_migration_preserves_existing_choice(self):
+        cfgmod = self._fresh_config()
+        cfg = {"_schema_version": 6, "field_flip": True}
+        cfgmod._migrate_config(cfg)
+        self.assertIs(cfg["field_flip"], True)
+        self.assertIs(cfg["relay_flip"], False)
+
+    def _meta_attrs(self, cfg):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "pol.h5")
+        with h5py.File(p, "w") as f:
+            _runner_mod._write_hw_metadata(f.create_group("metadata"), cfg)
+        with h5py.File(p, "r") as f:
+            return dict(f["metadata"].attrs)
+
+    def test_hdf5_records_flags_when_set(self):
+        a = self._meta_attrs({"relay_flip": True, "field_flip": False})
+        self.assertTrue(bool(a["relay_flip"]))
+        self.assertFalse(bool(a["field_flip"]))
+
+    def test_hdf5_omits_flags_for_single_scan(self):
+        """A single scan never sets the keys — recording False would claim a
+        polarity configuration that was never applied."""
+        a = self._meta_attrs({})
+        self.assertNotIn("relay_flip", a)
+        self.assertNotIn("field_flip", a)
+
+
 class TestNStepPair(unittest.TestCase):
     """core/nstep.py — N ↔ Δ-step coupling used by the trajectory panels."""
 

@@ -860,6 +860,10 @@ class MainWindow(QMainWindow):
         self.sl_panel.settle.valueChanged.connect(self._sync_sl_timing_to_traj)
         self.sl_panel.timeout.valueChanged.connect(self._sync_sl_timing_to_traj)
 
+        # ── Polarity control → persist into the active config ────────────────
+        # Only user toggles reach this; load_config() sets the buttons silently.
+        self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
+
         # ── BD Calibration panel callbacks ────────────────────────────────────
         self.bd_cal_panel.set_callbacks(
             save_cb=self._bd_cal_save,
@@ -1072,6 +1076,8 @@ class MainWindow(QMainWindow):
         self.right_panel.load_dc_sources(cfg.get("hyst_sources", [1, 2, 3, 4, 5, 6]))
         self.right_panel.set_dc_mode(cfg.get("scan_type") == "DC_HYST")
         self.sl_panel.set_active_name(cfg.get("name","—"))
+        # Polarity control (relay / field flip) — silent load, no re-save
+        self.sl_panel.load_config(cfg)
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
@@ -1097,6 +1103,7 @@ class MainWindow(QMainWindow):
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1)
         old = configs[idx]; old.update(self.traj_panel.get_config_partial())
+        old.update(self.sl_panel.get_config_partial())   # polarity control
         old["sensors"]        = self.right_panel.get_sensors()
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
@@ -1257,6 +1264,18 @@ class MainWindow(QMainWindow):
             self.traj_panel.timeout.setValue(self.sl_panel.timeout.value())
         finally:
             self._timing_syncing = False
+
+    # ── Polarity control ──────────────────────────────────────────────────────
+    def _on_polarity_changed(self):
+        """Persist a user toggle of Relay/Field flip into the active config.
+
+        Skipped while a scan runs: the running worker holds its own polarity
+        settings, so writing a mid-run change to disk would misdescribe the
+        measurement in progress.
+        """
+        if self._scan_running:
+            return
+        self._save_active_config()
 
     # ── BD Calibration callbacks ──────────────────────────────────────────────
     def _bd_cal_save(self, vals: list):
@@ -1960,7 +1979,33 @@ class MainWindow(QMainWindow):
         active = self._prepare_scan(cfg)
         if active is None: return
 
-        self._current_scan_cfg = cfg; sl = self.sl_panel.get_settings()
+        sl = self.sl_panel.get_settings()
+        # ── Polarity-control reminder ────────────────────────────────────────
+        # Checked before anything with a side effect (plot buffers cleared,
+        # field setpoint written), so Cancel leaves the app exactly as it was.
+        if not (sl["relay_flip"] or sl["field_flip"]):
+            if QMessageBox.warning(
+                    self, "No polarity control",
+                    "Neither Relay flip nor Field flip is enabled.\n\n"
+                    "Every scan in this list will be measured at the same "
+                    "polarity, so the analysis cannot separate the positive "
+                    "and negative groups.\n\n"
+                    "Start the scanlist anyway?",
+                    QMessageBox.StandardButton.Ok
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel
+            ) != QMessageBox.StandardButton.Ok:
+                self.status_lbl.setText(
+                    "Scanlist not started — no polarity control selected")
+                return
+
+        # Record the polarity configuration in every file of this list.  Set
+        # here rather than in _build_full_config() so single scans — which
+        # never flip anything — don't claim a flip setting that never applied.
+        cfg["relay_flip"] = sl["relay_flip"]
+        cfg["field_flip"] = sl["field_flip"]
+
+        self._current_scan_cfg = cfg
         self._arm_zero_after_scan(cfg)
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 

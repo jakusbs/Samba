@@ -135,6 +135,16 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
             meta.attrs[ohm_key] = float(v or 0.0)
         except (TypeError, ValueError):
             meta.attrs[ohm_key] = 0.0
+    # Scanlist polarity control (relay / field flip).  Written only when the
+    # key is present, i.e. for scans started from a scanlist — a single scan
+    # flips nothing, so the attribute is absent rather than recorded as False.
+    for _pk in ("relay_flip", "field_flip"):
+        v = cfg.get(_pk)
+        if v is not None:
+            try:
+                meta.attrs[_pk] = bool(v)
+            except Exception:
+                _wsa(meta, _pk, str(v))
     # Ferromagnet & full-stack thickness [nm] — for the SOT / spin-Hall
     # efficiency analysis (J = Ic/(w·t_stack), ξ_DL uses t_FM).
     for _tk in ("fm_thickness_nm", "t_stack_nm"):

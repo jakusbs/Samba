@@ -6,13 +6,18 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from panels._widgets import NoScrollSpinBox, NoScrollDoubleSpinBox, MokeMetadataGroup
 from panels.hardware_panel import HardwarePanel
 
 
 class ScanlistPanel(QWidget):
+    # Emitted when a polarity toggle is changed by the user, so the owning
+    # window can persist it into the active scan config.  Programmatic loads
+    # (load_config) are silent — see _load_flip.
+    polarity_changed = pyqtSignal()
+
     def __init__(self, setup_getter, parent=None):
         super().__init__(parent)
         self._setup_getter = setup_getter
@@ -54,6 +59,8 @@ class ScanlistPanel(QWidget):
         self.relay_flip_btn.toggled.connect(lambda c: self.relay_flip_btn.setText("Relay flip: ON" if c else "Relay flip: OFF"))
         self.field_flip_btn = QPushButton("Field flip: OFF"); self.field_flip_btn.setCheckable(True)
         self.field_flip_btn.toggled.connect(lambda c: self.field_flip_btn.setText("Field flip: ON" if c else "Field flip: OFF"))
+        for _b in (self.relay_flip_btn, self.field_flip_btn):
+            _b.toggled.connect(lambda _: self.polarity_changed.emit())
         pl.addWidget(self.relay_flip_btn); pl.addWidget(self.field_flip_btn)
         sl_row.addWidget(pg)
 
@@ -87,6 +94,34 @@ class ScanlistPanel(QWidget):
     def set_active_name(self, name: str):
         self.active_lbl.setText(name)
         self._update_auto_name()
+
+    # ── Polarity control persistence ──────────────────────────────────────────
+    @staticmethod
+    def _load_flip(btn, label: str, on: bool):
+        """Set a polarity toggle without emitting toggled().
+
+        The caption is refreshed explicitly: the toggled() handler that
+        normally keeps it in sync is suppressed by blockSignals, so a silent
+        setChecked would leave the button showing the previous state.
+        """
+        blocked = btn.blockSignals(True)
+        btn.setChecked(on)
+        btn.blockSignals(blocked)
+        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+
+    def load_config(self, cfg: dict):
+        """Restore the polarity toggles from a scan config (silently)."""
+        self._load_flip(self.relay_flip_btn, "Relay flip",
+                        bool(cfg.get("relay_flip", False)))
+        self._load_flip(self.field_flip_btn, "Field flip",
+                        bool(cfg.get("field_flip", False)))
+
+    def get_config_partial(self) -> dict:
+        """Polarity state for persistence into the active scan config."""
+        return {
+            "relay_flip": self.relay_flip_btn.isChecked(),
+            "field_flip": self.field_flip_btn.isChecked(),
+        }
 
     def get_settings(self) -> dict:
         return {
