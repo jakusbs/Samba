@@ -3152,3 +3152,71 @@ magnet. Cancel therefore leaves the application exactly as it was.
   producing no side effects, no hardware write and an unmutated config; Ok
   proceeding and injecting the flags; no popup when either flip is on; and the
   dialog defaulting to Cancel.
+
+---
+
+## 55. Recent Changes (August 2026) — App Version Scheme & "Recent" Y-Scale Mode
+
+Branch `claude/zero-after-scan-toggle` (85 tests).
+
+### Application version in the title (`Samba_main`)
+The window title was the static `"Samba v3 — ETH Zürich"`. It now reads
+`Samba v{APP_VERSION} — ETH Zürich`, with **`APP_VERSION = "13.01"`** in
+`Samba_main/config.py` (the numbering deliberately skips ahead from v3).
+
+**Convention: bump the decimal part on every regular commit** — v13.01 → v13.02
+→ … — and the major part only for a release or breaking change. `APP_VERSION`
+is separate from `SCHEMA_VERSION` in the same file, which tracks the on-disk
+scan-config format and must only move when that format changes.
+
+Cryo's title (`"Samba Cryo — ETH Zürich"`) never carried a version and is
+unchanged.
+
+### Full / Recent y-scale pill (both apps — shared `core/`)
+The **"Auto-scale" checkbox** on the live 1D plot is **replaced** by a two-pill
+group in the same toolbar slot, and the same control is **added to the
+calibration plot**, which previously had no scale control at all:
+
+- **Full** (default) — rescale y to all data on every update; the historic
+  behaviour.
+- **Recent** — y-limits become **symmetric ±max|y| over the last 50 points**.
+  Zero therefore sits exactly in the middle and the range *shrinks as the
+  signal is nulled*, which is the point: following a value down through
+  several orders of magnitude while hunting for zero. A full-range autoscale
+  cannot do this, because one early large value keeps the axis wide forever.
+
+The **x-axis always follows the full data range** in both modes — only the y
+rule changes.
+
+**Note (supersedes §27):** the checkbox's *unchecked* state — which froze the
+limits so a manual zoom/pan survived live updates — is gone. A manual zoom is
+now reset on the next update in both modes.
+
+**Implementation** — `core/plot_interact.py` (shared, Qt imported lazily so the
+module stays import-safe headless):
+- `recent_symmetric_ylim(y_arrays, window=RECENT_WINDOW)` — max|y| over each
+  array's tail, combined across the curves sharing an axis. Returns `None`
+  when there is no finite data (caller leaves the limits alone), and a tiny
+  non-zero symmetric range when the tail is all exactly zero — matplotlib
+  rejects a zero-width range, and a fully nulled signal must not crash the
+  live plot.
+- `make_scale_pills(on_change, parent)` → `(widget, mode_getter)`;
+  `SCALE_FULL` / `SCALE_RECENT` / `RECENT_WINDOW = 50`.
+
+Call sites: `Live1DWidget.__init__` + `_throttled_draw`
+(`core/plot_widgets.py`), and `FocusPlotWidget.__init__` +
+`_rescale_focus_y` / `_ts_throttled_draw` (`core/calibration.py`) — the latter
+covers **both** calibration modes, autofocus and time scan. The 2D widget's
+separate "Auto color" checkbox is untouched.
+
+### Tests / verification
+- `test_runner.py` +8 → 85: `TestRecentSymmetricYlim` (symmetry about zero,
+  the window boundary ignoring older points, per-axis combination, NaN
+  handling, no-data → `None`, all-zero tail staying non-degenerate) and
+  `TestAppVersion` (title version matches the `X.YZ` scheme).
+- The wiring was verified against the real shipped draw methods with **real
+  matplotlib (Agg) axes** and Qt stubbed (29 checks, not committed): pill
+  defaults to Full and switches exclusively; Recent ignores an early 1000×
+  transient and centres zero while Full still spans it; Y1/Y2 scale
+  independently; x still autoscales; all-NaN data and a not-yet-created curve
+  are survivable.

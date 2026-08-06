@@ -42,7 +42,8 @@ try:
 except ImportError:
     TANGO_AVAILABLE = False
 
-from config  import SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup, make_default_config
+from config  import (SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup,
+                    make_default_config, APP_VERSION)
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, evict_proxy
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
@@ -217,7 +218,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Samba v3 — ETH Zürich")
+        self.setWindowTitle(f"Samba v{APP_VERSION} — ETH Zürich")
         try:
             from core.easter_egg import install_easter_egg
             install_easter_egg(self)

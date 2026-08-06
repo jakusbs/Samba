@@ -1616,5 +1616,77 @@ class TestNStepPair(unittest.TestCase):
         self.assertEqual(pair.anchor, "step")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. Live plots — "Recent" y-scale mode (±max|y| over the last N points)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import plot_interact as _pi_mod                          # noqa: E402
+
+
+class TestRecentSymmetricYlim(unittest.TestCase):
+    """core/plot_interact.recent_symmetric_ylim — the maths behind the
+    Full/Recent y-scale pill on the 1D and calibration plots.
+
+    The mode exists to follow a signal down to zero across orders of
+    magnitude, so the two properties that matter are: zero stays exactly
+    centred, and old large values must not keep the axis wide."""
+
+    def test_symmetric_about_zero(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[-3.0, 1.0, 2.0]])
+        self.assertAlmostEqual(lo, -hi)
+        self.assertGreaterEqual(hi, 3.0)        # covers max|y|, plus padding
+
+    def test_ignores_points_before_the_window(self):
+        """A huge early transient must not hold the axis open — that is the
+        whole point of the mode."""
+        y = [1000.0] * 50 + [1e-6] * 50         # settles to µ-scale
+        lo, hi = _pi_mod.recent_symmetric_ylim(y and [y], window=50)
+        self.assertLess(hi, 1e-5)
+        self.assertAlmostEqual(lo, -hi)
+
+    def test_window_shorter_than_data_available(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[5.0, 4.0, 3.0]], window=2)
+        self.assertGreaterEqual(hi, 4.0)        # last two are 4 and 3
+        self.assertLess(hi, 5.0)                # the 5.0 is outside the window
+
+    def test_combines_across_curves_on_one_axis(self):
+        lo, hi = _pi_mod.recent_symmetric_ylim([[0.1, 0.2], [-7.0, 0.3]])
+        self.assertGreaterEqual(hi, 7.0)
+        self.assertAlmostEqual(lo, -hi)
+
+    def test_nan_is_ignored(self):
+        y = [np.nan, 2.0, np.nan, 1.0]
+        lo, hi = _pi_mod.recent_symmetric_ylim([y])
+        self.assertGreaterEqual(hi, 2.0)
+        self.assertTrue(np.isfinite(lo) and np.isfinite(hi))
+
+    def test_no_finite_data_returns_none(self):
+        """Caller leaves the existing limits alone rather than collapsing."""
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([]))
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([[]]))
+        self.assertIsNone(_pi_mod.recent_symmetric_ylim([[np.nan, np.inf]]))
+
+    def test_all_zero_tail_stays_non_degenerate(self):
+        """matplotlib rejects a zero-width range; a nulled signal must not
+        crash the live plot."""
+        lo, hi = _pi_mod.recent_symmetric_ylim([[0.0, 0.0, 0.0]])
+        self.assertLess(lo, hi)
+        self.assertAlmostEqual(lo, -hi)
+
+
+class TestAppVersion(unittest.TestCase):
+    """Samba_main window title carries the vX.YZ application version."""
+
+    def test_version_matches_scheme(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_version",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertRegex(mod.APP_VERSION, r"^\d+\.\d{2}$")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

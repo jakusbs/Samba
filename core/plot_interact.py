@@ -126,6 +126,122 @@ def make_fontsize_spin(default: int = 9, on_change: Callable[[int], None] = None
     return sp
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Y-scale mode — full range vs. a symmetric window on the most recent points
+# ─────────────────────────────────────────────────────────────────────────────
+SCALE_FULL   = "full"
+SCALE_RECENT = "recent"
+
+#: How many trailing points the "Recent" y-scale mode looks at.
+RECENT_WINDOW = 50
+
+
+def recent_symmetric_ylim(y_arrays, window: int = RECENT_WINDOW):
+    """Symmetric (−m, +m) y-limits from the last *window* finite samples.
+
+    m is max|y| over the tail of each array, combined across arrays (so all
+    curves sharing an axis stay on-scale).  Zero therefore sits exactly in the
+    middle and the range shrinks as a signal is nulled — the point of the mode:
+    following a value down through several orders of magnitude while hunting
+    for zero, which a full-range autoscale cannot do because early large
+    values keep the axis wide forever.
+
+    Returns None when there is no finite data (caller leaves the limits alone).
+    """
+    m = 0.0
+    seen = False
+    for y in y_arrays:
+        arr = np.asarray(y, dtype=float).ravel()
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+        tail = arr[-int(max(1, window)):]
+        if tail.size == 0:
+            continue
+        seen = True
+        m = max(m, float(np.max(np.abs(tail))))
+    if not seen:
+        return None
+    if not np.isfinite(m) or m <= 0.0:
+        # Tail is all exactly zero — matplotlib rejects a zero-width range,
+        # so keep a tiny symmetric window rather than collapsing the axis.
+        return (-1e-12, 1e-12)
+    pad = m * 0.05
+    return (-(m + pad), m + pad)
+
+
+def make_scale_pills(on_change: Callable[[], None] = None, parent=None,
+                     window: int = RECENT_WINDOW):
+    """Return ``(widget, mode_getter)`` — a Full / Recent y-scale pill pair.
+
+    * **Full**   — rescale to all data on every update (the historic default).
+    * **Recent** — symmetric ±max|y| over the last *window* points.
+
+    Qt is imported lazily so this module stays import-safe without it.
+    """
+    from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton,
+                                 QButtonGroup, QLabel)
+    from PyQt6.QtCore import Qt
+
+    box = QWidget(parent)
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+
+    cap = QLabel("Y-scale:")
+    cap.setStyleSheet("color:#a6adc8;font-size:10px;")
+    lay.addWidget(cap)
+    lay.addSpacing(4)
+
+    group = QButtonGroup(box)
+    group.setExclusive(True)
+    specs = (
+        (SCALE_FULL, "Full",
+         "Rescale the y-axis to all data on every update."),
+        (SCALE_RECENT, "Recent",
+         f"Scale the y-axis to ±max|y| of the last {window} points.\n"
+         "Zero stays centred and the range shrinks as the signal is nulled —\n"
+         "for tracking a value down through orders of magnitude."),
+    )
+    for idx, (mode, label, tip) in enumerate(specs):
+        b = QPushButton(label)
+        b.setCheckable(True)
+        b.setChecked(idx == 0)
+        b.setFixedHeight(22)
+        b.setMinimumWidth(52)
+        b.setToolTip(tip)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setProperty("scale_mode", mode)
+        if idx == 0:
+            radius = ("border-top-left-radius:6px;border-bottom-left-radius:6px;"
+                      "border-top-right-radius:0;border-bottom-right-radius:0;")
+        else:
+            radius = ("border-top-left-radius:0;border-bottom-left-radius:0;"
+                      "border-top-right-radius:6px;border-bottom-right-radius:6px;")
+        b.setStyleSheet(
+            f"QPushButton{{background:#252538;border:1px solid #45475a;"
+            f"color:#6c7086;font-size:10px;font-weight:bold;padding:0 8px;{radius}}}"
+            f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+            f"QPushButton:checked{{background:#a6e3a1;color:#1e1e2e;"
+            f"border-color:#a6e3a1;}}")
+        group.addButton(b, idx)
+        lay.addWidget(b)
+
+    if on_change is not None:
+        group.idClicked.connect(lambda _: on_change())
+
+    def mode_getter() -> str:
+        btn = group.checkedButton()
+        if btn is None:
+            return SCALE_FULL
+        return btn.property("scale_mode") or SCALE_FULL
+
+    # Keep references alive: the QButtonGroup is parented to box, but the
+    # getter closure is what callers hold on to.
+    box._scale_group = group          # type: ignore[attr-defined]
+    return box, mode_getter
+
+
 def eng_axis(axis):
     """Format a matplotlib Axis with SI engineering notation (24µ, 1.3m, 5k).
 
