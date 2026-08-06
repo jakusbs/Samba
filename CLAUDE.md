@@ -3038,7 +3038,260 @@ SAMBA just points its button at `SetZero`.
 
 ---
 
-## 53. Recent Changes (August 2026) — Per-Axis "Zero after scan" Toggle (Samba_main)
+## 53. Recent Changes (August 2026) — Scanlist Setup Lock, Field-Panel Width, DC-Hyst Ampere, Per-Incidence Mirror Shift
+
+Branch `claude/scanlist-setup-lock` (SAMBA, 74 tests).
+
+### Setup lock taken by every start path (bug fix)
+`acquire_lock()` was called **only** from `_start_scan()`, so a **scanlist** ran
+with the setup's busy flag still `False` — another computer could start a scan
+on the same rig mid-scanlist. The calibration time scan had the same gap, and
+`_on_sl_worker_finished()` never released the lock. (`ScanlistWorker`'s
+`setup_name` argument only builds the `ScanLists_<Setup>` path — it never took
+the lock either.)
+- New `_acquire_setup_lock()` helper in both apps (same "Setup busy" dialog),
+  called from `_start_scan`, `_start_scanlist` **and** `_start_calib_timescan`.
+  Taken after validation but before any hardware write, so a refused start
+  never touches the rig.
+- `release_lock()` added to `_on_sl_worker_finished()` (both apps), mirroring
+  `_on_worker_finished()`. Wired to the QThread `finished` signal → covers
+  normal completion and abort. Calibration time scans run through `ScanWorker`
+  → `_on_worker_finished`, which already released.
+
+### DC hysteresis field is a CURRENT [A], not a voltage
+`HysteresisThread.py:55` does `field = MagneticField / AmperePerVolt`
+("Power Supply output current for 1 V programming voltage"), i.e. the number
+SAMBA sends has always been an **Ampere** — only the label said V. Pure
+relabel, no numeric or device change:
+- UI: `Field (V):` → `Field (A):`, spinbox suffix `" A"`, tooltip explaining the
+  device-side conversion; widget renamed `dc_field_V` → `dc_field_A`.
+- Config key `hyst_field_V` → `hyst_field_A` (both apps). Samba_main schema
+  bumped to **v6** with `_migrate_v5_to_v6` carrying the value over unchanged
+  and dropping the old key; Cryo's `_migrate_config` does the same inline.
+  `runner.py` still reads `hyst_field_V` as a fallback for configs replayed
+  from disk.
+- HDF5: DC-hyst metadata attr `MagneticField_V` → `MagneticField_A`. The data
+  browser reads `_A` and falls back to `_V` for older files, and prints "A".
+
+### AC Field Sweep / DC Hysteresis groups ~2× wider
+`Samba_main/panels/trajectory.py`: the two groups were capped at 310 / 300 px
+(rendering 310 / 266). Now `min 430 / max 620` and `min 420 / max 600` with
+layout stretch **3 : 1 : 3** across `[AC][monitor plot][DC]`; the monitor
+canvas minimum drops 160 → 140 px. Measured: groups 575→620 / 575→600 px from
+a 1368 px panel up to 2560 px, plot shrinks (766 → 192 px at minimum width) —
+the trade-off the user chose. The panel's own minimum width is unchanged at
+1368 px (set by the metadata top row, not this row), so nothing new clips.
+
+### Cryo Field Sweep / Temperature Sweep groups widened too
+Same treatment in `Cryo/panels.py` (they were `min 260` / `min 280` with no cap,
+rendering 379 / 280 px): `min 430 / max 620` and `min 420 / max 600`, stretch
+**3 : 1 : 3**, canvas minimum 160 → 140. Measured 575 → 620 / 575 → 600 px from
+1368 px up to 1920 px; the Cryo panel minimum width is also unchanged (1368 px).
+**Cryo has no DC hysteresis** — its second field sub-mode is the Temperature
+Sweep (FIELD engine + AttoDRY temperature setpoint). The `_ac_grp` / `_dc_grp` /
+`rb_dc_hy` attribute names there are inherited from the shared Samba_main
+layout and are kept only because `samba_cryo.py` refers to them; the stale
+"[DC params] | [DC live plot]" layout comment was corrected to say so. The
+`hyst_*` config keys still exist in `Cryo/config.py` (and were renamed in step 2
+for cross-app consistency) but no Cryo scan path uses them — `samba_cryo.py`
+calls `right_panel.set_dc_mode(False)`.
+
+### Mirror shift moved below incidence + remembered per incidence
+The shift spinbox sat to the *right* of the incidence combo and was only
+visible for LMOKE±. Now (both apps' `MokeMetadataGroup` —
+`Samba_main/panels/_widgets.py`, `Cryo/panels.py`):
+- Layout rows are `Incidence` / `Mirror shift` / `Polarization` / checkboxes;
+  the shift is **always visible** (the LMOKE-only show/hide is gone).
+- Per-incidence memory: `_shift_by_inc` maps each of `INCIDENCES`
+  (PMOKE / LMOKE+ / LMOKE / TMOKE) to its own shift. Switching incidence parks
+  the current value under the incidence being left and restores the new one
+  (spin signals blocked → still exactly one `changed` emit per switch). Editing
+  the spin updates the entry for the live incidence.
+- `DEFAULT_MIRROR_SHIFT = 12.50` (the old hardcoded standard) seeds every
+  incidence on first start. New metadata key `mirror_shift_by_incidence`
+  round-trips through `get_values` / `load_values`, so it persists in the
+  per-setup shared metadata block (§32); configs without it fall back to the
+  defaults plus their own `mirror_shift`. The HDF5 metadata allowlist and the
+  lab-notebook column list are explicit, so the dict never reaches an HDF5
+  attr or a CSV column.
+
+### Tests / verification
+- `test_runner.py` 69 → 74: `TestDcHystFieldAmpere` (Ampere key written to
+  `MagneticField` + recorded as `MagneticField_A`, legacy `hyst_field_V` still
+  honoured), `TestHystFieldKeyMigration` (v5→v6 carry-over, new key wins,
+  default config uses the Ampere key), plus a `MagneticField` write assertion
+  in `TestDcHystSourceWrite`.
+- Offscreen-Qt run of the real widgets (51 checks): group widths/stretch at
+  1180 / 1400 / 1920 px with no clipping, `Field (A):` label + suffix +
+  `hyst_field_A` round-trip (and legacy load), and for **both** apps' metadata
+  groups — shift one row below incidence, visible for every incidence,
+  per-incidence memory, single `changed` per switch, `get_values`/`load_values`
+  round-trip, legacy-config fallback. Rendered PNGs checked visually; nested
+  dict verified through both apps' setup save/load.
+
+---
+
+## 54. Recent Changes (August 2026) — Field Row Compaction (Both Apps)
+
+Branch `claude/scanlist-setup-lock`. Follow-up to §53: widening the two
+parameter groups left large unoccupied areas — with 4 field segments the boxes
+were ~330 px tall with a scrollbar on the segment list, an empty band above the
+"+ Segment" row, and ~200 px of unused width beside the segment rows.
+
+### Segment editor and dropdowns side by side
+`Samba_main/panels/trajectory.py` (AC Field Sweep) and `Cryo/panels.py`
+(Field Sweep) replaced the single-column grid with two inner columns:
+- **left** — the `FieldSegmentList` at its natural width (`stretch=0`),
+- **right** — `Device:` (+ `Attr:` in Cryo) and the two monitor combos in a
+  grid with `setColumnStretch(1, 1)` and a trailing stretch row. The monitor
+  device/channel combos are **stacked**, not side by side, so each gets the
+  full column width (they hold registry names).
+
+### Boxes shrink-wrap, the monitor plot takes the spare height
+Both groups are added with `alignment=Qt.AlignmentFlag.AlignTop`, so each box
+is only as tall as its content (horizontal stretch is unaffected — the widths
+from §53 still apply). `root.addWidget(self.field_w, stretch=1)` sends the
+panel's spare height to the monitor plot in that row instead of spreading the
+Timing / Metadata / Hardware groups below apart (which is where it went once
+the boxes stopped absorbing it).
+
+### Segment list grows before it scrolls
+`FieldSegmentList` (both apps): scroll `setMaximumHeight(108)` → `200`, so up
+to 6 segments are fully visible (a 4-segment sweep always had a scrollbar
+before); horizontal scrollbar disabled and `setMinimumWidth(408)` set — one
+segment row plus the scrollbar gutter — because the list now sits in a
+non-stretching column.
+
+### Field monitor axis labels
+`self._field_fig.tight_layout(pad=0.4)` is now also called at construction.
+It previously ran only inside `update_field_monitor`, so with no field readback
+(or before the first update) the x/y labels stayed clipped — newly visible once
+the canvas became shorter than the boxes.
+
+### Measured (Samba_main, 4 segments, 1908 px window)
+| | before | after |
+|---|---|---|
+| field row | ~330 px | 310 px |
+| AC box | ~330 px | 180 px |
+| DC box | ~330 px | 162 px |
+| monitor plot | 228 px | 284 px |
+| segment scrollbar | yes | no |
+
+Box height by segment count: 1–2 → 130 px, 4 → 180, 6 → 240, 7+ → 262 and the
+list scrolls. Cryo matches (Field 180 / Temperature 187 px). Spatial and
+TR-MOKE rows are untouched — `field_w` is hidden there, so its stretch
+reserves nothing.
+
+### Verification
+Offscreen-Qt runs of the real panels: Samba_main 51 checks (unchanged from
+§53) + 28 new (segment-count extremes 1/2/4/6/8/12 — box height, vertical
+scrollbar appears only past 6, never a horizontal one, plot never below its
+minimum; Spatial and TR-MOKE row visibility), Cryo 18 checks (widths at
+1180/1366/1600/1920 px with no clipping, both boxes shrink-wrapped, 4 segments
+without a scrollbar, spare height to the plot, sub-mode/title labels, no
+DC-hyst spinbox). Rendered PNGs inspected for both apps.
+`python test_runner.py` 74 OK.
+
+**Harness note:** showing `field_w` before the panel itself is shown leaves the
+segment scroll area's `sizeHint` stale (28 px instead of the content's 118),
+which skews geometry measurements. Load the config, select the scan type, size
+the panel, *then* `show()` — the order the app itself uses.
+
+### Fix-up: segment list collapsed to ~2 rows (stale QScrollArea sizeHint)
+The compaction above shipped a regression on the lab machine: with 5 segments
+only the first two rows were visible. **Cause:** the top-aligned group box takes
+its content's `sizeHint`, and `QScrollArea` does not report a content-based
+sizeHint reliably — when the rows are built while the panel is still hidden
+(every `load_config` runs before the field row is shown) it keeps the ~28 px
+default. The box then sized itself from the *dropdown column* (3 rows ≈ 115 px,
+exactly the height in the user's screenshot) and the list got whatever was left.
+It did not reproduce under the offscreen platform, which is why it slipped
+through.
+
+**Fix** — `FieldSegmentList` (both apps) computes its own height instead of
+trusting the scroll area:
+```python
+_MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+def sizeHint(self) -> QSize:
+    sh = super().sizeHint()
+    h  = min(self._content.sizeHint().height(), self._MAX_LIST_H)
+    h += self._btn_row.sizeHint().height() + 2
+    return QSize(sh.width(), h)
+```
+`self._content.sizeHint()` (the rows' own container) *is* reliable while hidden.
+`_on_changed` calls `updateGeometry()` so ancestors re-read the hint when the
+row count changes, and the scroll area keeps `setMinimumHeight(34)` so a
+squeezed panel degrades to scrolling rather than collapsing.
+
+**Verified** by forcing the failure mode instead of relying on the platform:
+the harness patches the instance's `_scroll.sizeHint` to the stale `(100, 28)`.
+Pre-fix that yields box 130 px / 2.3 of 5 rows visible (matching the report);
+post-fix box 210 px, 5/5 rows, no scrollbar, and 8 segments still cap the box at
+262 px and scroll. 10 checks, both apps. **Lesson: when a widget's size comes
+from a `sizeHint` we don't control, state the hint explicitly — and treat a
+harness anomaly as a finding, not an artifact.**
+
+---
+
+## 55. Recent Changes (August 2026) — Field Devices Come From Setup Defaults
+
+Branch `claude/scanlist-setup-lock` (Samba_main only; 74 tests).
+
+### The magnet and the PyHysteresis controller are rig properties, not scan properties
+The AC Field Sweep box had a **Device** combo (`field_device`, "" = setup
+default) and the DC Hysteresis box had its own **Device** combo
+(`hyst_device`) — both per *scan config*, so the same rig could be described
+differently by two configs and the real magnet lived in a third place
+(Setup Defaults → `magnet_device`).
+
+- **New setup key `hyst_device`** (`Samba_main/config.py`, Green
+  `pyhystlongi` / IR `pyhystpolar`), edited in **Setup Defaults → Magnet →
+  "DC hyst device:"** (`setup_defaults.py`, combo filtered to registry type
+  `"hysteresis"`, round-tripped through `load()` / `get_defaults()`).
+- **Migration:** `load_setup` seeds a missing setup-level `hyst_device` from
+  the first saved config that has one, *before* the `SETUP_HW_DEFAULTS`
+  `setdefault` — so an existing setup keeps the device it was using instead of
+  jumping to the compiled default.
+- **Panel** (`panels/trajectory.py`): both combos are gone; each box shows a
+  read-only teal path label (same style as the TR-MOKE DG645 label), fed by the
+  new `set_field_device()` / `set_hyst_device()` from `samba.py` on setup load
+  and on every Setup Defaults edit. `get_config_partial` now writes
+  `field_device: ""` / `hyst_device: ""` — i.e. "no per-config override" — which
+  also clears any stale value already stored in a config (`_save_active_config`
+  merges with `update`).
+- **`_build_full_config`** injects the resolved paths into the scan config, the
+  same way stage device/attr/label/unit are injected (§35): FIELD gets
+  `field_device` + `field_current_attr` from `magnet_device` /
+  `magnet_current_attr`, DC_HYST gets `hyst_device` (falling back to the first
+  enabled channel's device if the setup key is empty). The runner and the HDF5
+  metadata are unchanged — they still read `cfg["field_device"]` /
+  `cfg["hyst_device"]`, now always truthful.
+- Cryo is untouched: its Field Sweep / Temperature Sweep device+attr combos are
+  how the sub-mode picks *which quantity* (AttoDRY field vs temperature) is
+  swept, not a duplicate of a setup default.
+
+### Segment box did not resize when a saved config was loaded
+Reported right after §54: switching to another saved config left the AC box
+small until a segment was added by hand (which called `updateGeometry()`).
+`sizeHint()` was reading `self._content.sizeHint()`, and that container can hand
+out a cached height right after `load_segments()` rebuilt the rows. It now sums
+the **row widgets' own** sizeHints (`_rows_height()`), which are correct
+immediately, and `showEvent` re-asserts the hint when the field row is revealed
+(config loads happen while it is hidden). Both apps.
+
+### Verification
+20 offscreen checks (`check_devices.py`): no device combos left in either box
+(only the two monitor combos), labels fed from the setup, `get_config_partial`
+emits `""` for both keys, Setup Defaults round-trip + registry filtering,
+`load_setup` seeding from an old file, `MainWindow._build_full_config`
+(driven with a stub self over the real panels) injecting both devices, and the
+config-switch resize: 1 segment → 105 px box, load a 5-segment config → 212 px
+with all five rows visible and no scrollbar (with the scroll area's sizeHint
+pinned stale), then back to 105 px. Plus the earlier 51/18/28/10 harness checks
+and `python test_runner.py` 74 OK.
+
+## 56. Recent Changes (August 2026) — Per-Axis "Zero after scan" Toggle (Samba_main)
 
 Branch `claude/zero-after-scan-toggle` (72 tests). User request: a toggle next
 to each Spatial axis' "Scan enabled" checkbox that sends the stage back to 0
@@ -3056,8 +3309,10 @@ toggle only means anything for an axis the scan actually moves.
 Per-axis keys `act1_zero_after` / `act2_zero_after`, round-tripped by
 `ActuatorGroup.load()` / `get_partial()` (so they ride the existing
 `p.update(self.act1_grp.get_partial("act1"))` path — no special-casing in
-`get_config_partial`). Added to `make_default_config`; schema bumped to **v6**
-with `_migrate_v5_to_v6` backfilling `False` on old configs.
+`get_config_partial`). Added to `make_default_config`; schema bumped to **v7**
+with `_migrate_v6_to_v7` backfilling `False` on old configs (renumbered from
+v5→v6 when merging: `main` published its own v5→v6 for the DC-hyst Ampere
+rename).
 
 ### Execution (`Samba_main/samba.py`)
 - `_arm_zero_after_scan(cfg)` resolves the axes **once at scan start** into
@@ -3083,7 +3338,7 @@ with `_migrate_v5_to_v6` backfilling `False` on old configs.
 ### Scope / tests
 Samba_main only (per user); `Cryo/panels.py` has its own independent
 `ActuatorGroup` copy and is untouched. `test_runner.py` +3 → 72
-(`TestZeroAfterScanConfig`: defaults off, v5→v6 backfill, existing choice
+(`TestZeroAfterScanConfig`: defaults off, v6→v7 backfill, existing choice
 preserved). The plan/execute logic and the panel round-trip were verified
 against the real shipped methods with PyQt6 stubbed (PyQt6 is absent from the
 CI env, so that scaffolding is not committed): both-axes/one-axis/disabled-axis
@@ -3093,7 +3348,7 @@ device / write failure surfacing as warnings.
 
 ---
 
-## 54. Recent Changes (August 2026) — Scanlist Polarity Control Persisted + Start Reminder
+## 57. Recent Changes (August 2026) — Scanlist Polarity Control Persisted + Start Reminder
 
 Branch `claude/zero-after-scan-toggle` (77 tests). Samba_main only — Cryo has
 its own independent `ScanlistPanel` (`Cryo/panels.py:2249`) and is untouched.
@@ -3118,7 +3373,7 @@ recorded whether flipping had been enabled.
   text in sync is suppressed by the block, so a plain silent `setChecked` would
   leave the caption showing the previous state. The previous block state is
   restored rather than forced to False.
-- **Schema v7** with `_migrate_v6_to_v7` backfilling `False`, preserving the old
+- **Schema v8** with `_migrate_v7_to_v8` backfilling `False`, preserving the old
   "starts OFF" behaviour for existing configs.
 
 ### Recorded in HDF5 — scanlist scans only
@@ -3155,7 +3410,7 @@ magnet. Cancel therefore leaves the application exactly as it was.
 
 ---
 
-## 55. Recent Changes (August 2026) — App Version Scheme & "Recent" Y-Scale Mode
+## 58. Recent Changes (August 2026) — App Version Scheme & "Recent" Y-Scale Mode
 
 Branch `claude/zero-after-scan-toggle` (85 tests).
 

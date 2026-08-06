@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 APP_VERSION = "13.01"
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -50,6 +50,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
         "magnet_current_attr":   "current_longitudinal",
         "magnet_field_attr":     "field_longitudinal_corr",
+        # DC-hysteresis controller (PyHysteresis) — one per setup, not per scan
+        "hyst_device":           "hpp-N42/beckhoff/pyhystlongi",
         "relay_device":          "hpp-N42/current/PyRelais",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley",
@@ -89,6 +91,8 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "hpp-N42/beckhoff/magnet",
         "magnet_current_attr":   "current_polar",
         "magnet_field_attr":     "field_polar_corr",
+        # DC-hysteresis controller (PyHysteresis) — one per setup, not per scan
+        "hyst_device":           "hpp-N42/beckhoff/pyhystpolar",
         "relay_device":          "hpp-N42/current/PyRelais",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley2",
@@ -128,6 +132,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "magnet_device":         "",
         "magnet_current_attr":   "current_polar",
         "magnet_field_attr":     "field_polar_corr",
+        "hyst_device":           "",
         "relay_device":          "",
         "relay_attr":            "switchvar",
         "keithley_device":       "hpp-N42/current/PyKeithley2",
@@ -219,7 +224,7 @@ def make_default_config(name: str = "scan_x") -> dict:
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
         "hyst_device":   "hpp-N42/beckhoff/pyhystlongi",
-        "hyst_field_V":  1.0,      # peak field amplitude sent to power supply (V)
+        "hyst_field_A":  1.0,      # peak coil current sent to power supply (A)
         "hyst_int_time": 2.0,      # integration time per half-loop on Beckhoff (s)
         "hyst_npts":     100,      # number of field points per half-loop
         "hyst_cycles":   1,        # number of loops to average
@@ -291,7 +296,7 @@ def _migrate_v0_to_v1(cfg: dict):
         cfg.setdefault("scan_x", True); cfg.setdefault("scan_y", False)
     # DC hyst defaults
     cfg.setdefault("hyst_device",   "hpp-N42/beckhoff/hysteresis")
-    cfg.setdefault("hyst_field_V",  1.0)
+    cfg.setdefault("hyst_field_A",  1.0)
     cfg.setdefault("hyst_int_time", 2.0)
     cfg.setdefault("hyst_npts",     100)
     cfg.setdefault("hyst_cycles",   1)
@@ -375,14 +380,27 @@ def _migrate_v4_to_v5(cfg: dict):
 
 
 def _migrate_v5_to_v6(cfg: dict):
-    """v5→v6: Add the per-axis 'Zero after scan' toggles.  Default False
+    """v5→v6: DC-hyst field amplitude is a CURRENT in Ampere, not Volt.
+
+    The value has always been written to the PyHysteresis `MagneticField`
+    attribute, which the device divides by its `AmperePerVolt` property to get
+    the DAC programming voltage — i.e. the number was already in A and only
+    the label said V.  Rename the key; the value is carried over unchanged.
+    """
+    if "hyst_field_A" not in cfg:
+        cfg["hyst_field_A"] = cfg.get("hyst_field_V", 1.0)
+    cfg.pop("hyst_field_V", None)
+
+
+def _migrate_v6_to_v7(cfg: dict):
+    """v6→v7: Add the per-axis 'Zero after scan' toggles.  Default False
     preserves the old behaviour of leaving the stage where the scan ended."""
     cfg.setdefault("act1_zero_after", False)
     cfg.setdefault("act2_zero_after", False)
 
 
-def _migrate_v6_to_v7(cfg: dict):
-    """v6→v7: Persist the scanlist polarity control (relay / field flip).
+def _migrate_v7_to_v8(cfg: dict):
+    """v7→v8: Persist the scanlist polarity control (relay / field flip).
     These used to be session-only UI state that reset to OFF on restart;
     False keeps that as the default for existing configs."""
     cfg.setdefault("relay_flip", False)
@@ -397,6 +415,7 @@ _MIGRATIONS = [
     (5, _migrate_v4_to_v5),
     (6, _migrate_v5_to_v6),
     (7, _migrate_v6_to_v7),
+    (8, _migrate_v7_to_v8),
 ]
 
 
@@ -423,6 +442,16 @@ def load_setup(name: str) -> dict:
                 log.info("Migrated save_dir → %s", d["save_dir"])
             d.setdefault("notebook_dir", "~/moke_data")
             d.setdefault("server_sync_dir", SETUP_HW_DEFAULTS[name]["server_sync_dir"])
+            # hyst_device moved from the scan config to the setup.  Seed it from
+            # whatever the saved configs were using, so an existing setup keeps
+            # its PyHysteresis device instead of jumping to the compiled default.
+            if "hyst_device" not in d:
+                for _cfg in d.get("configs") or []:
+                    if _cfg.get("hyst_device"):
+                        d["hyst_device"] = _cfg["hyst_device"]
+                        log.info("Setup [%s]: hyst_device seeded from config → %s",
+                                 name, d["hyst_device"])
+                        break
             for k, v in SETUP_HW_DEFAULTS[name].items():
                 if k in HW_WARN_KEYS:
                     saved = d.get(k)

@@ -1046,6 +1046,9 @@ class MainWindow(QMainWindow):
             setup.get("act2_label",  "Y"), setup.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(setup.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(setup.get("rtv40_device", ""))
+        # Field-sweep magnet and DC-hyst controller are per-setup, not per-scan
+        self.traj_panel.set_field_device(setup.get("magnet_device", ""))
+        self.traj_panel.set_hyst_device(setup.get("hyst_device", ""))
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(setup.get("lights_device", ""))
         self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
@@ -1357,6 +1360,8 @@ class MainWindow(QMainWindow):
             defaults.get("act2_label",  "Y"), defaults.get("act2_unit", "nm"))
         self.traj_panel.set_trmoke_device(defaults.get("trmoke_dg645", ""))
         self.traj_panel.set_rtv40_device(defaults.get("rtv40_device", ""))
+        self.traj_panel.set_field_device(defaults.get("magnet_device", ""))
+        self.traj_panel.set_hyst_device(defaults.get("hyst_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
         self.calib_panel.configure_stage(
@@ -1459,6 +1464,11 @@ class MainWindow(QMainWindow):
             partial["act1_unit"]   = setup.get("act1_unit",  partial.get("act1_unit",  "nm"))
             partial["act2_label"]  = setup.get("act2_label", partial.get("act2_label", "Y"))
             partial["act2_unit"]   = setup.get("act2_unit",  partial.get("act2_unit",  "nm"))
+        # Field sweep: the magnet is the setup's, never a per-config override —
+        # the AC Field Sweep box only displays it (Setup Defaults owns it).
+        if scan_type == "FIELD":
+            partial["field_device"]       = setup.get("magnet_device", "")
+            partial["field_current_attr"] = setup.get("magnet_current_attr", "")
         # DC hyst channels live in the right panel now
         if partial.get("scan_type") == "DC_HYST":
             dc_sensors = self.right_panel.get_dc_channels()
@@ -1470,7 +1480,9 @@ class MainWindow(QMainWindow):
                 hyst_chs.append(ch)
             partial["hyst_channels"] = hyst_chs
             partial["hyst_sources"]  = self.right_panel.get_dc_sources()
-            # Use device from first enabled channel if hyst_device not set
+            # PyHysteresis device from Setup Defaults (was a combo in the panel)
+            partial["hyst_device"] = setup.get("hyst_device", "")
+            # Fall back to the first enabled channel's device if unset
             if not partial.get("hyst_device"):
                 for ch in hyst_chs:
                     if ch.get("enabled") and ch.get("device"):
@@ -1659,6 +1671,22 @@ class MainWindow(QMainWindow):
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         worker.finished.connect(self._on_worker_finished)
 
+    # ── Setup lock helper ─────────────────────────────────────────────────────
+    def _acquire_setup_lock(self) -> bool:
+        """Take the multi-computer setup lock; warn and return False if busy.
+
+        Used by every start path (single scan, scanlist, calibration time
+        scan) — each of them drives the same physical setup, so all of them
+        must hold the lock.
+        """
+        ok, who = acquire_lock(self._active_setup_name)
+        if not ok:
+            QMessageBox.warning(
+                self, "Setup busy",
+                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
+                "Abort that scan first, then retry.")
+        return ok
+
     # ── Single scan ───────────────────────────────────────────────────────────
     def _start_scan(self):
         if self._scan_running: return
@@ -1670,12 +1698,7 @@ class MainWindow(QMainWindow):
         if active is None: return
 
         # ── Setup lock ────────────────────────────────────────────────────────
-        ok, who = acquire_lock(self._active_setup_name)
-        if not ok:
-            QMessageBox.warning(
-                self, "Setup busy",
-                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
-                "Abort that scan first, then retry.")
+        if not self._acquire_setup_lock():
             return
 
         self._current_scan_cfg = cfg
@@ -1794,6 +1817,10 @@ class MainWindow(QMainWindow):
                 self, "No sensors",
                 "Enable at least one sensor in the Calibration tab's "
                 "Time-scan config."); return
+
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
@@ -1984,6 +2011,9 @@ class MainWindow(QMainWindow):
         # ── Polarity-control reminder ────────────────────────────────────────
         # Checked before anything with a side effect (plot buffers cleared,
         # field setpoint written), so Cancel leaves the app exactly as it was.
+        # Deliberately ahead of the setup lock: cancelling after acquiring it
+        # would leave the setup marked busy to every other computer, since the
+        # lock is only released when a scan finishes.
         if not (sl["relay_flip"] or sl["field_flip"]):
             if QMessageBox.warning(
                     self, "No polarity control",
@@ -1999,6 +2029,10 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setText(
                     "Scanlist not started — no polarity control selected")
                 return
+
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
 
         # Record the polarity configuration in every file of this list.  Set
         # here rather than in _build_full_config() so single scans — which
@@ -2119,6 +2153,7 @@ class MainWindow(QMainWindow):
         self._alloc_scan_data(cfg, active); self._setup_live_display(cfg, active)
 
     def _on_sl_worker_finished(self):
+        release_lock(self._active_setup_name)
         self._set_running(False)
         self._scan_running = False
         self._sl_worker = None

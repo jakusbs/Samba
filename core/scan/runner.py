@@ -1070,7 +1070,11 @@ class ScanRunner:
 
         npts    = max(1, int(cfg.get("hyst_npts",     100)))
         cycles  = max(1, int(cfg.get("hyst_cycles",   1)))
-        field_V = float(cfg.get("hyst_field_V",  1.0))
+        # Peak coil CURRENT [A].  The PyHysteresis device divides it by its
+        # AmperePerVolt property to get the DAC programming voltage, so the
+        # value has always been an Ampere — the old `hyst_field_V` key name
+        # (still read for configs written before the rename) was a mislabel.
+        field_A = float(cfg.get("hyst_field_A", cfg.get("hyst_field_V", 1.0)))
         int_t   = max(0.01, float(cfg.get("hyst_int_time", 2.0)))
 
         # Active channels (result1..result6)
@@ -1108,7 +1112,7 @@ class ScanRunner:
             meta = hfile.create_group("metadata")
             _wsa(meta, "scan_name",   cfg.get("name", "dc_hyst"))
             _wsa(meta, "hyst_device", hyst_dev)
-            meta.attrs["MagneticField_V"]  = field_V
+            meta.attrs["MagneticField_A"]  = field_A
             meta.attrs["NumberOfPoints"]   = npts
             meta.attrs["Cycles"]           = cycles
             meta.attrs["IntegrationTime"]  = int_t
@@ -1182,7 +1186,7 @@ class ScanRunner:
 
         # ── Configure device ──────────────────────────────────────────────────
         lg(f"── Configuring {hyst_dev} ──")
-        for attr, val in [("MagneticField",  field_V),
+        for attr, val in [("MagneticField",  field_A),
                            ("NumberOfPoints", npts),
                            ("Cycles",         cycles),
                            ("IntegrationTime", int_t)]:
@@ -1223,7 +1227,7 @@ class ScanRunner:
         try:
             # ── Start ─────────────────────────────────────────────────────────
             st(f"Starting DC Hyst: {npts} pts × {cycles} cycles, "
-               f"field={field_V:.3f} V, int={int_t:.3g} s/half-loop")
+               f"field={field_A:.3f} A, int={int_t:.3g} s/half-loop")
             hyst_p.command_inout("Start")
             time.sleep(poll_s)   # give device time to enter RUNNING state
 
@@ -1290,8 +1294,8 @@ class ScanRunner:
                 except Exception as e:
                     lg(f"⚠ final field read failed ({e}) — using linear estimate")
                     field_arr = np.concatenate([
-                        np.linspace(0, field_V * 1000 / 5.0, npts),
-                        np.linspace(0, -field_V * 1000 / 5.0, npts)])
+                        np.linspace(0, field_A * 1000 / 5.0, npts),
+                        np.linspace(0, -field_A * 1000 / 5.0, npts)])
                 n_actual = min(len(field_arr), n_loop)
 
                 # Scalar results — safe_read is correct here (these ARE scalars)

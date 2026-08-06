@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QRadioButton, QAbstractItemView, QInputDialog,
     QStackedWidget
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QKeySequence, QIcon
 from PyQt6.QtWidgets import QAbstractSpinBox
 
@@ -557,6 +557,12 @@ class _NoUnderscoreValidator:
 # ─────────────────────────────────────────────────────────────────────────────
 # MokeMetadataGroup — reusable metadata widget (Trajectory + Scanlist)
 # ─────────────────────────────────────────────────────────────────────────────
+INCIDENCES = ["PMOKE", "LMOKE+", "LMOKE", "TMOKE"]
+# Standard mirror shift [mm], used for every incidence until the user changes
+# it — from then on each incidence keeps its own remembered value.
+DEFAULT_MIRROR_SHIFT = 12.50
+
+
 class MokeMetadataGroup(QGroupBox):
     """Metadata fields: operator, sample, device, notes, incidence, polarization,
     λ/2, λ/4, noDC, R4W, R2W.  Emits `changed` whenever any value changes."""
@@ -625,44 +631,53 @@ class MokeMetadataGroup(QGroupBox):
         # ── Right: Incidence / Polarization / checkboxes ──────────────────────
         right = QGridLayout(); right.setSpacing(2)
 
-        # Row 0: Incidence + mirror-shift
+        # Per-incidence mirror-shift memory — set up before the combo exists so
+        # a signal fired during construction can never see them missing.
+        self._shift_by_inc = {inc: DEFAULT_MIRROR_SHIFT for inc in INCIDENCES}
+        self._cur_inc = INCIDENCES[0]
+        self._inc_loading = False
+
+        # Row 0: Incidence
         right.addWidget(QLabel("Incidence:"), 0, 0)
         self.incidence_combo = NoScrollComboBox()
-        self.incidence_combo.addItems(["PMOKE", "LMOKE+", "LMOKE", "TMOKE"])
+        self.incidence_combo.addItems(INCIDENCES)
         self.incidence_combo.currentTextChanged.connect(self._on_incidence_changed)
         right.addWidget(self.incidence_combo, 0, 1)
 
-        self._mirror_shift_lbl = QLabel("shift:")
-        self._mirror_shift_lbl.setStyleSheet("font-size:9px;")
+        # Row 1: mirror shift — always visible, remembered per incidence
+        self._mirror_shift_lbl = QLabel("Mirror shift:")
         self.mirror_shift = NoScrollDoubleSpinBox()
         self.mirror_shift.setRange(-50, 50); self.mirror_shift.setDecimals(2)
-        self.mirror_shift.setValue(12.50); self.mirror_shift.setSuffix(" mm")
+        self.mirror_shift.setValue(DEFAULT_MIRROR_SHIFT)
+        self.mirror_shift.setSuffix(" mm")
         self.mirror_shift.setFixedWidth(85)
-        self._mirror_shift_lbl.setVisible(False)
-        self.mirror_shift.setVisible(False)
-        right.addWidget(self._mirror_shift_lbl, 0, 2)
-        right.addWidget(self.mirror_shift, 0, 3)
+        self.mirror_shift.setToolTip(
+            "Mirror shift — stored separately for each incidence, so switching "
+            "incidence brings back the value last used with it.")
+        self.mirror_shift.valueChanged.connect(self._on_shift_edited)
+        right.addWidget(self._mirror_shift_lbl, 1, 0)
+        right.addWidget(self.mirror_shift, 1, 1)
 
-        # Row 1: Polarization + custom
-        right.addWidget(QLabel("Polarization:"), 1, 0)
+        # Row 2: Polarization + custom
+        right.addWidget(QLabel("Polarization:"), 2, 0)
         self.pol_combo = NoScrollComboBox()
         self.pol_combo.addItems(["s", "45°", "p", "other"])
         self.pol_combo.currentTextChanged.connect(self._on_pol_changed)
-        right.addWidget(self.pol_combo, 1, 1)
+        right.addWidget(self.pol_combo, 2, 1)
         self.pol_custom = QLineEdit(); self.pol_custom.setPlaceholderText("custom")
         self.pol_custom.setFixedWidth(70)
         self.pol_custom.setVisible(False)
         _NoUnderscoreValidator.install(self.pol_custom)
-        right.addWidget(self.pol_custom, 1, 2, 1, 2)
+        right.addWidget(self.pol_custom, 2, 2, 1, 2)
 
-        # Row 2: checkboxes λ/2, λ/4, noDC — all in one line
+        # Row 3: checkboxes λ/2, λ/4, noDC — all in one line
         cb_row = QHBoxLayout(); cb_row.setSpacing(10)
         self.lam2_cb = QCheckBox("λ/2"); cb_row.addWidget(self.lam2_cb)
         self.lam4_cb = QCheckBox("λ/4"); cb_row.addWidget(self.lam4_cb)
         cb_row.addSpacing(12)
         self.nodc_cb = QCheckBox("noDC"); cb_row.addWidget(self.nodc_cb)
         cb_row.addStretch()
-        right.addLayout(cb_row, 2, 0, 1, 4)
+        right.addLayout(cb_row, 3, 0, 1, 4)
 
         top.addLayout(right)
 
@@ -679,14 +694,25 @@ class MokeMetadataGroup(QGroupBox):
         self.tfm_spin.valueChanged.connect(self.changed.emit)
         self.tstack_spin.valueChanged.connect(self.changed.emit)
 
-        # Trigger initial visibility
-        self._on_incidence_changed(self.incidence_combo.currentText())
-
-    # ── Visibility helpers ────────────────────────────────────────────────────
+    # ── Incidence / mirror-shift helpers ──────────────────────────────────────
     def _on_incidence_changed(self, text):
-        show = text in ("LMOKE+", "LMOKE")
-        self._mirror_shift_lbl.setVisible(show)
-        self.mirror_shift.setVisible(show)
+        """Park the shift under the incidence being left, then restore the one
+        remembered for the incidence just selected."""
+        if self._inc_loading:
+            return
+        if self._cur_inc and self._cur_inc != text:
+            self._shift_by_inc[self._cur_inc] = self.mirror_shift.value()
+        self._cur_inc = text
+        val = self._shift_by_inc.get(text, DEFAULT_MIRROR_SHIFT)
+        # The combo's own currentTextChanged → changed.emit covers the save;
+        # blocking here keeps it to a single emit per switch.
+        self.mirror_shift.blockSignals(True)
+        self.mirror_shift.setValue(val)
+        self.mirror_shift.blockSignals(False)
+
+    def _on_shift_edited(self, value: float):
+        if not self._inc_loading and self._cur_inc:
+            self._shift_by_inc[self._cur_inc] = float(value)
 
     def _on_pol_changed(self, text):
         self.pol_custom.setVisible(text == "other")
@@ -698,7 +724,9 @@ class MokeMetadataGroup(QGroupBox):
             pol = self.pol_custom.text().strip() or "other"
         inc = self.incidence_combo.currentText()
         ms  = self.mirror_shift.value()
+        shifts = dict(self._shift_by_inc); shifts[inc] = ms
         return {
+            "mirror_shift_by_incidence": shifts,
             "operator":     self.meta_operator.text().strip(),
             "sample_id":    self.meta_sample.text().strip(),
             "device_id":    self.meta_device.text().strip(),
@@ -721,9 +749,20 @@ class MokeMetadataGroup(QGroupBox):
         self.meta_device.setText(cfg.get("device_id", ""))
         self.meta_notes.setText(cfg.get("notes", ""))
         inc = cfg.get("incidence", "PMOKE")
-        idx = self.incidence_combo.findText(inc)
-        if idx >= 0: self.incidence_combo.setCurrentIndex(idx)
-        self.mirror_shift.setValue(cfg.get("mirror_shift", 12.50))
+        self._inc_loading = True
+        try:
+            idx = self.incidence_combo.findText(inc)
+            if idx >= 0: self.incidence_combo.setCurrentIndex(idx)
+            saved = cfg.get("mirror_shift_by_incidence") or {}
+            self._shift_by_inc = {
+                i: float(saved.get(i, DEFAULT_MIRROR_SHIFT)) for i in INCIDENCES}
+            ms = float(cfg.get("mirror_shift",
+                               self._shift_by_inc.get(inc, DEFAULT_MIRROR_SHIFT)))
+            self._cur_inc = inc if inc in self._shift_by_inc else INCIDENCES[0]
+            self._shift_by_inc[self._cur_inc] = ms
+            self.mirror_shift.setValue(ms)
+        finally:
+            self._inc_loading = False
         pol = cfg.get("polarization", "s")
         
         idx = self.pol_combo.findText(pol)
@@ -1181,6 +1220,46 @@ class RightPanel(QWidget):
 class FieldSegmentList(QWidget):
     changed = pyqtSignal()
 
+    _MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+    def _rows_height(self) -> int:
+        """Total height of the segment rows, summed from the row widgets.
+
+        Read straight off the row widgets rather than from the scroll area or
+        its content container: a freshly created row reports its own sizeHint
+        immediately, while the containers can still hand out a cached value
+        right after the rows were rebuilt (load_segments) or while the panel is
+        hidden — which is what collapsed the box on a config switch.
+        """
+        heights = [self._vlayout.itemAt(i).widget().sizeHint().height()
+                   for i in range(self._vlayout.count())
+                   if self._vlayout.itemAt(i).widget() is not None]
+        if not heights:
+            return 0
+        return sum(heights) + self._vlayout.spacing() * (len(heights) - 1)
+
+    def sizeHint(self) -> QSize:
+        """Height derived from the segment rows themselves.
+
+        QScrollArea does not report a content-based sizeHint reliably — when the
+        rows are built while the panel is still hidden (every config load
+        happens before the field row is shown) it can keep the ~28 px default.
+        The group box holding this list is top-aligned, so that stale hint
+        collapsed the box to the height of its dropdown column and only the
+        first couple of segments stayed visible.  Computing the height here
+        makes it deterministic on any Qt version / platform.
+        """
+        sh = super().sizeHint()
+        h = min(self._rows_height() + 2, self._MAX_LIST_H)   # + viewport padding
+        h += self._btn_row.sizeHint().height() + 2           # + root spacing
+        return QSize(sh.width(), h)
+
+    def showEvent(self, ev):
+        # Re-assert the hint when the field row is revealed: config loads
+        # rebuild the rows while this widget is still hidden.
+        super().showEvent(ev)
+        self.updateGeometry()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(2)
@@ -1188,11 +1267,20 @@ class FieldSegmentList(QWidget):
         self._content = QWidget()
         self._vlayout = QVBoxLayout(self._content)
         self._vlayout.setContentsMargins(0, 0, 0, 0); self._vlayout.setSpacing(2)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setWidget(self._content)
-        scroll.setMaximumHeight(108)
-        scroll.setStyleSheet("QScrollArea{border:none;}")
-        root.addWidget(scroll)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(self._content)
+        # Grows with the number of segments up to _MAX_LIST_H (~6 rows) before
+        # scrolling (was a hard 108 px = 3 rows, so a 4-segment sweep always
+        # had a scrollbar).
+        self._scroll.setMaximumHeight(self._MAX_LIST_H)
+        self._scroll.setMinimumHeight(34)          # never collapse below one row
+        self._scroll.setStyleSheet("QScrollArea{border:none;}")
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The list sits in a non-stretching column, so state its own width:
+        # one segment row (start → stop, N, Δ, ×) plus the scrollbar gutter.
+        self.setMinimumWidth(408)
+        root.addWidget(self._scroll)
 
         btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 2, 0, 0); btn_row.setSpacing(6)
         add_btn = QPushButton("+ Segment"); add_btn.setFixedHeight(22)
@@ -1201,6 +1289,7 @@ class FieldSegmentList(QWidget):
         self._summary_lbl = QLabel()
         self._summary_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
         btn_row.addWidget(add_btn); btn_row.addWidget(self._summary_lbl); btn_row.addStretch()
+        self._btn_row = btn_row
         root.addLayout(btn_row)
 
         self._rows: List[tuple] = []   # (start_spin, stop_spin, n_spin, row_widget)
@@ -1256,6 +1345,7 @@ class FieldSegmentList(QWidget):
         self._on_changed()
 
     def _on_changed(self):
+        self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(self._seg_npts(t) for t in self._rows)
         n = len(self._rows)
         self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")
@@ -1601,8 +1691,12 @@ class TrajectoryPanel(QWidget):
 
         # ── Field panel ───────────────────────────────────────────────────────
         # Layout (all always visible, side-by-side):
-        #   [AC params]  |  [Field / Hc monitor]  |  [DC params]  |  [DC live plot]
+        #   [Field Sweep params]  |  [field/temperature monitor]  |  [Temp Sweep params]
         # A compact sub-mode selector at the top selects which scan Start runs.
+        # Cryo has NO DC hysteresis: the second sub-mode is the Temperature
+        # Sweep (FIELD engine, AttoDRY temperature setpoint as the axis).  The
+        # `_ac_grp` / `_dc_grp` / `rb_dc_hy` names are inherited from the shared
+        # Samba_main layout and kept only because samba_cryo.py refers to them.
         self.field_w = QWidget(); fw_root = QVBoxLayout(self.field_w)
         fw_root.setContentsMargins(0, 0, 0, 0); fw_root.setSpacing(3)
 
@@ -1621,40 +1715,54 @@ class TrajectoryPanel(QWidget):
         # Main horizontal row
         horiz = QHBoxLayout(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
 
-        # ── Column 1: AC params ───────────────────────────────────────────────
-        self._ac_grp = QGroupBox("Field Sweep"); fgl = QGridLayout(self._ac_grp)
-        fgl.setSpacing(4); fgl.setContentsMargins(8, 8, 8, 8)
+        # ── Column 1: field-sweep params ──────────────────────────────────────
+        # Two inner columns so the width is actually used and the box stays
+        # short: the segment editor on the left (it grows downward as segments
+        # are added), the device / attribute / monitor dropdowns on the right.
+        self._ac_grp = QGroupBox("Field Sweep")
+        ac_row = QHBoxLayout(self._ac_grp)
+        ac_row.setSpacing(10); ac_row.setContentsMargins(8, 8, 8, 8)
 
-        # Row 0: Field device dropdown
-        fgl.addWidget(QLabel("Device:"), 0, 0)
+        # Left: multi-segment field list (natural width, no stretch)
+        self._seg_list = FieldSegmentList()
+        ac_row.addWidget(self._seg_list, stretch=0)
+
+        # Right: device / attribute / monitor dropdowns, packed to the top.  The
+        # two monitor combos are stacked (not side by side) so each gets the
+        # full column width — they hold registry device / channel names.
+        ac_side = QGridLayout(); ac_side.setSpacing(4)
+        ac_side.setColumnStretch(1, 1)
+        ac_side.addWidget(QLabel("Device:"), 0, 0)
         self._ac_dev_combo = NoScrollComboBox()
         self._ac_dev_combo.setStyleSheet("font-size:10px;")
         self._ac_dev_combo.addItem("(setup default)", "")
         self._ac_dev_combo.currentIndexChanged.connect(self._on_field_dev_changed)
-        fgl.addWidget(self._ac_dev_combo, 0, 1)
+        ac_side.addWidget(self._ac_dev_combo, 0, 1)
 
-        # Row 1: Attribute dropdown
-        fgl.addWidget(QLabel("Attr:"), 1, 0)
+        ac_side.addWidget(QLabel("Attr:"), 1, 0)
         self._ac_attr_combo = NoScrollComboBox()
         self._ac_attr_combo.setStyleSheet("font-size:10px;")
         self._ac_attr_combo.addItem("(setup default)", "")
-        fgl.addWidget(self._ac_attr_combo, 1, 1)
+        ac_side.addWidget(self._ac_attr_combo, 1, 1)
 
-        # Row 2: Multi-segment field list
-        self._seg_list = FieldSegmentList()
-        fgl.addWidget(self._seg_list, 2, 0, 1, 2)
-
-        # Row 2: AC monitor dropdowns
-        ac_mon_row = QHBoxLayout(); ac_mon_row.setSpacing(4)
-        ac_mon_row.addWidget(QLabel("Mon:"))
+        ac_side.addWidget(QLabel("Mon:"), 2, 0)
         self._ac_mon_dev = NoScrollComboBox(); self._ac_mon_dev.setStyleSheet("font-size:10px;")
         self._ac_mon_dev.currentIndexChanged.connect(lambda: self._on_mon_dev_changed("ac"))
-        ac_mon_row.addWidget(self._ac_mon_dev, stretch=1)
+        ac_side.addWidget(self._ac_mon_dev, 2, 1)
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
-        ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
-        fgl.addLayout(ac_mon_row, 3, 0, 1, 2)
-        self._ac_grp.setMinimumWidth(260)
-        horiz.addWidget(self._ac_grp)
+        ac_side.addWidget(self._ac_mon_ch, 3, 1)
+        ac_side.setRowStretch(4, 1)
+        ac_row.addLayout(ac_side, stretch=1)
+
+        # Roughly twice the old width (min was 260, no cap).  A stretch factor
+        # lets the group shrink towards its minimum on narrow screens instead
+        # of clipping; the monitor canvas in the middle takes what is left.
+        # AlignTop shrink-wraps the box to its content — the row's spare height
+        # goes to the monitor plot instead of becoming dead space in here.
+        self._ac_grp.setMinimumWidth(430)
+        self._ac_grp.setMaximumWidth(620)
+        horiz.addWidget(self._ac_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
         self._field_hist_t: collections.deque = collections.deque(maxlen=120)
@@ -1666,9 +1774,13 @@ class TrajectoryPanel(QWidget):
         self._field_fig = Figure(figsize=(2.8, 1.8), dpi=90, facecolor="#1e1e2e")
         self._field_ax  = self._field_fig.add_subplot(111)
         self._field_canvas = FigureCanvas(self._field_fig)
-        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(160)
+        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(140)
         self._style_field_ax("ac")
-        horiz.addWidget(self._field_canvas, stretch=2)
+        # Lay out once here too: tight_layout otherwise only runs on the first
+        # monitor update, so with no field readback the axis labels stayed
+        # clipped (visible now that the canvas is shorter than the boxes).
+        self._field_fig.tight_layout(pad=0.4)
+        horiz.addWidget(self._field_canvas, stretch=1)
 
         # ── Column 3: Temperature Sweep params ─────────────────────────────────
         self._dc_grp = QGroupBox("Temperature Sweep"); dc_pgl = QGridLayout(self._dc_grp)
@@ -1734,12 +1846,18 @@ class TrajectoryPanel(QWidget):
         self._dc_mon_ch = NoScrollComboBox(); self._dc_mon_ch.setStyleSheet("font-size:10px;")
         dc_mon_row.addWidget(self._dc_mon_ch, stretch=1)
         dc_pgl.addLayout(dc_mon_row, 5, 0, 1, 4)
-        self._dc_grp.setMinimumWidth(280)
-        horiz.addWidget(self._dc_grp)
+        # Twice the old width (min was 280, no cap) — see the Field group above.
+        self._dc_grp.setMinimumWidth(420)
+        self._dc_grp.setMaximumWidth(600)
+        horiz.addWidget(self._dc_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         fw_root.addLayout(horiz)
         self.field_w.setVisible(False)
-        root.addWidget(self.field_w)
+        # stretch=1: now that the two parameter boxes shrink-wrap their content,
+        # the panel's spare height goes to the monitor plot in this row rather
+        # than spreading the Timing / Metadata / Hardware rows below apart.
+        root.addWidget(self.field_w, stretch=1)
         self._on_submode_changed(0)   # apply initial highlight
 
 

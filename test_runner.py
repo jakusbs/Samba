@@ -866,7 +866,7 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 cfg = {"scan_type": "DC_HYST", "name": "t",
                        "hyst_device": "dev://hyst", "hyst_npts": 4,
-                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_cycles": 1, "hyst_field_A": 1.0, "hyst_int_time": 0.01,
                        "hyst_channels": channels, "sensors": []}
                 r = ScanRunner(cfg, {"save_dir": td})
                 # Abort immediately after file creation so we only test _open path
@@ -907,7 +907,7 @@ class TestDcHystCalibration(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 cfg = {"scan_type": "DC_HYST", "name": "cal",
                        "hyst_device": "dev://hyst", "hyst_npts": 4,
-                       "hyst_cycles": 1, "hyst_field_V": 1.0, "hyst_int_time": 0.01,
+                       "hyst_cycles": 1, "hyst_field_A": 1.0, "hyst_int_time": 0.01,
                        "hyst_channels": [{"label": "MOKE", "attr": "result1",
                                           "enabled": True, "y_axis": "Y1"}],
                        "sensors": []}
@@ -1230,7 +1230,7 @@ class TestDcHystSourceWrite(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 cfg = {"scan_type": "DC_HYST", "name": "t",
                        "hyst_device": "dev://hyst", "hyst_npts": 4,
-                       "hyst_cycles": 1, "hyst_field_V": 1.0,
+                       "hyst_cycles": 1, "hyst_field_A": 1.0,
                        "hyst_int_time": 0.01, "hyst_sources": sources,
                        "hyst_channels": [{"label": "R1", "attr": "result1",
                                           "enabled": True, "y_axis": "Y1"}],
@@ -1249,6 +1249,10 @@ class TestDcHystSourceWrite(unittest.TestCase):
         src = [(a, v) for a, v in writes if a.startswith("source")]
         self.assertEqual(src, [("source1", 1), ("source2", 2), ("source3", 13),
                                ("source4", 4), ("source5", 15), ("source6", 6)])
+
+    def test_field_amplitude_written_from_ampere_key(self):
+        writes = self._run([1, 2, 3, 4, 5, 6])
+        self.assertIn(("MagneticField", 1.0), writes)
 
     def test_older_server_rejecting_source_is_tolerated(self):
         # safe_write returns an error string for source* → loop breaks, no raise
@@ -1351,6 +1355,86 @@ class TestLabNotebookScanlistColumn(unittest.TestCase):
         self.assertTrue(os.path.exists(nb + ".bak"), "reordered header → backup")
         rows = self._read(nb)
         self.assertEqual(rows[0], _nb_mod._HEADERS)
+
+
+class TestDcHystFieldAmpere(unittest.TestCase):
+    """The DC-hyst amplitude is a coil CURRENT [A] — the PyHysteresis device
+    divides `MagneticField` by its AmperePerVolt property to get the DAC
+    voltage.  The value is written unchanged, recorded as MagneticField_A, and
+    configs written before the rename (hyst_field_V) must still be honoured."""
+
+    def _run(self, cfg_extra):
+        import os, glob, tempfile, h5py
+        writes = []
+        proxy = InstantProxy(read_val=1.0)
+        _orig = (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+                 _runner_mod.safe_write)
+        _runner_mod.fresh_proxy    = lambda p: (proxy, None)
+        _runner_mod._make_filename = lambda cfg: "amp.h5"
+        _runner_mod.safe_write     = lambda p, attr, val, **kw: writes.append(
+            (attr, val))
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "amp",
+                       "hyst_device": "dev://hyst", "hyst_npts": 4,
+                       "hyst_cycles": 1, "hyst_int_time": 0.01,
+                       "hyst_channels": [{"label": "MOKE", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}],
+                       "sensors": []}
+                cfg.update(cfg_extra)
+                r = ScanRunner(cfg, {"save_dir": td})
+                r._read_and_emit_hyst_loop = lambda *a, **k: {}
+                r.abort()
+                r.run({"status": _noop, "log": _noop})
+                paths = glob.glob(os.path.join(td, "**", "amp.h5"), recursive=True)
+                self.assertTrue(paths, "DC-hyst file was not created")
+                with h5py.File(paths[0], "r") as f:
+                    return writes, dict(f["metadata"].attrs)
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod._make_filename,
+             _runner_mod.safe_write) = _orig
+
+    def test_ampere_key_written_and_recorded(self):
+        writes, meta = self._run({"hyst_field_A": 2.5})
+        self.assertIn(("MagneticField", 2.5), writes)
+        self.assertAlmostEqual(float(meta["MagneticField_A"]), 2.5)
+        self.assertNotIn("MagneticField_V", meta)
+
+    def test_legacy_volt_key_still_read(self):
+        writes, meta = self._run({"hyst_field_V": 3.25})
+        self.assertIn(("MagneticField", 3.25), writes)
+        self.assertAlmostEqual(float(meta["MagneticField_A"]), 3.25)
+
+
+class TestHystFieldKeyMigration(unittest.TestCase):
+    """Samba_main config migration v5→v6 renames hyst_field_V → hyst_field_A
+    (same number — the value was always an Ampere) and drops the old key."""
+
+    def _config_mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_main_config_mig",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Samba_main", "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_value_carried_over_old_key_dropped(self):
+        m = self._config_mod()
+        cfg = {"_schema_version": 5, "hyst_field_V": 4.5}
+        m._migrate_config(cfg)
+        self.assertEqual(cfg["hyst_field_A"], 4.5)
+        self.assertNotIn("hyst_field_V", cfg)
+        self.assertEqual(cfg["_schema_version"], m.SCHEMA_VERSION)
+
+    def test_new_key_wins_and_default_config_uses_ampere(self):
+        m = self._config_mod()
+        cfg = {"_schema_version": 5, "hyst_field_V": 1.0, "hyst_field_A": 7.0}
+        m._migrate_config(cfg)
+        self.assertEqual(cfg["hyst_field_A"], 7.0)
+        self.assertNotIn("hyst_field_V", m.make_default_config())
+        self.assertIn("hyst_field_A", m.make_default_config())
 
 
 class TestSetupLoadStatus(unittest.TestCase):

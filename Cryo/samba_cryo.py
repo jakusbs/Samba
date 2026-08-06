@@ -1626,6 +1626,22 @@ class CryoMainWindow(QMainWindow):
 
         return None  # all OK
 
+    # ── Setup lock helper ─────────────────────────────────────────────────────
+    def _acquire_setup_lock(self) -> bool:
+        """Take the multi-computer setup lock; warn and return False if busy.
+
+        Used by every start path (single scan, scanlist, calibration time
+        scan) — each of them drives the same physical setup, so all of them
+        must hold the lock.
+        """
+        ok, who = acquire_lock(self._active_setup_name)
+        if not ok:
+            QMessageBox.warning(
+                self, "Setup busy",
+                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
+                "Abort that scan first, then retry.")
+        return ok
+
     def _start_scan(self):
         if self._scan_running: return
         self._calib_timescan = False
@@ -1641,12 +1657,7 @@ class CryoMainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid scan parameters", err); return
 
         # ── Setup lock ────────────────────────────────────────────────────────
-        ok, who = acquire_lock(self._active_setup_name)
-        if not ok:
-            QMessageBox.warning(
-                self, "Setup busy",
-                f"Setup '{self._active_setup_name}' is already in use:\n{who}\n\n"
-                "Abort that scan first, then retry.")
+        if not self._acquire_setup_lock():
             return
 
         # ── ANM200 temperature-driven scaling ────────────────────────────────
@@ -1809,6 +1820,10 @@ class CryoMainWindow(QMainWindow):
                 self, "No sensors",
                 "Enable at least one sensor in the Calibration tab's "
                 "Time-scan config."); return
+
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
 
         n_pts = int(cfg.get("act1_npts", 101))
         self._current_scan_cfg = cfg
@@ -1996,6 +2011,10 @@ class CryoMainWindow(QMainWindow):
         if err:
             QMessageBox.warning(self, "Invalid scan parameters", err); return
 
+        # ── Setup lock ────────────────────────────────────────────────────────
+        if not self._acquire_setup_lock():
+            return
+
         sl = self.sl_panel.get_settings()
 
         # ── Build per-cycle config list (same direction logic as _start_scan) ──
@@ -2133,6 +2152,7 @@ class CryoMainWindow(QMainWindow):
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_sl_worker_finished(self):
+        release_lock(self._active_setup_name)
         self._set_running(False)
         self._scan_running = False
         self._sl_worker = None

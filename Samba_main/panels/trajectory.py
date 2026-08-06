@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QGroupBox, QComboBox, QScrollArea,
     QButtonGroup, QRadioButton
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QSize
 
 from config import X_NATURAL, X_TIME
 from nstep import NStepPair
@@ -27,9 +27,53 @@ from panels._widgets import (
 )
 from panels.hardware_panel import HardwarePanel
 
+# Read-only device readback (same look as the TR-MOKE DG645 device label):
+# these paths come from Setup Defaults and are shown, not edited, here.
+_DEV_LBL_STYLE = "color:#94e2d5;font-family:'Courier New',monospace;font-size:9px;"
+
 
 class FieldSegmentList(QWidget):
     changed = pyqtSignal()
+
+    _MAX_LIST_H = 200          # ≈6 segment rows before the list starts scrolling
+
+    def _rows_height(self) -> int:
+        """Total height of the segment rows, summed from the row widgets.
+
+        Read straight off the row widgets rather than from the scroll area or
+        its content container: a freshly created row reports its own sizeHint
+        immediately, while the containers can still hand out a cached value
+        right after the rows were rebuilt (load_segments) or while the panel is
+        hidden — which is what collapsed the box on a config switch.
+        """
+        heights = [self._vlayout.itemAt(i).widget().sizeHint().height()
+                   for i in range(self._vlayout.count())
+                   if self._vlayout.itemAt(i).widget() is not None]
+        if not heights:
+            return 0
+        return sum(heights) + self._vlayout.spacing() * (len(heights) - 1)
+
+    def sizeHint(self) -> QSize:
+        """Height derived from the segment rows themselves.
+
+        QScrollArea does not report a content-based sizeHint reliably — when the
+        rows are built while the panel is still hidden (every config load
+        happens before the field row is shown) it can keep the ~28 px default.
+        The group box holding this list is top-aligned, so that stale hint
+        collapsed the box to the height of its dropdown column and only the
+        first couple of segments stayed visible.  Computing the height here
+        makes it deterministic on any Qt version / platform.
+        """
+        sh = super().sizeHint()
+        h = min(self._rows_height() + 2, self._MAX_LIST_H)   # + viewport padding
+        h += self._btn_row.sizeHint().height() + 2           # + root spacing
+        return QSize(sh.width(), h)
+
+    def showEvent(self, ev):
+        # Re-assert the hint when the field row is revealed: config loads
+        # rebuild the rows while this widget is still hidden.
+        super().showEvent(ev)
+        self.updateGeometry()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,11 +82,20 @@ class FieldSegmentList(QWidget):
         self._content = QWidget()
         self._vlayout = QVBoxLayout(self._content)
         self._vlayout.setContentsMargins(0, 0, 0, 0); self._vlayout.setSpacing(2)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setWidget(self._content)
-        scroll.setMaximumHeight(108)
-        scroll.setStyleSheet("QScrollArea{border:none;}")
-        root.addWidget(scroll)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(self._content)
+        # Grows with the number of segments up to _MAX_LIST_H (~6 rows) before
+        # scrolling (was a hard 108 px = 3 rows, so a 4-segment sweep always
+        # had a scrollbar).
+        self._scroll.setMaximumHeight(self._MAX_LIST_H)
+        self._scroll.setMinimumHeight(34)          # never collapse below one row
+        self._scroll.setStyleSheet("QScrollArea{border:none;}")
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The list sits in a non-stretching column, so state its own width:
+        # one segment row (start → stop, N, Δ, ×) plus the scrollbar gutter.
+        self.setMinimumWidth(408)
+        root.addWidget(self._scroll)
 
         btn_row = QHBoxLayout(); btn_row.setContentsMargins(0, 2, 0, 0); btn_row.setSpacing(6)
         add_btn = QPushButton("+ Segment"); add_btn.setFixedHeight(22)
@@ -51,6 +104,7 @@ class FieldSegmentList(QWidget):
         self._summary_lbl = QLabel()
         self._summary_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
         btn_row.addWidget(add_btn); btn_row.addWidget(self._summary_lbl); btn_row.addStretch()
+        self._btn_row = btn_row
         root.addLayout(btn_row)
 
         self._rows: List[tuple] = []   # (start_spin, stop_spin, n_spin, row_widget)
@@ -106,6 +160,7 @@ class FieldSegmentList(QWidget):
         self._on_changed()
 
     def _on_changed(self):
+        self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(int(t[2].value()) for t in self._rows)
         n = len(self._rows)
         self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")
@@ -395,31 +450,50 @@ class TrajectoryPanel(QWidget):
         horiz = QHBoxLayout(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
 
         # ── Column 1: AC params ───────────────────────────────────────────────
-        self._ac_grp = QGroupBox("AC Field Sweep"); fgl = QGridLayout(self._ac_grp)
-        fgl.setSpacing(4); fgl.setContentsMargins(8, 8, 8, 8)
+        # Two inner columns so the width is actually used and the box stays
+        # short: the segment editor on the left (it grows downward as segments
+        # are added), the device / monitor dropdowns stacked on the right.
+        self._ac_grp = QGroupBox("AC Field Sweep")
+        ac_row = QHBoxLayout(self._ac_grp)
+        ac_row.setSpacing(10); ac_row.setContentsMargins(8, 8, 8, 8)
 
-        # Row 0: Field device dropdown
-        fgl.addWidget(QLabel("Device:"), 0, 0)
-        self._ac_dev_combo = NoScrollComboBox()
-        self._ac_dev_combo.setStyleSheet("font-size:10px;")
-        self._ac_dev_combo.addItem("(setup default)", "")
-        fgl.addWidget(self._ac_dev_combo, 0, 1)
-
-        # Row 1: Multi-segment field list
+        # Left: multi-segment field list (natural width, no stretch)
         self._seg_list = FieldSegmentList()
-        fgl.addWidget(self._seg_list, 1, 0, 1, 2)
+        ac_row.addWidget(self._seg_list, stretch=0)
 
-        # Row 2: AC monitor dropdowns
-        ac_mon_row = QHBoxLayout(); ac_mon_row.setSpacing(4)
-        ac_mon_row.addWidget(QLabel("Mon:"))
+        # Right: field device (read-only, from Setup Defaults) + monitor
+        # dropdowns, packed to the top.  The two monitor combos are stacked
+        # (not side by side) so each gets the full column width — they hold
+        # registry device / channel names.
+        ac_side = QGridLayout(); ac_side.setSpacing(4)
+        ac_side.setColumnStretch(1, 1)
+        ac_side.addWidget(QLabel("Device:"), 0, 0)
+        # The magnet is a property of the rig, not of the scan — it comes from
+        # Setup Defaults (magnet_device) and is shown here read-only so there
+        # is exactly one place to change it.
+        self._ac_dev_lbl = QLabel("— set in Setup Defaults —")
+        self._ac_dev_lbl.setStyleSheet(_DEV_LBL_STYLE)
+        self._ac_dev_lbl.setToolTip("Magnet device — edit in Setup Defaults")
+        ac_side.addWidget(self._ac_dev_lbl, 0, 1)
+
+        ac_side.addWidget(QLabel("Mon:"), 1, 0)
         self._ac_mon_dev = NoScrollComboBox(); self._ac_mon_dev.setStyleSheet("font-size:10px;")
         self._ac_mon_dev.currentIndexChanged.connect(lambda: self._on_mon_dev_changed("ac"))
-        ac_mon_row.addWidget(self._ac_mon_dev, stretch=1)
+        ac_side.addWidget(self._ac_mon_dev, 1, 1)
         self._ac_mon_ch = NoScrollComboBox(); self._ac_mon_ch.setStyleSheet("font-size:10px;")
-        ac_mon_row.addWidget(self._ac_mon_ch, stretch=1)
-        fgl.addLayout(ac_mon_row, 2, 0, 1, 2)
-        self._ac_grp.setMaximumWidth(310)
-        horiz.addWidget(self._ac_grp)
+        ac_side.addWidget(self._ac_mon_ch, 2, 1)
+        ac_side.setRowStretch(3, 1)
+        ac_row.addLayout(ac_side, stretch=1)
+
+        # Roughly twice the old width (was capped at 310).  A stretch factor
+        # lets the group shrink towards its minimum on narrow screens instead
+        # of clipping; the monitor canvas in the middle takes what is left.
+        # AlignTop shrink-wraps the box to its content — the row's spare height
+        # goes to the monitor plot instead of becoming dead space in here.
+        self._ac_grp.setMinimumWidth(430)
+        self._ac_grp.setMaximumWidth(620)
+        horiz.addWidget(self._ac_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         # ── Column 2: Shared field monitor canvas (no dropdowns here) ─────────
         self._field_hist_t: collections.deque = collections.deque(maxlen=120)
@@ -431,28 +505,42 @@ class TrajectoryPanel(QWidget):
         self._field_fig = Figure(figsize=(2.8, 1.8), dpi=90, facecolor="#1e1e2e")
         self._field_ax  = self._field_fig.add_subplot(111)
         self._field_canvas = FigureCanvas(self._field_fig)
-        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(160)
+        self._field_canvas.setMinimumHeight(120); self._field_canvas.setMinimumWidth(140)
         self._style_field_ax("ac")
-        horiz.addWidget(self._field_canvas, stretch=2)
+        # Lay out once here too: tight_layout otherwise only runs on the first
+        # monitor update, so with no field readback the axis labels stayed
+        # clipped (visible now that the canvas is shorter than the boxes).
+        self._field_fig.tight_layout(pad=0.4)
+        horiz.addWidget(self._field_canvas, stretch=1)
 
         # ── Column 3: DC Hysteresis params ────────────────────────────────────
         self._dc_grp = QGroupBox("DC Hysteresis"); dc_pgl = QGridLayout(self._dc_grp)
         dc_pgl.setSpacing(3); dc_pgl.setContentsMargins(8, 8, 8, 8)
         dc_pgl.addWidget(QLabel("Device:"), 0, 0)
-        self.dc_dev_combo = NoScrollComboBox()
-        self.dc_dev_combo.setStyleSheet("font-size:10px;")
-        # Populate later via populate_monitor_combo; add placeholder for now
-        self.dc_dev_combo.addItem("hpp-N42/beckhoff/pyhystlongi",
-                                  "hpp-N42/beckhoff/pyhystlongi")
-        dc_pgl.addWidget(self.dc_dev_combo, 0, 1, 1, 3)
+        # PyHysteresis device — a property of the rig, so it comes from Setup
+        # Defaults (hyst_device) and is shown here read-only.
+        self._dc_dev_lbl = QLabel("— set in Setup Defaults —")
+        self._dc_dev_lbl.setStyleSheet(_DEV_LBL_STYLE)
+        self._dc_dev_lbl.setToolTip(
+            "DC hysteresis (PyHysteresis) device — edit in Setup Defaults")
+        dc_pgl.addWidget(self._dc_dev_lbl, 0, 1, 1, 3)
 
         def _dbl(lo, hi, dec, v):
             w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
         def _int(lo, hi, v):
             w = NoScrollSpinBox(); w.setRange(lo, hi); w.setValue(v); return w
 
-        dc_pgl.addWidget(QLabel("Field (V):"), 1, 0)
-        self.dc_field_V = _dbl(0.001, 20, 3, 1.0);  dc_pgl.addWidget(self.dc_field_V, 1, 1)
+        # Peak coil CURRENT in Ampere — the PyHysteresis device divides this by
+        # its AmperePerVolt property to get the DAC programming voltage, so the
+        # number entered here has always been an Ampere (it was labelled "V").
+        dc_pgl.addWidget(QLabel("Field (A):"), 1, 0)
+        self.dc_field_A = _dbl(0.001, 20, 3, 1.0)
+        self.dc_field_A.setSuffix(" A")
+        self.dc_field_A.setToolTip(
+            "Peak coil current per half-loop [A] — written to the PyHysteresis "
+            "MagneticField attribute, which converts it to the supply's "
+            "programming voltage via its AmperePerVolt property.")
+        dc_pgl.addWidget(self.dc_field_A, 1, 1)
         dc_pgl.addWidget(QLabel("Int (s):"),   1, 2)
         self.dc_int_t   = _dbl(0.01, 600, 2, 2.0);   dc_pgl.addWidget(self.dc_int_t,   1, 3)
         dc_pgl.addWidget(QLabel("Pts/half:"),  2, 0)
@@ -474,12 +562,18 @@ class TrajectoryPanel(QWidget):
         self._dc_mon_ch = NoScrollComboBox(); self._dc_mon_ch.setStyleSheet("font-size:10px;")
         dc_mon_row.addWidget(self._dc_mon_ch, stretch=1)
         dc_pgl.addLayout(dc_mon_row, 4, 0, 1, 4)
-        self._dc_grp.setMaximumWidth(300)
-        horiz.addWidget(self._dc_grp)
+        # Twice the old width (was capped at 300) — see the AC group above.
+        self._dc_grp.setMinimumWidth(420)
+        self._dc_grp.setMaximumWidth(600)
+        horiz.addWidget(self._dc_grp, stretch=3,
+                        alignment=Qt.AlignmentFlag.AlignTop)
 
         fw_root.addLayout(horiz)
         self.field_w.setVisible(False)
-        root.addWidget(self.field_w)
+        # stretch=1: now that the two parameter boxes shrink-wrap their content,
+        # the panel's spare height goes to the monitor plot in this row rather
+        # than spreading the Timing / Metadata / Hardware rows below apart.
+        root.addWidget(self.field_w, stretch=1)
         self._on_submode_changed(0)   # apply initial highlight
 
         # ── TR-MOKE panel — DG645 front-panel style control ─────────────────
@@ -976,6 +1070,14 @@ class TrajectoryPanel(QWidget):
         if path:
             self._tr_dev_lbl.setText(path)
 
+    def set_field_device(self, path: str):
+        """Update the AC field-sweep device label from setup defaults (magnet)."""
+        self._ac_dev_lbl.setText(path or "— set in Setup Defaults —")
+
+    def set_hyst_device(self, path: str):
+        """Update the DC-hysteresis device label from setup defaults."""
+        self._dc_dev_lbl.setText(path or "— set in Setup Defaults —")
+
     def set_rtv40_device(self, path: str):
         """Update the RTV40 device label and stored path from setup defaults."""
         if path:
@@ -1064,33 +1166,8 @@ class TrajectoryPanel(QWidget):
             dev_combo.blockSignals(False)
         self._on_mon_dev_changed("ac")
         self._on_mon_dev_changed("dc")
-
-        # ── DC hyst device combo (hysteresis-type devices preferred) ──────────
-        hyst_devs = [d for d in registry if d.get("type") == "hysteresis"]
-        show_dc = hyst_devs if hyst_devs else registry
-        prev_dc = self.dc_dev_combo.currentData() or ""
-        self.dc_dev_combo.blockSignals(True); self.dc_dev_combo.clear()
-        for d in show_dc:
-            self.dc_dev_combo.addItem(d["name"], d["tango_path"])
-        if prev_dc:
-            for i in range(self.dc_dev_combo.count()):
-                if self.dc_dev_combo.itemData(i) == prev_dc:
-                    self.dc_dev_combo.setCurrentIndex(i); break
-        self.dc_dev_combo.blockSignals(False)
-
-        # ── AC field device combo (magnet-type devices + setup-default option) ─
-        mag_devs = [d for d in registry if d.get("type") == "magnet"]
-        show_ac = mag_devs if mag_devs else registry
-        prev_ac = self._ac_dev_combo.currentData()
-        self._ac_dev_combo.blockSignals(True); self._ac_dev_combo.clear()
-        self._ac_dev_combo.addItem("(setup default)", "")
-        for d in show_ac:
-            self._ac_dev_combo.addItem(d["name"], d["tango_path"])
-        if prev_ac is not None:
-            for i in range(self._ac_dev_combo.count()):
-                if self._ac_dev_combo.itemData(i) == prev_ac:
-                    self._ac_dev_combo.setCurrentIndex(i); break
-        self._ac_dev_combo.blockSignals(False)
+        # The magnet and PyHysteresis devices are NOT picked here — they come
+        # from Setup Defaults via set_field_device() / set_hyst_device().
 
     def _on_mon_dev_changed(self, which: str = "ac"):
         """Populate channel dropdown from the selected device's channels."""
@@ -1538,10 +1615,6 @@ class TrajectoryPanel(QWidget):
                 cfg.get("field_npts",     101),
             ]])
         # AC field device
-        field_dev = cfg.get("field_device", "")
-        for i in range(self._ac_dev_combo.count()):
-            if self._ac_dev_combo.itemData(i) == field_dev:
-                self._ac_dev_combo.setCurrentIndex(i); break
         self.zigzag_cb.setChecked(cfg.get("zigzag", False))
         _fa_id = 1 if cfg.get("fast_axis", "act1") == "act2" else 0
         self.fast_axis_bg.button(_fa_id).setChecked(True)
@@ -1550,12 +1623,9 @@ class TrajectoryPanel(QWidget):
         self.timeout.setValue( cfg.get("move_timeout",     15.0))
         self.meta.load_values(cfg)
         # DC hyst device
-        hyst_path = cfg.get("hyst_device", "")
-        for i in range(self.dc_dev_combo.count()):
-            if self.dc_dev_combo.itemData(i) == hyst_path:
-                self.dc_dev_combo.setCurrentIndex(i); break
         # DC hyst numeric params
-        self.dc_field_V.setValue(cfg.get("hyst_field_V",  1.0))
+        self.dc_field_A.setValue(
+            cfg.get("hyst_field_A", cfg.get("hyst_field_V", 1.0)))
         self.dc_int_t.setValue(  cfg.get("hyst_int_time", 2.0))
         self.dc_npts.setValue(   cfg.get("hyst_npts",     100))
         self.dc_cycles.setValue( cfg.get("hyst_cycles",   1))
@@ -1634,8 +1704,10 @@ class TrajectoryPanel(QWidget):
             return {
                 "scan_type":    "DC_HYST",
                 "scan_x": False, "scan_y": False,
-                "hyst_device":   self.dc_dev_combo.currentData() or "",
-                "hyst_field_V":  self.dc_field_V.value(),
+                # "" = use the setup's hyst_device (Setup Defaults); samba.py
+                # injects the resolved path into the scan config.
+                "hyst_device":   "",
+                "hyst_field_A":  self.dc_field_A.value(),
                 "hyst_int_time": self.dc_int_t.value(),
                 "hyst_npts":     self.dc_npts.value(),
                 "hyst_cycles":   self.dc_cycles.value(),
@@ -1665,7 +1737,8 @@ class TrajectoryPanel(QWidget):
             "field_start_A":     segs[0][0]                 if segs else -1.0,
             "field_stop_A":      segs[-1][1]                if segs else  1.0,
             "field_npts":        sum(int(s[2]) for s in segs) if segs else 101,
-            "field_device":      self._ac_dev_combo.currentData() or "",
+            # "" = use the setup's magnet_device (Setup Defaults)
+            "field_device":      "",
             # Beckhoff magnet: command current [A], read corrected field [mT]
             # (the Magnet device returns mT — matches the DC-Hyst convention).
             "field_x_label":     "Field",
