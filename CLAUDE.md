@@ -3795,3 +3795,21 @@ happen while the user was looking at it. It clears the plot instead.
   stays, but is inert unless the keys are set by hand — the lab does not want
   the feature.
 - **`t_FM` / `t_S` = 0 meaning "unset"** is correct and stays as is.
+
+---
+
+## 63. Recent Changes (August 2026) — "Recent" Y-Scale Window 50 → 10
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.06**.
+
+`RECENT_WINDOW` in `core/plot_interact.py` lowered from 50 to **10** points
+(Jakub's request). The Recent y-scale mode exists so the axis follows a signal
+down while nulling; a 50-point window let a value that was large 50 points ago
+hold the scale open long after the signal had come down. Measured on a
+[1000, then 20 × 0.01] trace: the axis is now ±0.0105 instead of ±1050.
+
+Affects the Full/Recent pill on the live 1D plot and both calibration-plot
+modes (§58). The constant is the default argument of
+`recent_symmetric_ylim(y_arrays, window=RECENT_WINDOW)`, so callers can still
+pass their own window; the two existing tests pass explicit values and are
+unaffected.
