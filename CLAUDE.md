@@ -3650,3 +3650,85 @@ disabled-axis exemption, absent-limits no-op), `TestUnreachableSensorRefusesStar
 (1). Both applications were additionally smoke-tested headlessly
 (`QT_QPA_PLATFORM=offscreen`): construct, sub-mode enable/disable, calibration
 units, polarity round-trip, `_build_full_config`, and hardware-panel mirroring.
+
+---
+
+## 61. Recent Changes (August 2026) — Review Fixes, Batch 2
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.04**.
+The tail of the review that was not in the first priority cut.
+
+### "Field & Relay" rendered as "Field _Relay"
+`QGroupBox("Field & Relay")` — Qt treats `&` as a mnemonic accelerator, so the
+group has been showing an underscore instead of an ampersand in both apps since
+it was written. `"Field && Relay"` (`hardware_panel.py`, `Cryo/panels.py`).
+Confirmed by rendering both forms side by side.
+
+### A cached SimProxy no longer survives a server restart
+`get_proxy` cached a `SimProxy` on the first failed connection and returned it
+for the life of the process, so restarting a TANGO server was not enough — the
+application had to be restarted, and until then every read on that path returned
+simulated values. Cached sim entries are now retried against the real device at
+most every `_SIM_RETRY_S` (10 s); a real proxy always wins, a failed retry keeps
+the existing sim, and simulation mode (no pytango) never retries. Logs
+"Reconnected to <path> (was simulated)" on recovery.
+
+### Pre-scan hardware snapshot no longer freezes the UI
+`_read_hw_snapshot` runs on the GUI thread at scan start and did ~14 attribute
+reads over ~5 devices at the default 10 s I/O timeout — one powered-off device
+froze the window for tens of seconds between clicking Start and anything
+happening. Now bounded twice: a 1.5 s per-read timeout (`_HW_SNAP_TIMEOUT_S`)
+and a per-device skip once one of its reads has failed. The snapshot is
+best-effort metadata, so losing a key on a flaky device is the right trade.
+
+### A failed magnet setpoint no longer measures at the wrong field
+`_run_point`'s FIELD branch logged a failed `safe_write` and measured anyway:
+the point was recorded at the *previous* field, and when the readback also
+failed on a same-quantity scan, `x_read` fell back to the setpoint that was
+never applied — a wrong x with no marker in the file. It now retries with a
+fresh proxy and auto-pauses on the same point, matching how sensor read
+failures are handled.
+
+### NAS sync is atomic
+`server_sync`'s worker copied straight to the destination name, and the worker
+is SIGKILLed after `_TIMEOUT_S` — so an interrupted transfer left a truncated
+file under the real name that looked exactly like data until the next sync
+noticed the size mismatch. New `_atomic_copy` writes `<name>.part` then
+`os.replace`s it into place, and `.part` files are skipped when scanning the
+source. Still `copyfile` (not `copy2`) because SMB mounts reject the following
+`utime`.
+
+### Keyboard
+`Esc` → abort (with confirmation) and `Space` → pause/resume in **both** apps —
+abort is the safety action and should not require finding a button with the
+mouse. `Space` is ignored while a text field, spinbox or combo has focus.
+Samba_main also gained Cryo's `Ctrl+L` (clear log) and `Ctrl+R` (refresh
+browser); it previously had only `F5`.
+
+### Units on the numbers people actually type
+Start / Stop / Δ (Samba_main) and Δ (Cryo, whose ranges live in the
+`ScanDirectionList`) now carry the axis unit as a spinbox suffix, refreshed
+from Setup Defaults via `_apply_unit_suffix()`. The unit used to appear only in
+a dimmed read-only box two rows away.
+
+Cryo's **adaptive settle** label was hardcoded `s/µm` while the engine
+multiplies the step in the axis' **own** unit (`runner.py`:
+`extra = k × |pos − prev_pos|`). The label now follows `act1_unit` and the
+tooltip states the actual relationship. **Relabelled, not rescaled** — an
+empirically tuned `k` keeps working.
+
+### Inline duration on the field sweep
+The DC Hysteresis box has always shown "Est. ≈ 4 s" while the AC Field Sweep
+box next to it — the one that can run for hours — showed only a point count.
+`FieldSegmentList.set_time_estimator()` (both apps) appends "≈ 40 s" to the
+summary line, fed by `_field_seg_estimate` in each main window using the same
+per-point model as the status bar plus the optional `field_ramp_estimate_s`.
+Returns None → nothing is shown, so it never displays a made-up number.
+
+### Verification
+109 tests still pass. Both apps were exercised headlessly with the real widgets:
+unit suffixes follow a unit change, the adaptive-settle label follows
+Setup Defaults, the field estimate appears and disappears with the estimator,
+`Esc`/`Space`/`Ctrl+L`/`Ctrl+R` are registered, sub-mode enable/disable, and the
+`&&` rendering was confirmed against a rendered PNG. The `server_sync` worker
+source was executed end-to-end (copy, skip-on-second-run, no `.part` left).

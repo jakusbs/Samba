@@ -113,7 +113,7 @@ class HardwarePanel(QGroupBox):
         root.addWidget(cs)
 
         # ── Right: Field + Relay ──────────────────────────────────────────────
-        fr  = QGroupBox("Field & Relay"); frg = QGridLayout(fr)
+        fr  = QGroupBox("Field && Relay"); frg = QGridLayout(fr)
         frg.setSpacing(3); frg.setContentsMargins(6, 6, 6, 6)
 
         row = 0

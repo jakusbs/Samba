@@ -39,7 +39,7 @@ os.environ.setdefault("SAMBA_CONFIG_DIR",
                       str(Path.home() / ".config" / "moke_scan_cryo"))
 from typing import Dict, Optional, Tuple
 
-from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import (QAbstractSpinBox,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
     QComboBox, QLineEdit, QPushButton, QFileDialog, QButtonGroup, QFrame,
@@ -98,6 +98,9 @@ def _sb_fmt(sec: float) -> str:
 # Hardware snapshot helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+_HW_SNAP_TIMEOUT_S = 1.5   # per-attribute bound for the pre-scan snapshot
+
+
 def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) -> dict:
     """Read key hardware state immediately before a Cryo scan starts.
 
@@ -105,15 +108,27 @@ def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) 
     ``is_temp_sweep`` == True suppresses hw_temperature_K (temp is being swept).
     """
     snap: dict = {}
+    _dead: set = set()      # devices that already failed once in this snapshot
 
     def _read(device_path: str, attr: str):
-        if not device_path or not attr:
+        # This runs on the GUI thread at scan start.  With the default 10 s
+        # I/O timeout, ~14 attribute reads spread over ~5 devices meant one
+        # powered-off device froze the UI for tens of seconds between clicking
+        # Start and anything visibly happening.  Two bounds fix that: a short
+        # per-read timeout, and skipping a device's remaining attributes once
+        # one of its reads has failed.  The snapshot is best-effort metadata,
+        # so losing a key on a flaky device is the right trade.
+        if not device_path or not attr or device_path in _dead:
             return None
         try:
             p = get_proxy(device_path)
-            val, rerr = safe_read(p, attr)
-            return val if not rerr else None
+            val, rerr = safe_read(p, attr, timeout=_HW_SNAP_TIMEOUT_S)
+            if rerr:
+                _dead.add(device_path)
+                return None
+            return val
         except Exception:
+            _dead.add(device_path)
             return None
 
     # Keithley AC excitation state
@@ -967,6 +982,10 @@ class CryoMainWindow(QMainWindow):
         self._scan_start_time    = _time.time()
 
     def _connect_signals(self):
+        # Inline duration estimate in the field-sweep box.  Uses the same
+        # per-point model as the status-bar estimate; the ramp/thermalisation
+        # wait is not modelled (see _update_estimate), so this is a floor.
+        self.traj_panel._seg_list.set_time_estimator(self._field_seg_estimate)
         # Keep the two tabs' hardware panels showing the same values
         self._link_hw_panels()
         self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
@@ -1028,6 +1047,10 @@ class CryoMainWindow(QMainWindow):
         QShortcut(QKeySequence("F5"),       self, activated=self._unified_start)
         QShortcut(QKeySequence("Ctrl+L"),   self, activated=self.log_text.clear)
         QShortcut(QKeySequence("Ctrl+R"),   self, activated=self.data_browser.refresh)
+        # Abort is the safety action: it must not require hunting for a
+        # button with the mouse while the stage is heading somewhere wrong.
+        QShortcut(QKeySequence("Escape"),   self, activated=self._shortcut_abort)
+        QShortcut(QKeySequence("Space"),    self, activated=self._shortcut_pause)
 
     # ── Bottom tab handling ──────────────────────────────────────────────────
     def _on_bottom_tab_changed(self, idx):
@@ -1229,6 +1252,11 @@ class CryoMainWindow(QMainWindow):
         def _show(zi_settle=0.0):
             if self._scan_running:
                 return
+            # Cache for the inline field-segment estimate, which cannot afford
+            # its own device read on every spinbox keystroke.
+            self._last_zi_settle = zi_settle
+            if hasattr(self.traj_panel, "_seg_list"):
+                self.traj_panel._seg_list._on_changed()
             parts = []
             if settle    > 0: parts.append(f"{settle:.3g}s settle")
             if ramp      > 0: parts.append(f"{ramp:.3g}s ramp")
@@ -1530,6 +1558,45 @@ class CryoMainWindow(QMainWindow):
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
+
+    # ── Keyboard shortcuts ────────────────────────────────────────────────────
+    def _shortcut_abort(self):
+        """Escape → abort whichever run is active (with the usual confirm)."""
+        if not self._scan_running:
+            return
+        if QMessageBox.question(
+                self, "Abort", "Abort the running measurement?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._unified_abort()
+
+    def _shortcut_pause(self):
+        """Space → pause/resume, but never while typing in a field."""
+        if not self._scan_running:
+            return
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox)):
+            return          # Space belongs to the widget being edited
+        self._toggle_pause()
+
+    def _field_seg_estimate(self, total_pts: int):
+        """Seconds for `total_pts` field points, or None if not computable."""
+        try:
+            if total_pts <= 0:
+                return None
+            int_t  = float(self.traj_panel.int_time.value())
+            settle = max(float(self.traj_panel.settle.value()), 0.05)
+            zi     = float(getattr(self, "_last_zi_settle", 0.0) or 0.0)
+            ramp   = 0.0
+            try:
+                ramp = max(0.0, float(
+                    self._active_setup().get("field_ramp_estimate_s", 0.0)))
+            except Exception:
+                ramp = 0.0
+            return total_pts * (settle + zi + int_t + ramp)
+        except Exception:
+            return None
 
     def _build_full_config(self) -> dict:
         partial  = self.traj_panel.get_config_partial()

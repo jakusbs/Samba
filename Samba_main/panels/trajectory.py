@@ -32,6 +32,13 @@ from panels.hardware_panel import HardwarePanel
 _DEV_LBL_STYLE = "color:#94e2d5;font-family:'Courier New',monospace;font-size:9px;"
 
 
+def _fmt_duration(sec: float) -> str:
+    """Compact duration for inline estimates."""
+    if sec < 120:   return f"{sec:.0f} s"
+    if sec < 3600:  return f"{sec / 60:.1f} min"
+    return f"{sec / 3600:.1f} h"
+
+
 class FieldSegmentList(QWidget):
     changed = pyqtSignal()
 
@@ -163,8 +170,29 @@ class FieldSegmentList(QWidget):
         self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(int(t[2].value()) for t in self._rows)
         n = len(self._rows)
-        self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")
+        txt = f"Total N = {total},  {n} segment{'s' if n != 1 else ''}"
+        # A field sweep is the long one — the DC Hysteresis box next to it has
+        # always shown an inline estimate while this box, which can run for
+        # hours, showed only a point count.
+        est = self._estimate_s(total)
+        if est is not None:
+            txt += f"  ·  ≈ {_fmt_duration(est)}"
+        self._summary_lbl.setText(txt)
         self.changed.emit()
+
+    def set_time_estimator(self, fn):
+        """Install a callable(total_points) -> seconds (or None)."""
+        self._estimator = fn
+        self._on_changed()
+
+    def _estimate_s(self, total: int):
+        fn = getattr(self, "_estimator", None)
+        if fn is None:
+            return None
+        try:
+            return fn(total)
+        except Exception:
+            return None
 
     def get_segments(self) -> List[list]:
         return [[t[0].value(), t[1].value(), int(t[2].value())] for t in self._rows]
@@ -286,6 +314,23 @@ class ActuatorGroup(QGroupBox):
         self.attr_lbl.setText(attr)
         self.lbl.setText(lbl)
         self.unit_edit.setText(unit)
+        self._apply_unit_suffix()
+
+    def _apply_unit_suffix(self):
+        """Put the axis unit on the numbers the user actually types.
+
+        Start/Stop/Δ used to be bare spinboxes, with the unit shown only in a
+        dimmed read-only box two rows away — in a codebase that has repeatedly
+        been bitten by unit confusion, the most-edited fields were the ones
+        without a unit on them.
+        """
+        u = self.unit_edit.text().strip()
+        sfx = f" {u}" if u else ""
+        for spin in (self.start, self.stop, self.step_spin):
+            try:
+                spin.setSuffix(sfx)
+            except Exception:
+                pass
 
     # ── Standard helpers ──────────────────────────────────────────────────────
     def get_npts(self) -> int:
@@ -297,6 +342,7 @@ class ActuatorGroup(QGroupBox):
         # label and unit come from setup defaults (may be in cfg if already merged)
         self.lbl.setText(cfg.get(f"{pfx}_label", self.lbl.text()))
         self.unit_edit.setText(cfg.get(f"{pfx}_unit", self.unit_edit.text()))
+        self._apply_unit_suffix()
         self.start.setValue(cfg.get(f"{pfx}_start",  0.0))
         self.stop.setValue( cfg.get(f"{pfx}_stop",  50000.0))
         self._pair.set_npts(int(cfg.get(f"{pfx}_npts", 51)))

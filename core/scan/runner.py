@@ -838,9 +838,38 @@ class ScanRunner:
                         if self._abort: break
 
                     if hdf_scan == "FIELD":
+                        # A failed setpoint write used to be logged and then
+                        # measured anyway: the point is recorded at the
+                        # PREVIOUS field, and if the readback also fails on a
+                        # same-quantity scan x_read falls back to the setpoint
+                        # that was never applied — a wrong x with no marker.
+                        # Retry, then auto-pause on the same point, matching
+                        # how sensor read failures are handled.
                         _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
                         if _mag_err:
-                            lg(f"⚠ Magnet write failed at {x_pos:.4g} A: {_mag_err}")
+                            for _mtry in range(AUTO_PAUSE_THRESHOLD - 1):
+                                if self._abort: break
+                                lg(f"⚠ Magnet write failed at {x_pos:.4g}: "
+                                   f"{_mag_err} — retrying "
+                                   f"{_mtry + 1}/{AUTO_PAUSE_THRESHOLD - 1}")
+                                _mp, _mperr = fresh_proxy(_field_dev)
+                                if not _mperr:
+                                    mag_p = _mp
+                                _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
+                                if not _mag_err:
+                                    lg("  ✓ Magnet setpoint recovered")
+                                    break
+                                time.sleep(RETRY_DELAY)
+                        if _mag_err and not self._abort:
+                            self._paused = True
+                            st(f"⚠ AUTO-PAUSED — magnet setpoint {x_pos:.4g} "
+                               f"could not be written to {_field_dev}: "
+                               f"{_mag_err} — fix it and press Resume")
+                            while self._paused and not self._abort:
+                                time.sleep(0.05)
+                            if not self._abort:
+                                lg(f"  ↩ Resuming — retrying setpoint {x_pos:.4g}")
+                                safe_write(mag_p, mag_cur_attr, x_pos)
                         time.sleep(max(cfg["settle_time"], 0.05))
                         if self._wait_not_moving(mag_p, field_move_timeout, lg, st):
                             # The device was ramping (superconducting magnet /

@@ -40,6 +40,13 @@ from nstep import NStepPair
 # ─────────────────────────────────────────────────────────────────────────────
 # NoScroll variants — prevent accidental value changes when hovering
 # ─────────────────────────────────────────────────────────────────────────────
+def _fmt_duration(sec: float) -> str:
+    """Compact duration for inline estimates."""
+    if sec < 120:   return f"{sec:.0f} s"
+    if sec < 3600:  return f"{sec / 60:.1f} min"
+    return f"{sec / 3600:.1f} h"
+
+
 class NoScrollComboBox(QComboBox):
     def wheelEvent(self, ev): ev.ignore()
 
@@ -265,7 +272,7 @@ class HardwarePanel(QGroupBox):
         root.addWidget(cs)
 
         # ── Right: Field + Relay ──────────────────────────────────────────────
-        fr  = QGroupBox("Field & Relay"); frg = QGridLayout(fr)
+        fr  = QGroupBox("Field && Relay"); frg = QGridLayout(fr)
         frg.setSpacing(3); frg.setContentsMargins(6, 6, 6, 6)
 
         row = 0
@@ -1348,8 +1355,28 @@ class FieldSegmentList(QWidget):
         self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(self._seg_npts(t) for t in self._rows)
         n = len(self._rows)
-        self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")
+        txt = f"Total N = {total},  {n} segment{'s' if n != 1 else ''}"
+        # A superconducting-magnet field sweep is the long one; showing only a
+        # point count here hides that.
+        est = self._estimate_s(total)
+        if est is not None:
+            txt += f"  ·  ≈ {_fmt_duration(est)}"
+        self._summary_lbl.setText(txt)
         self.changed.emit()
+
+    def set_time_estimator(self, fn):
+        """Install a callable(total_points) -> seconds (or None)."""
+        self._estimator = fn
+        self._on_changed()
+
+    def _estimate_s(self, total: int):
+        fn = getattr(self, "_estimator", None)
+        if fn is None:
+            return None
+        try:
+            return fn(total)
+        except Exception:
+            return None
 
     def _seg_npts(self, tup) -> int:
         return max(2, tup[2].value())
@@ -1570,6 +1597,19 @@ class ActuatorGroup(QGroupBox):
         self._dev_display.setToolTip(dev_path)
         self._attr_display.setText(attr)
         self.lbl.setText(label); self.unit_edit.setText(unit)
+        self._apply_unit_suffix()
+
+    def _apply_unit_suffix(self):
+        """Put the axis unit on the step spinbox.
+
+        The unit was shown only in a dimmed read-only box, so the number the
+        user edits carried none.
+        """
+        u = self.unit_edit.text().strip()
+        try:
+            self.step_spin.setSuffix(f" {u}" if u else "")
+        except Exception:
+            pass
 
     def set_registry(self, registry: list):
         pass   # device info comes from Setup Defaults
@@ -1879,11 +1919,18 @@ class TrajectoryPanel(QWidget):
         # Adaptive settle — extra wait proportional to step size (ANM200 creep compensation)
         self.adap_settle_cb = QCheckBox("Adaptive settle")
         self.adap_settle_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.adap_settle_cb.setToolTip("Extra settle per step — compensates ANM200 piezo creep")
+        self.adap_settle_cb.setToolTip(
+            "Extra settle proportional to the step size — compensates ANM200 "
+            "piezo creep")
         tl.addWidget(self.adap_settle_cb, 3, 0, 1, 2)
-        tl.addWidget(QLabel("s/µm:"), 4, 0)
+        self._adap_unit_lbl = QLabel("s/µm:")
+        tl.addWidget(self._adap_unit_lbl, 4, 0)
         self.adap_settle_k = dbl(0, 10, 4, 0.05)
-        self.adap_settle_k.setToolTip("Extra seconds of settle per µm of position step")
+        self.adap_settle_k.setToolTip(
+            "Extra seconds of settle per unit of position step.\n"
+            "The engine multiplies this by the step in the axis' OWN unit "
+            "(runner.py: extra = k × |pos − prev_pos|), so the unit shown "
+            "here follows Setup Defaults — it is not always µm.")
         tl.addWidget(self.adap_settle_k, 4, 1)
         bot.addWidget(tg)
 
@@ -2223,6 +2270,10 @@ class TrajectoryPanel(QWidget):
         """Called when Setup Defaults change — push device info into both actuator groups."""
         self.act1_grp.set_device_info(act1_dev, "", act1_attr, act1_lbl, act1_unit)
         self.act2_grp.set_device_info(act2_dev, "", act2_attr, act2_lbl, act2_unit)
+        # Adaptive settle multiplies the step in the axis' OWN unit, so the
+        # label must follow Setup Defaults rather than claim µm.
+        if hasattr(self, "_adap_unit_lbl"):
+            self._adap_unit_lbl.setText(f"s/{(act1_unit or 'µm').strip()}:")
 
     # ── Load / get config ─────────────────────────────────────────────────────
     def load_config(self, cfg: dict):
