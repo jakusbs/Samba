@@ -314,6 +314,9 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_directions": [[-10.0, 10.0]],
         "adaptive_settle_enabled": False,
         "adaptive_settle_k": 0.05,
+        # Scanlist polarity control (persisted; was session-only UI state)
+        "relay_flip": False,
+        "field_flip": False,
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
@@ -427,6 +430,9 @@ def _migrate_config(cfg: dict):
         cfg["act2_directions"] = [[cfg.get("act2_start", -10.0), cfg.get("act2_stop", 10.0)]]
     cfg.setdefault("adaptive_settle_enabled", False)
     cfg.setdefault("adaptive_settle_k", 0.05)
+    # Polarity control — old configs keep the historic "starts OFF" behaviour
+    cfg.setdefault("relay_flip", False)
+    cfg.setdefault("field_flip", False)
 
 def load_setup(name: str) -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

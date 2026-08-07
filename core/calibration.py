@@ -106,8 +106,9 @@ class DigitJogWidget(QWidget):
             dn.clicked.connect(lambda _, p=power: self._nudge(-(10 ** p)))
             grid.addWidget(dn, 2, col, Qt.AlignmentFlag.AlignCenter); self._down_btns.append(dn)
             col += 1
-        ulbl = QLabel(self._unit); ulbl.setStyleSheet("color:#6c7086;font-size:11px;")
-        grid.addWidget(ulbl, 1, col, Qt.AlignmentFlag.AlignCenter)
+        self._unit_lbl1 = QLabel(self._unit)
+        self._unit_lbl1.setStyleSheet("color:#6c7086;font-size:11px;")
+        grid.addWidget(self._unit_lbl1, 1, col, Qt.AlignmentFlag.AlignCenter)
         jog_row.addLayout(grid); jog_row.addStretch()
         outer.addLayout(jog_row)
 
@@ -119,8 +120,9 @@ class DigitJogWidget(QWidget):
         self._edit = QLineEdit("0.000"); self._edit.setStyleSheet(self._EDIT_STYLE)
         self._edit.setFixedWidth(110); self._edit.returnPressed.connect(self._on_enter)
         edit_row.addWidget(self._edit)
-        u2 = QLabel(self._unit); u2.setStyleSheet("color:#6c7086;font-size:11px;")
-        edit_row.addWidget(u2); edit_row.addSpacing(12)
+        self._unit_lbl2 = QLabel(self._unit)
+        self._unit_lbl2.setStyleSheet("color:#6c7086;font-size:11px;")
+        edit_row.addWidget(self._unit_lbl2); edit_row.addSpacing(12)
         rb_h = QLabel("readback:"); rb_h.setStyleSheet("color:#6c7086;font-size:10px;")
         edit_row.addWidget(rb_h)
         self._rb_label = QLabel("—")
@@ -129,6 +131,18 @@ class DigitJogWidget(QWidget):
         edit_row.addWidget(self._rb_label); edit_row.addStretch()
         outer.addLayout(edit_row)
         self._refresh_display()
+
+    def set_unit(self, unit: str):
+        """Relabel the axis unit (values are never rescaled — see
+        CalibrationPanel.configure_stage)."""
+        self._unit = unit or self._unit
+        for lbl in (getattr(self, '_unit_lbl1', None),
+                    getattr(self, '_unit_lbl2', None)):
+            if lbl is not None:
+                lbl.setText(self._unit)
+
+    def unit(self) -> str:
+        return self._unit
 
     def _nudge(self, delta):
         self._value += delta; self._refresh_display(); self.move_requested.emit(self._value)
@@ -423,16 +437,25 @@ class AutofocusWorker(QThread):
 
     def __init__(self, positioner_dev: str, fl_dev: str,
                  focus_attr: str, scan_attr: str,
-                 focus_pos: float, dz: float, d_zmax: float, maxtries: int):
+                 focus_pos: float, dz: float, d_zmax: float, maxtries: int,
+                 fl_attr: str = "Value", z_limits=None, z_unit: str = "µm"):
         super().__init__()
         self._pos_dev    = positioner_dev
         self._fl_dev     = fl_dev
+        # NOTE: `focus_attr` is the Z-AXIS attribute (historic name).  The FL
+        # sensor's attribute is `fl_attr` — the setup key also called
+        # "focus_attr", which is why the two are easy to confuse.
         self._focus_attr = focus_attr
         self._scan_attr  = scan_attr
         self._focus_pos  = focus_pos
         self._dz         = dz
         self._d_zmax     = d_zmax
         self._maxtries   = maxtries
+        self._fl_attr    = (fl_attr or "Value").strip() or "Value"
+        self._z_limits   = z_limits
+        self._z_unit     = z_unit or "µm"
+        self._fl_ok      = 0
+        self._fl_fail    = 0
         self._abort      = False
 
     def abort(self): self._abort = True
@@ -460,9 +483,19 @@ class AutofocusWorker(QThread):
         pos_scan, e = safe_read(p, self._scan_attr)
         if e: pos_scan = 0.0
 
-        if abs(pos0_z) > 100:
-            self.error_msg.emit(f"Z = {pos0_z:.1f} µm — too far from focus, aborting")
-            return
+        # Sweep bounds must stay inside the configured travel, when the setup
+        # defines any.  (Replaces a hardcoded `abs(z) > 100` test that assumed
+        # a µm axis whose origin sits at focus, and so refused to run on any
+        # stage with a different coordinate origin.)
+        if self._z_limits is not None:
+            lo, hi = self._z_limits
+            s_lo, s_hi = pos0_z - self._d_zmax, pos0_z + self._d_zmax
+            if s_lo < lo or s_hi > hi:
+                self.error_msg.emit(
+                    f"Sweep {s_lo:.3f} … {s_hi:.3f} {self._z_unit} leaves the "
+                    f"configured Z travel [{lo:g}, {hi:g}] {self._z_unit} — "
+                    "reduce Max range or move closer to focus first")
+                return
 
         self.status_msg.emit(f"Focusing… Z₀={pos0_z:.3f}  scan={pos_scan:.3f}")
 
@@ -503,8 +536,21 @@ class AutofocusWorker(QThread):
             best_fl = fl_conf
 
         self.focus_found.emit(best_z, best_fl)
-        self.status_msg.emit(f"Focus found at Z = {best_z:.3f} µm  "
-                             f"(FL = {best_fl:.4g}) — stage moved there")
+        q = getattr(self, "_quality", None) or {}
+        base = (f"Focus found at Z = {best_z:.3f} {self._z_unit}  "
+                f"(FL = {best_fl:.4g}) — stage moved there")
+        if q:
+            snr = q.get("snr", float("inf"))
+            snr_s = "∞" if snr == float("inf") else f"{snr:.1f}"
+            base += f"  ·  peak/noise = {snr_s}"
+        if self._fl_fail:
+            base += f"  ·  {self._fl_fail} failed FL read(s)"
+        if q and not q.get("ok", True):
+            # Same wording either way would hide the difference between a real
+            # peak and an endpoint or a noise excursion.
+            self.status_msg.emit(f"⚠ {base}  —  UNRELIABLE: {q.get('msg', '')}")
+        else:
+            self.status_msg.emit(base)
 
     _MOVE_SETTLE_S = 0.5   # settle after each Z step
     _FL_TIMEOUT_S  = 2.0   # max wait for the FL device to finish averaging
@@ -528,7 +574,12 @@ class AutofocusWorker(QThread):
                 break
             time.sleep(0.02)
         time.sleep(0.05)
-        return safe_read(fl_p, "Value")
+        val, err = safe_read(fl_p, self._fl_attr)
+        if err or val is None:
+            self._fl_fail += 1
+        else:
+            self._fl_ok += 1
+        return val, err
 
     def _sweep_z(self, p, fl_p, z_values):
         """Move through z_values in order, measuring FL at each.
@@ -547,6 +598,45 @@ class AutofocusWorker(QThread):
                 continue
             self.point_measured.emit(float(z), float(fl))
             out.append((float(z), float(fl)))
+        return out
+
+    def _assess(self, pts, best_z, best_fl) -> dict:
+        """Judge whether the coarse sweep actually found a focus peak.
+
+        Returns {'ok', 'prominence', 'noise', 'snr', 'at_edge', 'msg'}.
+
+        Without this the caller cannot distinguish three very different
+        outcomes that all end in "Focus found at Z = …": a real peak; a
+        monotonic curve, meaning the range never bracketed focus and the
+        answer is just the endpoint; and a flat noisy curve, where the answer
+        is the largest noise excursion.
+        """
+        z = np.array([t[0] for t in pts], dtype=float)
+        y = np.array([t[1] for t in pts], dtype=float)
+        out = {"ok": True, "prominence": 0.0, "noise": 0.0, "snr": float("inf"),
+               "at_edge": False, "msg": ""}
+        if y.size < 3:
+            out["msg"] = f"only {y.size} valid point(s)"
+            out["ok"] = False
+            return out
+        # Noise proxy: median |first difference| is robust to the peak itself.
+        noise = float(np.median(np.abs(np.diff(y)))) or 0.0
+        prominence = float(best_fl - np.median(y))
+        out["noise"] = noise
+        out["prominence"] = prominence
+        out["snr"] = prominence / noise if noise > 0 else float("inf")
+        # Peak on the first or last swept point → the range did not bracket it
+        i_best = int(np.argmin(np.abs(z - best_z)))
+        out["at_edge"] = i_best in (0, y.size - 1)
+        problems = []
+        if out["at_edge"]:
+            problems.append("peak is at the edge of the sweep — "
+                            "focus is probably outside Max range")
+        if noise > 0 and out["snr"] < 3.0:
+            problems.append(f"peak is only {out['snr']:.1f}× the noise")
+        if problems:
+            out["ok"] = False
+            out["msg"] = "; ".join(problems)
         return out
 
     def _sweep_focus(self, p, fl_p, z0):
@@ -570,9 +660,14 @@ class AutofocusWorker(QThread):
         if pts is None:
             return None
         if not pts:
-            self.error_msg.emit("No valid FL readings during coarse sweep")
+            self.error_msg.emit(
+                f"No valid FL readings during coarse sweep — "
+                f"0/{self._fl_ok + self._fl_fail} reads of "
+                f"'{self._fl_attr}' on {self._fl_dev} succeeded. "
+                "Check the FL sensor device and attribute in Setup Defaults.")
             return None
         best_z, best_fl = max(pts, key=lambda t: t[1])
+        self._quality = self._assess(pts, best_z, best_fl)
 
         # Fine sweep: ± one coarse step around the peak (clamped to range)
         flo = max(lo, best_z - step)
@@ -927,19 +1022,58 @@ class CalibrationPanel(QWidget):
 
     def configure_stage(self, x_dev: str, x_attr: str,
                         y_dev: str, y_attr: str,
-                        z_dev: str, z_attr: str):
-        """Inject stage device/attribute for each axis from setup defaults.
-        Called by the main window on every setup or defaults change."""
+                        z_dev: str, z_attr: str,
+                        x_unit: str = "", y_unit: str = "", z_unit: str = ""):
+        """Inject stage device/attribute/unit for each axis from setup defaults.
+        Called by the main window on every setup or defaults change.
+
+        Units matter: this tab writes raw values straight to the device
+        attribute, so every number here is in the axis' own unit.  They used to
+        be labelled "µm" unconditionally, which is a lie on a stage configured
+        in nm or in steps.  Units are display-only — no value is rescaled — so
+        an existing, working setup is unaffected apart from correct labels.
+        """
         self._stage_cfg = {
             "x": (x_dev, x_attr),
             "y": (y_dev, y_attr),
             "z": (z_dev, z_attr),
         }
+        self._stage_units = {
+            "x": (x_unit or "").strip() or self._DEFAULT_UNIT,
+            "y": (y_unit or "").strip() or self._DEFAULT_UNIT,
+            "z": (z_unit or "").strip() or self._DEFAULT_UNIT,
+        }
+        self._apply_axis_units()
         self._dev_lbl.setText(
             f"X: {x_dev or '—'}/{x_attr}   "
             f"Y: {y_dev or '—'}/{y_attr}   "
             f"Z: {z_dev or '—'}/{z_attr}")
         self._probe_home_support(x_dev)
+
+    _DEFAULT_UNIT = "µm"
+
+    def _axis_unit(self, axis_key: str) -> str:
+        return getattr(self, "_stage_units", {}).get(axis_key, self._DEFAULT_UNIT)
+
+    def _apply_axis_units(self):
+        """Push the configured units onto the jog widgets and autofocus spins."""
+        for key, jog in (("x", getattr(self, "jog_x", None)),
+                         ("y", getattr(self, "jog_y", None)),
+                         ("z", getattr(self, "jog_z", None))):
+            if jog is not None and hasattr(jog, "set_unit"):
+                try:
+                    jog.set_unit(self._axis_unit(key))
+                except Exception:
+                    pass
+        zu = self._axis_unit("z")
+        for spin in (getattr(self, "focus_pos_spin", None),
+                     getattr(self, "dz_spin", None),
+                     getattr(self, "dzmax_spin", None)):
+            if spin is not None:
+                try:
+                    spin.setSuffix(f" {zu}")
+                except Exception:
+                    pass
 
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
@@ -952,7 +1086,8 @@ class CalibrationPanel(QWidget):
         if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
         err = safe_write(p, attr, value_um)
         if err: self._set_pos_err(f"{attr}: {err[:60]}")
-        else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} µm")
+        else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} "
+                                 f"{self._axis_unit(axis_key)}")
 
     def _reinit_stage(self):
         """Re-initialise the stage motors (fixes wedged IR SmarAct axes).
@@ -1197,13 +1332,31 @@ class CalibrationPanel(QWidget):
         self._af_status.setText("")
         self.af_start_btn.setEnabled(False); self.af_stop_btn.setEnabled(True)
 
+        _setup = self._setup_getter()
+        # The FL sensor's ATTRIBUTE is configurable in Setup Defaults; it used
+        # to be ignored and hardcoded to "Value", so any non-Beckhoff focus
+        # sensor silently produced zero valid readings.
+        fl_attr = (_setup.get("focus_attr", "") or "Value").strip() or "Value"
+        # Optional soft travel limits, same keys as core/validation.py.  These
+        # replace the old hardcoded `abs(z) > 100` check, which assumed both a
+        # µm axis and a stage whose origin happens to sit near focus.
+        z_lim = None
+        try:
+            _lo, _hi = _setup.get("z_min"), _setup.get("z_max")
+            if _lo is not None and _hi is not None and float(_hi) > float(_lo):
+                z_lim = (float(_lo), float(_hi))
+        except (TypeError, ValueError):
+            z_lim = None
+
         self._af_worker = AutofocusWorker(
             positioner_dev=z_dev, fl_dev=fl_dev,
             focus_attr=z_attr, scan_attr=scan_attr,
             focus_pos=self.focus_pos_spin.value(),
             dz=self.dz_spin.value(),
             d_zmax=self.dzmax_spin.value(),
-            maxtries=self.tries_spin.value())
+            maxtries=self.tries_spin.value(),
+            fl_attr=fl_attr, z_limits=z_lim,
+            z_unit=self._axis_unit("z"))
         self._af_worker.point_measured.connect(self.focus_plot.add_point)
         self._af_worker.status_msg.connect(
             lambda m: self._af_status.setText(m))

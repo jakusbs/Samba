@@ -1923,6 +1923,12 @@ class TrajectoryPanel(QWidget):
                  "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}")
         self._ac_grp.setStyleSheet(_ACT  if mode_id == 0 else _IDLE)
         self._dc_grp.setStyleSheet(_ACT  if mode_id == 1 else _IDLE)
+        # Disable the inactive sub-mode's controls, not just dim its title.
+        # Field Sweep and Temperature Sweep sit side by side and both stayed
+        # fully editable, so parameters could be set carefully in the box the
+        # scan will never read.  Qt greys the whole content out for free.
+        self._ac_grp.setEnabled(mode_id == 0)
+        self._dc_grp.setEnabled(mode_id == 1)
         self.scan_mode_changed.emit("TEMP_SWEEP" if mode_id == 1 else "FIELD")
 
     def _temp_get_npts(self) -> int:
@@ -2365,6 +2371,9 @@ class TrajectoryPanel(QWidget):
 # ScanlistPanel
 # ─────────────────────────────────────────────────────────────────────────────
 class ScanlistPanel(QWidget):
+    # Emitted when a polarity toggle changes, so the main window can persist it
+    polarity_changed = pyqtSignal()
+
     def __init__(self, setup_getter, parent=None, hw_panel_class=None):
         super().__init__(parent)
         self._setup_getter = setup_getter
@@ -2408,6 +2417,8 @@ class ScanlistPanel(QWidget):
         self.field_flip_btn = QPushButton("Field flip: OFF"); self.field_flip_btn.setCheckable(True)
         self.field_flip_btn.toggled.connect(lambda c: self.field_flip_btn.setText("Field flip: ON" if c else "Field flip: OFF"))
         pl.addWidget(self.relay_flip_btn); pl.addWidget(self.field_flip_btn)
+        for _b in (self.relay_flip_btn, self.field_flip_btn):
+            _b.toggled.connect(lambda _: self.polarity_changed.emit())
         sl_row.addWidget(pg)
 
         ng = QGroupBox("Scanlist"); nl = QGridLayout(ng); nl.setSpacing(6); nl.setContentsMargins(8, 8, 8, 8)
@@ -2440,6 +2451,39 @@ class ScanlistPanel(QWidget):
     def set_active_name(self, name: str):
         self.active_lbl.setText(name)
         self._update_auto_name()
+
+    # ── Polarity control persistence ──────────────────────────────────────────
+    @staticmethod
+    def _load_flip(btn, label: str, on: bool):
+        """Set a polarity toggle without emitting toggled().
+
+        The caption is refreshed explicitly: the toggled() handler that
+        normally keeps it in sync is suppressed by blockSignals, so a silent
+        setChecked would leave the button showing the previous state.
+        """
+        blocked = btn.blockSignals(True)
+        btn.setChecked(on)
+        btn.blockSignals(blocked)
+        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+
+    def load_config(self, cfg: dict):
+        """Restore the polarity toggles from a scan config (silently)."""
+        self._load_flip(self.relay_flip_btn, "Relay flip",
+                        bool(cfg.get("relay_flip", False)))
+        self._load_flip(self.field_flip_btn, "Field flip",
+                        bool(cfg.get("field_flip", False)))
+
+    def get_config_partial(self) -> dict:
+        """Polarity state for persistence into the active scan config.
+
+        Without this the toggles were session-only UI state: they reset to OFF
+        on every restart, and nothing in the saved data recorded whether
+        flipping had been enabled.
+        """
+        return {
+            "relay_flip": self.relay_flip_btn.isChecked(),
+            "field_flip": self.field_flip_btn.isChecked(),
+        }
 
     def get_settings(self) -> dict:
         # field_spin exists on HardwarePanel; CryoHardwarePanel has field_sp

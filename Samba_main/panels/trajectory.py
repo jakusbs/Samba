@@ -1010,6 +1010,12 @@ class TrajectoryPanel(QWidget):
                  "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}")
         self._ac_grp.setStyleSheet(_ACT  if mode_id == 0 else _IDLE)
         self._dc_grp.setStyleSheet(_ACT  if mode_id == 1 else _IDLE)
+        # Disable the inactive sub-mode's controls, not just dim its title.
+        # Both boxes are visible side by side, so leaving the unused one fully
+        # editable invites carefully setting parameters that the scan will
+        # never read — Qt greys the whole content out for free.
+        self._ac_grp.setEnabled(mode_id == 0)
+        self._dc_grp.setEnabled(mode_id == 1)
         self.scan_mode_changed.emit("DC_HYST" if mode_id == 1 else "FIELD")
 
     def _upd_dc_dur(self):

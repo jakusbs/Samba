@@ -3510,3 +3510,143 @@ Lossless — trailing padding carries no information — and it covers both writ
 written stripped, an interior NUL is removed, a clean string is untouched, and
 a guard test asserting raw h5py still *rejects* embedded NULs (so the strip
 cannot be quietly deleted as redundant).
+
+---
+
+## 60. Recent Changes (August 2026) — Review Fixes: Data Integrity, Shared Safety Code, Units
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.03**.
+Outcome of a full application review; the items below were selected and
+scoped by Jakub, who corrected two hardware assumptions in the process (see
+"Deliberate non-changes").
+
+### Data integrity
+- **An unreachable sensor now refuses the scan** (`core/scan/runner.py`).
+  Actuators and the magnet were already guarded by `_actuator()`, but sensor
+  devices only logged "using sim" and carried on — and `SimProxy` answers any
+  unknown attribute with a constant ~1.0 + noise, so a dead lock-in produced a
+  complete, plausible-looking file of fake data. Sensor connection failures are
+  now collected and, when `TANGO_AVAILABLE`, abort the start with the device
+  paths in the status line. Simulation mode (no pytango) is unchanged so the UI
+  still runs on a dev box.
+- **Stale-value auto-pause names the device.** `_do_acquire` records the
+  implicated device paths in `self._last_bad_devs` (trigger/state failures plus
+  any device with a non-finite reading); `_acquire_point_retry` puts them in the
+  `AUTO-PAUSED` message. "Fix the issue and press Resume" is not actionable
+  without knowing which device to open in Jive — which is the team's recovery
+  path (a reconnect button was considered and **rejected**: Jive is the right
+  tool, and a half-working in-app reconnect is worse than a trusted procedure).
+- **Software provenance in every scan file.** New `_provenance()` (cached per
+  process) writes `samba_version`, `samba_git_commit` (with a `-dirty` suffix),
+  `hostname` and `tango_host` into HDF5 metadata. Called from
+  `_write_hw_metadata`, so both writers (`_open_hdf5` and `_run_dc_hyst`) get it
+  from one edit. The acquisition software changes weekly; without this a file
+  cannot be matched to the code that produced it.
+
+### Demagnetization starts at the field the sample actually saw
+`demagnetize_magnet` hard-coded `start_A = 2` while field segments allow ±20 A,
+so after a large sweep the alternating decay began *below* saturation and left
+remanence in the sample and pole pieces — biasing the next measurement. The
+FIELD path now passes `start_A = max(|x_plan|)`, overridable per setup with
+`demag_start_A`. **Samba_main / Beckhoff only.**
+
+When demagnetization is disabled (the superconducting magnet), the engine now
+logs the field the coil is **left energised at** — the thing to know before
+touching anything else.
+
+### Shared safety code (Cryo ↔ Samba_main, both directions)
+A method-set diff showed the two apps had each accumulated safety
+infrastructure the other lacked. Three Cryo-only pieces moved into `core/`:
+- **`core/validation.py`** — `validate_scan_config(cfg, setup)`, point-count
+  limits (`MAX_POINTS_1D/2D`), a new DC-hyst branch (`hyst_npts` / `hyst_cycles`
+  — the PLC loop cannot be paused once started), and **optional per-axis soft
+  travel limits** (`act1_min`/`act1_max`, …; absent = no check, so existing
+  setups behave exactly as before). Samba_main calls it from `_prepare_scan`,
+  which both `_start_scan` and `_start_scanlist` already share; Cryo's
+  `_validate_scan_config` is now a thin wrapper over it.
+- **`core/applog.py`** — `setup_logging(app_name)`, rotating file in
+  `~/.config/moke_scan/logs/`. Samba_main previously configured **no handler at
+  all**, so every `log.warning` in `hardware.py` / `server_sync.py` /
+  `setup_lock.py` went nowhere and a hardware problem left no trail.
+- **`_safe_save` pattern** — Samba_main's `save_setup` call is now wrapped;
+  it runs from `_start_scan`, and there is no `sys.excepthook`, so a disk-full
+  save used to take the scan start down with it.
+
+Both get the usual per-app re-export shims (`Samba_main/applog.py`, etc.).
+
+Ported Samba_main → Cryo: **hardware-panel mirroring** (`_link_hw_panels`;
+Keithley only — Cryo has no relay and its AttoDRY setpoints are polled live)
+and **polarity-control persistence** (`relay_flip` / `field_flip` round-tripped
+through `load_config` / `get_config_partial`, `polarity_changed` signal,
+config defaults + migration backfill). Setup-load warnings turned out to
+already exist in Cryo.
+
+### Setup lock released on quit
+`closeEvent` (both apps) now calls `release_lock`, and waits 10 s instead of 2 s
+for the worker. `_on_worker_finished` may never run once the event loop is
+tearing down, so quitting mid-scan left the rig "busy" to every other computer
+until the 12 h stale-lock takeover; 2 s is also shorter than a single point.
+
+### Units are no longer assumed
+`CalibrationPanel.configure_stage()` gained `x_unit` / `y_unit` / `z_unit`,
+passed from setup defaults at all three call sites. The jog widgets
+(`DigitJogWidget.set_unit`) and the autofocus spinboxes now show the axis' real
+unit instead of a hard-coded "µm", which was a lie on a stage configured in nm
+or steps. **Display only — no value is rescaled**, so a working setup is
+unaffected apart from correct labels.
+
+### Autofocus
+- **The configured FL attribute is used.** `_measure_fl` hard-coded
+  `safe_read(fl_p, "Value")` while Setup Defaults exposed a `focus_attr` combo,
+  so any non-Beckhoff focus sensor silently produced zero valid readings. The
+  worker now takes `fl_attr`. (Note the historic name collision: the worker's
+  `focus_attr` parameter is the **Z-axis** attribute; the setup key of the same
+  name is the **FL sensor** attribute.)
+- **The ±100 guard is gone.** `abs(pos0_z) > 100` claimed "too far from focus"
+  but assumed both a µm axis and an origin near focus, so it refused to run on
+  any stage with a different coordinate origin. Replaced by a check that the
+  sweep `z0 ± d_zmax` stays inside the optional `z_min`/`z_max` travel limits.
+- **The result carries a confidence.** New `_assess()` reports peak prominence
+  against a robust noise estimate (median |first difference|) and flags a peak
+  that lands on a sweep endpoint. Previously a real peak, a monotonic curve
+  (range never bracketed focus) and pure noise all ended in the same cheerful
+  "Focus found at Z = …". Unreliable results are now prefixed `⚠ … UNRELIABLE:`
+  with the reason, and the peak/noise ratio and failed-read count are shown.
+- Failed FL reads are counted and reported by device and attribute name.
+
+### UI
+- **The inactive field sub-mode is disabled, not just dimmed** (both apps).
+  `_on_submode_changed` only restyled the group *title*, so AC Field Sweep /
+  DC Hysteresis (Samba_main) and Field Sweep / Temperature Sweep (Cryo) both
+  stayed fully editable — inviting careful entry of parameters the scan will
+  never read. Now `setEnabled()` greys the whole inactive box.
+- **Cryo's pre-scan estimate no longer lies about field and temperature
+  sweeps.** `_update_estimate` modelled only `settle + zi_settle + integration`
+  and attached its "+ moves" caveat *only* to spatial scans — exactly backwards,
+  since for FIELD (both the superconducting-magnet sweep and the temperature
+  sweep) the per-point cost is dominated by the ramp/thermalisation wait in
+  `_wait_not_moving`. A 51-point temperature sweep shown as "≈ 3 min" can run
+  for hours. The estimate now includes an optional per-setup
+  `field_ramp_estimate_s` / `temp_settle_estimate_s`, and says plainly when it
+  is not included.
+
+### Deliberate non-changes (hardware constraints)
+- **No "zero after scan" for Cryo.** The review listed it as a Cryo gap; it is
+  not. The ANM200 piezo needs a *retrace* to return to a position, which is what
+  the interleaved trace/retrace already does — writing a setpoint and walking
+  away would leave the scanner settling at an unknown position.
+- **No `apply_field_setpoint` for Cryo.** Writing a field setpoint at scan start
+  is a Beckhoff-coil idea; on the AttoDRY it would trigger a ramp to wait out.
+- **No in-app device reconnect.** `hardware.reconnect_device()` remains unused
+  by the GUI by choice.
+- **No scanlist polarity reminder for Cryo** — whether field flipping is
+  appropriate on a slow superconducting magnet is the operator's call.
+
+### Tests
+`test_runner.py` 94 → 109: `TestScanValidation` (8 — limits, travel limits,
+disabled-axis exemption, absent-limits no-op), `TestUnreachableSensorRefusesStart`
+(2 — refuses with pytango, still runs in sim mode), `TestProvenanceMetadata` (2),
+`TestDemagStartCurrent` (2 — scan peak, setup override), `TestAutoPauseNamesDevice`
+(1). Both applications were additionally smoke-tested headlessly
+(`QT_QPA_PLATFORM=offscreen`): construct, sub-mode enable/disable, calibration
+units, polarity round-trip, `_build_full_config`, and hardware-panel mirroring.

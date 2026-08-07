@@ -45,6 +45,8 @@ except ImportError:
 from config  import (SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup,
                     make_default_config, APP_VERSION)
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, evict_proxy
+from applog  import setup_logging
+from validation import validate_scan_config
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
@@ -1056,6 +1058,8 @@ class MainWindow(QMainWindow):
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
             setup.get("z_device",    ""), setup.get("z_attr",    "position0"),
+            setup.get("act1_unit", ""),   setup.get("act2_unit", ""),
+            setup.get("z_unit",    ""),
         )
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
@@ -1125,7 +1129,15 @@ class MainWindow(QMainWindow):
         # but the data (and this name) belong to the OLD one — routing by tab
         # used to transport the old config's name into the new setup's list.
         self.cfg_list.sync_name(idx, old["name"], self._active_setup_name)
-        save_setup(self._active_setup_name, setup)
+        # A failed save must not raise: this runs from _start_scan, and an
+        # unhandled exception in a Qt slot (there is no excepthook) would take
+        # the scan start down with it.  Surface it instead.
+        try:
+            save_setup(self._active_setup_name, setup)
+        except Exception as e:
+            log.error("Config save failed: %s", e, exc_info=True)
+            self.status_lbl.setText(f"⚠ Save failed: {e}")
+            self.status_lbl.setStyleSheet("color:#f38ba8;font-size:11px;")
         self._update_estimate()
 
     def _update_estimate(self):
@@ -1368,6 +1380,8 @@ class MainWindow(QMainWindow):
             defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
             defaults.get("z_device",    ""), defaults.get("z_attr",    "position0"),
+            defaults.get("act1_unit", ""),   defaults.get("act2_unit", ""),
+            defaults.get("z_unit",    ""),
         )
 
     def _on_scan_mode_changed(self, mode: str):
@@ -1570,8 +1584,17 @@ class MainWindow(QMainWindow):
 
     # ── Scan helpers (shared logic) ─────────────────────────────────────────
     def _prepare_scan(self, cfg: dict) -> Optional[list]:
-        """Resolve active sensors from cfg.  Returns the active list, or None
-        if validation fails (warning dialog already shown)."""
+        """Validate the scan and resolve its active sensors.
+
+        Returns the active sensor list, or None if validation fails (a warning
+        dialog has already been shown).  Shared by _start_scan and
+        _start_scanlist so both refuse the same bad configurations.
+        """
+        # Geometry / point-count / travel-limit sanity (shared with Cryo)
+        err = validate_scan_config(cfg, self._active_setup())
+        if err:
+            QMessageBox.warning(self, "Invalid scan configuration", err)
+            return None
         if cfg.get("scan_type") == "DC_HYST":
             active = self._hyst_active(cfg)
             if not active:
@@ -2371,8 +2394,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if r == QMessageBox.StandardButton.No: ev.ignore(); return
             self._zero_armed = False   # quitting must never start new stage motion
+            # 10 s, not 2 s: one point can legitimately take longer than 2 s
+            # (lock-in settling + integration), and abandoning the thread
+            # mid-HDF5-write is how a file gets truncated.
             for w in [self._worker, self._sl_worker]:
-                if w: w.abort(); w.wait(2000)
+                if w: w.abort(); w.wait(10000)
+            # _on_worker_finished may never run once the event loop is tearing
+            # down, so release the setup lock here or the rig stays "busy" to
+            # every other computer until the 12 h stale-lock takeover.
+            release_lock(self._active_setup_name)
         self._save_active_config()
         QSettings("ETH-Intermag","SambaV3").setValue("geometry", self.saveGeometry())
         ev.accept()
@@ -2394,6 +2424,11 @@ def main():
             x11.XSetClassHint  # just check it exists
         except Exception:
             pass
+
+    # Rotating file log in ~/.config/moke_scan/logs/ — without this every
+    # log.warning() in hardware/server_sync/setup_lock goes nowhere, so a
+    # hardware problem leaves no trail to diagnose afterwards.
+    setup_logging("samba")
 
     app = QApplication(["samba"])  # argv[0] sets WM_CLASS on X11
     app.setApplicationName("Samba")
