@@ -1815,5 +1815,272 @@ class TestAppVersion(unittest.TestCase):
         self.assertRegex(mod.APP_VERSION, r"^\d+\.\d{2}$")
 
 
+class TestScanValidation(unittest.TestCase):
+    """core/validation.py — shared pre-scan sanity checks (was Cryo-only)."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "samba_validation",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "core", "validation.py"))
+        self.v = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.v)
+
+    def _cfg(self, **kw):
+        base = {"scan_type": "SPATIAL", "scan_x": True, "scan_y": False,
+                "act1_npts": 51, "act2_npts": 1, "integration_time": 0.1,
+                "act1_start": -10.0, "act1_stop": 10.0, "act1_unit": "nm"}
+        base.update(kw); return base
+
+    def test_sane_config_passes(self):
+        self.assertIsNone(self.v.validate_scan_config(self._cfg()))
+
+    def test_point_count_limit(self):
+        err = self.v.validate_scan_config(self._cfg(act1_npts=99_999))
+        self.assertIsNotNone(err); self.assertIn("safety limit", err)
+
+    def test_2d_total_limit(self):
+        err = self.v.validate_scan_config(
+            self._cfg(scan_y=True, act1_npts=2000, act2_npts=2000))
+        self.assertIsNotNone(err); self.assertIn("Total scan points", err)
+
+    def test_zero_integration_time_rejected(self):
+        err = self.v.validate_scan_config(self._cfg(integration_time=0.0))
+        self.assertIsNotNone(err); self.assertIn("Integration time", err)
+
+    def test_travel_limits_enforced_when_configured(self):
+        setup = {"act1_min": -5.0, "act1_max": 5.0}
+        err = self.v.validate_scan_config(self._cfg(), setup)
+        self.assertIsNotNone(err)
+        self.assertIn("travel limits", err)
+
+    def test_travel_limits_absent_means_no_check(self):
+        """A setup that never defined limits behaves exactly as before."""
+        self.assertIsNone(self.v.validate_scan_config(self._cfg(), {}))
+
+    def test_travel_limits_ignored_for_disabled_axis(self):
+        setup = {"act2_min": -1.0, "act2_max": 1.0}
+        cfg = self._cfg(scan_y=False, act2_start=-500.0, act2_stop=500.0)
+        self.assertIsNone(self.v.validate_scan_config(cfg, setup))
+
+    def test_field_scan_needs_two_points(self):
+        err = self.v.validate_scan_config(
+            {"scan_type": "FIELD", "field_segments": [[0, 1, 1]],
+             "integration_time": 0.1})
+        self.assertIsNotNone(err)
+
+
+def _run_cfg(sensors=None, **over):
+    """Minimal 1-D SPATIAL config usable with run()."""
+    cfg = {
+        "scan_type": "SPATIAL", "scan_x": True, "scan_y": False, "name": "t",
+        "act1_start": 0.0, "act1_stop": 2.0, "act1_npts": 3,
+        "act1_label": "X", "act1_unit": "nm",
+        "act1_device": "dev://stage", "act1_attr": "x",
+        "act2_device": "dev://stage", "act2_attr": "y",
+        "act2_start": 0.0, "act2_stop": 1.0, "act2_npts": 1,
+        "act2_label": "Y", "act2_unit": "nm",
+        "integration_time": 0.0, "settle_time": 0.0, "move_timeout": 5.0,
+        "sensors": sensors if sensors is not None else [{
+            "enabled": True, "device": "dev://zi", "attribute": "x1",
+            "label": "ZI x1", "trigger_cmd": "Start",
+            "integ_time_attr": "", "settling_attr": "",
+        }],
+    }
+    cfg.update(over)
+    return cfg
+
+
+class _RunnerPatch:
+    """Patch runner's proxy factories + filename for an end-to-end run()."""
+
+    def __init__(self, fresh=None, proxy=None):
+        self._proxy = proxy or InstantProxy(read_val=1.0)
+        self._fresh = fresh or (lambda path: (self._proxy, None))
+
+    def __enter__(self):
+        self._orig = (_runner_mod.fresh_proxy, _runner_mod.get_proxy,
+                      _runner_mod._make_filename, _runner_mod.TANGO_AVAILABLE)
+        _runner_mod.fresh_proxy    = self._fresh
+        _runner_mod.get_proxy      = lambda path: self._proxy
+        _runner_mod._make_filename = lambda cfg: "test.h5"
+        return self
+
+    def __exit__(self, *a):
+        (_runner_mod.fresh_proxy, _runner_mod.get_proxy,
+         _runner_mod._make_filename, _runner_mod.TANGO_AVAILABLE) = self._orig
+        return False
+
+
+class TestUnreachableSensorRefusesStart(unittest.TestCase):
+    """A sensor device that cannot be reached must stop the scan.
+
+    SimProxy answers any unknown attribute with a constant ~1.0 plus noise, so
+    a dead lock-in yields a complete, plausible-looking file of fake data --
+    worse than a dead stage, which the engine already refuses to run with."""
+
+    def test_scan_refuses_when_sensor_unreachable(self):
+        import tempfile
+        statuses = []
+        dead = lambda path: (InstantProxy(), "not exported")
+        with tempfile.TemporaryDirectory() as td, _RunnerPatch(fresh=dead):
+            _runner_mod.TANGO_AVAILABLE = True
+            r = ScanRunner(_run_cfg(), {"save_dir": td})
+            out = r.run({"status": statuses.append})
+        self.assertIsNone(out, "scan must not start with an unreachable sensor")
+        self.assertTrue(any("unreachable" in s for s in statuses), statuses)
+
+    def test_sim_mode_still_runs(self):
+        """Without pytango the UI must still work on a dev box."""
+        import tempfile
+        proxy = InstantProxy(read_val=1.0)
+        sim = lambda path: (proxy, "pytango not installed")
+        with tempfile.TemporaryDirectory() as td, _RunnerPatch(fresh=sim,
+                                                               proxy=proxy):
+            _runner_mod.TANGO_AVAILABLE = False
+            out = ScanRunner(_run_cfg(), {"save_dir": td}).run({})
+        self.assertIsNotNone(out)
+
+
+class TestProvenanceMetadata(unittest.TestCase):
+    """Every scan file records which software produced it.
+
+    Without it a file cannot be matched to the code that wrote it, and this
+    acquisition software changes weekly."""
+
+    def test_provenance_keys_written(self):
+        import h5py, tempfile
+        _runner_mod._PROVENANCE = None          # force recompute
+        p = os.path.join(tempfile.mkdtemp(), "prov.h5")
+        with h5py.File(p, "w") as f:
+            _runner_mod._write_hw_metadata(f.create_group("metadata"), {})
+        with h5py.File(p, "r") as f:
+            a = dict(f["metadata"].attrs)
+        self.assertIn("hostname", a)
+        self.assertIn("samba_git_commit", a)
+        self.assertRegex(a["samba_git_commit"], r"^[0-9a-f]{7,}(-dirty)?$")
+
+    def test_provenance_is_cached(self):
+        _runner_mod._PROVENANCE = None
+        first = _runner_mod._provenance()
+        self.assertIs(first, _runner_mod._provenance())
+
+
+class TestDemagStartCurrent(unittest.TestCase):
+    """Demagnetization starts at the peak current the scan actually applied.
+
+    Starting the alternating decay below the field the sample just saw does
+    not demagnetize it -- it leaves remanence that biases the next scan."""
+
+    def _run_field(self, setup_extra=None, segments=None):
+        import tempfile
+        cfg = _run_cfg(scan_type="FIELD",
+                       field_segments=segments or [[-7.5, 7.5, 4]],
+                       field_x_label="Field", field_x_unit="mT",
+                       field_setpoint_unit="A")
+        setup = {"magnet_device": "dev://magnet",
+                 "magnet_current_attr": "current_polar",
+                 "magnet_field_attr": "field_polar_corr",
+                 "demagnetize_after_scan": True}
+        setup.update(setup_extra or {})
+        _orig_demag = _runner_mod.demagnetize_magnet
+        calls = []
+        _runner_mod.demagnetize_magnet = (
+            lambda p, attr, **kw: calls.append(kw))
+        try:
+            with tempfile.TemporaryDirectory() as td, _RunnerPatch():
+                setup["save_dir"] = td
+                ScanRunner(cfg, setup).run({})
+        finally:
+            _runner_mod.demagnetize_magnet = _orig_demag
+        return calls
+
+    def test_start_current_follows_scan_peak(self):
+        calls = self._run_field()
+        self.assertTrue(calls, "demagnetize_magnet was not called")
+        self.assertAlmostEqual(calls[0].get("start_A"), 7.5)
+
+    def test_setup_override_wins(self):
+        calls = self._run_field({"demag_start_A": 9.0},
+                                segments=[[-2.0, 2.0, 3]])
+        self.assertTrue(calls)
+        self.assertAlmostEqual(calls[0].get("start_A"), 9.0)
+
+
+class TestAutoPauseNamesDevice(unittest.TestCase):
+    """The auto-pause message names the failing device.
+
+    "fix the issue and press Resume" is not actionable without knowing which
+    device to open in Jive."""
+
+    def test_failed_device_is_named(self):
+        r = _make_runner()
+        r._last_bad_devs = ["hpp-N42/measure/ZI2"]
+        msgs = []
+
+        def _st(m):
+            msgs.append(m)
+            if "AUTO-PAUSED" in m:
+                r._abort = True          # release the pause-wait loop
+
+        r._do_acquire = lambda *a, **kw: ({}, 0.0, False)
+        r._acquire_point_retry({}, {}, {}, 0.01, time.time(), _RUNNING_SET,
+                               {"move_timeout": 1.0}, 0, 0.0, False,
+                               "X", 0.0, _noop, _st)
+        paused = [m for m in msgs if "AUTO-PAUSED" in m]
+        self.assertTrue(paused, msgs)
+        self.assertIn("hpp-N42/measure/ZI2", paused[0])
+
+
+class TestRecentWindowSetting(unittest.TestCase):
+    """The Recent y-scale window is a per-setup value, not a constant.
+
+    It lives in Setup Defaults rather than the plot toolbars — a per-setup
+    preference, not something adjusted mid-measurement."""
+
+    def _cfgmod(self, app):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"recent_window_cfg_{app}",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         app, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_default_is_ten_in_every_setup(self):
+        for app in ("Samba_main", "Cryo"):
+            mod = self._cfgmod(app)
+            for name, setup in mod.SETUP_HW_DEFAULTS.items():
+                self.assertEqual(setup.get("recent_window"), 10,
+                                 f"{app}/{name} missing or wrong recent_window")
+
+    def test_constant_lowered_to_ten(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recent_window_pi",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "core", "plot_interact.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.RECENT_WINDOW, 10)
+
+    def test_window_argument_is_honoured(self):
+        """A smaller window must ignore an earlier large transient."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recent_window_pi2",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "core", "plot_interact.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        y = [1000.0] + [0.01] * 20
+        lo10, hi10 = mod.recent_symmetric_ylim([y], window=10)
+        lo50, hi50 = mod.recent_symmetric_ylim([y], window=50)
+        self.assertLess(hi10, 1.0)
+        self.assertGreater(hi50, 100.0)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

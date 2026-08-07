@@ -25,7 +25,8 @@ from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
-                           recent_symmetric_ylim, SCALE_RECENT)
+                           recent_symmetric_ylim, SCALE_RECENT,
+                           RECENT_WINDOW)
 from theme import DIVERGING_CMAPS
 
 REDRAW_INTERVAL_MS = 80
@@ -191,6 +192,10 @@ class Live1DWidget(QWidget):
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
         # Y-scale mode: Full (all data) or Recent (±max|y| of the last N pts)
+        # Trailing-point count for the Recent y-scale mode; comes from
+        # Setup Defaults so it is configurable without spending toolbar
+        # space on a control nobody adjusts mid-measurement.
+        self._recent_window = RECENT_WINDOW
         self._scale_w, self._scale_mode = make_scale_pills(
             lambda: setattr(self, "_dirty", True), self)
         top.addWidget(self._scale_w)
@@ -240,6 +245,18 @@ class Live1DWidget(QWidget):
         # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
         eng_axis(self.ax1.yaxis)
         eng_axis(self.ax2.yaxis)
+
+    def set_recent_window(self, n: int):
+        """Trailing-point count used by the Recent y-scale mode.
+
+        Set from Setup Defaults (`recent_window`); the plot redraws with the
+        new window on the next update.
+        """
+        try:
+            self._recent_window = max(2, int(n))
+        except (TypeError, ValueError):
+            return
+        self._dirty = True
 
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
@@ -321,7 +338,8 @@ class Live1DWidget(QWidget):
                      if len(l.get_ydata()) > 0]
             if not lines: continue
             if recent:
-                lim = recent_symmetric_ylim([l.get_ydata() for l in lines])
+                lim = recent_symmetric_ylim([l.get_ydata() for l in lines],
+                                            window=self._recent_window)
                 if lim is not None:
                     ax.set_ylim(*lim)
                 continue

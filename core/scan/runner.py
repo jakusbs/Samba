@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import h5py
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -87,8 +87,72 @@ def _make_filename(cfg: dict) -> str:
     return "_".join(parts) + ".h5"
 
 
+_PROVENANCE: Optional[Dict[str, str]] = None
+
+
+def _provenance() -> Dict[str, str]:
+    """Which software, on which machine, against which TANGO host.
+
+    Computed once per process (the git call spawns a subprocess, and none of
+    these change while the app runs).  Without this a data file cannot be
+    matched to the code that produced it — which matters here because the
+    acquisition software changes weekly, so "was this file taken before or
+    after the field-axis unit fix?" is otherwise unanswerable.
+    Every field is best-effort: anything that fails is simply omitted.
+    """
+    global _PROVENANCE
+    if _PROVENANCE is not None:
+        return _PROVENANCE
+    prov: Dict[str, str] = {}
+    try:
+        import config as _cfgmod
+        v = getattr(_cfgmod, "APP_VERSION", None)
+        if v:
+            prov["samba_version"] = str(v)
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            commit = out.stdout.strip()
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True, timeout=5,
+            )
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                commit += "-dirty"
+            prov["samba_git_commit"] = commit
+    except Exception:
+        pass
+    try:
+        import socket
+        prov["hostname"] = socket.gethostname()
+    except Exception:
+        pass
+    try:
+        th = os.environ.get("TANGO_HOST", "")
+        if th:
+            prov["tango_host"] = th
+    except Exception:
+        pass
+    _PROVENANCE = prov
+    return prov
+
+
 def _write_hw_metadata(meta, cfg: dict) -> None:
     """Write hardware snapshot and temperature-sweep keys into an HDF5 group."""
+    # Software provenance — written by both HDF5 writers via this one call.
+    for k, v in _provenance().items():
+        try:
+            _wsa(meta, k, v)
+        except Exception:
+            pass
     # hw_* keys: keithley, lock-in, relay, field, stage positions, temperature
     _HW_KEYS = [
         "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
@@ -189,6 +253,9 @@ class ScanRunner:
         self._lg = lambda *a: None
         self._st = lambda *a: None
         self._write_fail_streak = 0
+        # Devices implicated by the last failed acquire — named in the
+        # auto-pause status message so the user knows what to open in Jive.
+        self._last_bad_devs: List[str] = []
 
     def abort(self):     self._abort  = True
     def pause(self):     self._paused = True
@@ -232,6 +299,7 @@ class ScanRunner:
                                                or _seen.add(s["device"]))]
         # Connect to all devices concurrently — startup latency doesn't affect
         # trigger synchronization (triggers fire via a tight asynch loop later).
+        _dead_sensors: List[Tuple[str, str]] = []
         with ThreadPoolExecutor(max_workers=max(len(unique_devs), 1)) as _ex:
             _fut_to_dev = {_ex.submit(fresh_proxy, dp): dp for dp in unique_devs}
             for _fut in as_completed(_fut_to_dev):
@@ -239,7 +307,22 @@ class ScanRunner:
                 fp, fp_err = _fut.result()
                 devp[dp] = fp
                 if fp_err:
-                    lg(f"⚠ {dp}: using sim — {fp_err}")
+                    _dead_sensors.append((dp, fp_err))
+                    lg(f"⚠ {dp}: {fp_err}")
+
+        # A sensor device IS the measurement, so an unreachable one is worse
+        # than an unreachable stage: SimProxy answers every unknown attribute
+        # with a constant ~1.0 plus noise, which is not obviously wrong in a
+        # plot and yields a complete, plausible file of fake data.  Same rule
+        # as _actuator() below — refuse to start when real hardware is
+        # configured but unreachable.  In simulation mode (no pytango) the
+        # old behaviour is kept so the UI still runs on a dev box.
+        if _dead_sensors and TANGO_AVAILABLE:
+            _names = "; ".join(f"{dp} ({err})" for dp, err in _dead_sensors)
+            st(f"✗ Sensor device(s) unreachable — scan not started: {_names}")
+            return None
+        for dp, err in _dead_sensors:
+            lg(f"⚠ {dp}: using sim — {err}")
 
         mag_cur_attr = setup.get("magnet_current_attr", "current_polar")
         mag_fld_attr = setup.get("magnet_field_attr",   "field_polar_corr")
@@ -755,9 +838,38 @@ class ScanRunner:
                         if self._abort: break
 
                     if hdf_scan == "FIELD":
+                        # A failed setpoint write used to be logged and then
+                        # measured anyway: the point is recorded at the
+                        # PREVIOUS field, and if the readback also fails on a
+                        # same-quantity scan x_read falls back to the setpoint
+                        # that was never applied — a wrong x with no marker.
+                        # Retry, then auto-pause on the same point, matching
+                        # how sensor read failures are handled.
                         _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
                         if _mag_err:
-                            lg(f"⚠ Magnet write failed at {x_pos:.4g} A: {_mag_err}")
+                            for _mtry in range(AUTO_PAUSE_THRESHOLD - 1):
+                                if self._abort: break
+                                lg(f"⚠ Magnet write failed at {x_pos:.4g}: "
+                                   f"{_mag_err} — retrying "
+                                   f"{_mtry + 1}/{AUTO_PAUSE_THRESHOLD - 1}")
+                                _mp, _mperr = fresh_proxy(_field_dev)
+                                if not _mperr:
+                                    mag_p = _mp
+                                _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
+                                if not _mag_err:
+                                    lg("  ✓ Magnet setpoint recovered")
+                                    break
+                                time.sleep(RETRY_DELAY)
+                        if _mag_err and not self._abort:
+                            self._paused = True
+                            st(f"⚠ AUTO-PAUSED — magnet setpoint {x_pos:.4g} "
+                               f"could not be written to {_field_dev}: "
+                               f"{_mag_err} — fix it and press Resume")
+                            while self._paused and not self._abort:
+                                time.sleep(0.05)
+                            if not self._abort:
+                                lg(f"  ↩ Resuming — retrying setpoint {x_pos:.4g}")
+                                safe_write(mag_p, mag_cur_attr, x_pos)
                         time.sleep(max(cfg["settle_time"], 0.05))
                         if self._wait_not_moving(mag_p, field_move_timeout, lg, st):
                             # The device was ramping (superconducting magnet /
@@ -856,8 +968,33 @@ class ScanRunner:
             # (set "demagnetize_after_scan": false in setup to suppress)
             if (hdf_scan == "FIELD" and mag_p is not None
                     and setup.get("demagnetize_after_scan", True)):
+                # Start the alternating decay at (at least) the largest current
+                # the scan actually applied.  Starting below the peak the sample
+                # just saw does not demagnetize it — it leaves remanence in the
+                # sample and the pole pieces, which then biases the next
+                # measurement.  Overridable per setup for an unusual supply.
+                try:
+                    _peak_A = float(np.max(np.abs(x_plan)))
+                except Exception:
+                    _peak_A = 0.0
+                _demag_start = float(setup.get("demag_start_A", 0.0)) or _peak_A
                 st("Auto-demagnetizing magnet…")
-                demagnetize_magnet(mag_p, mag_cur_attr, log_fn=lg)
+                if _demag_start > 0:
+                    lg(f"── Demagnetizing from {_demag_start:.4g} A "
+                       f"(scan peak {_peak_A:.4g} A) ──")
+                    demagnetize_magnet(mag_p, mag_cur_attr, log_fn=lg,
+                                       start_A=_demag_start)
+                else:
+                    demagnetize_magnet(mag_p, mag_cur_attr, log_fn=lg)
+            elif hdf_scan == "FIELD" and mag_p is not None:
+                # Superconducting magnet: demagnetization is deliberately
+                # disabled, so the coil is left energised at the last setpoint.
+                # Say so — it is the thing to know before touching anything.
+                _held, _herr = safe_read(mag_p, mag_fld_attr)
+                _held_s = (f"{_held:.4g} {x_unit}" if _held is not None
+                           else f"setpoint {x_plan[min(count, len(x_plan)) - 1]:.4g}")
+                lg(f"── Magnet left energised at {_held_s} "
+                   f"(demagnetize_after_scan is off for this setup) ──")
             st(("Done ✓" if not self._abort else f"Aborted ({count}/{total} pts)") +
                f"  → {filename}")
             return filename
@@ -1531,6 +1668,21 @@ class ScanRunner:
                 vals[s["label"]] = np.nan
             ok = False
 
+        # Record which devices are implicated, so the auto-pause message can
+        # name them: the recovery path is to open exactly that device in Jive,
+        # and "fix the issue" is not actionable without the path.
+        if ok:
+            self._last_bad_devs = []
+        else:
+            _implicated = set(bad_devs)
+            for dev_path, _sens in dev_sensors.items():
+                for s in _sens:
+                    v = vals.get(s["label"])
+                    if v is None or not np.isfinite(v):
+                        _implicated.add(dev_path)
+                        break
+            self._last_bad_devs = sorted(_implicated)
+
         return vals, t_trigger, ok
 
     # ── Per-point acquire with retry + auto-pause ─────────────────────────────
@@ -1576,7 +1728,9 @@ class ScanRunner:
                     lg(f"⚠ {x_lbl}={x_read:.4g} failed all "
                        f"{AUTO_PAUSE_THRESHOLD} attempts — pausing")
                     self._paused = True
-                    st(f"⚠ AUTO-PAUSED — fix the issue and press Resume")
+                    _bad = getattr(self, "_last_bad_devs", []) or []
+                    _who = (" — device: " + ", ".join(_bad)) if _bad else ""
+                    st(f"⚠ AUTO-PAUSED{_who} — fix the issue and press Resume")
 
             if _point_ok or self._abort:
                 break   # success or abort — leave the while loop

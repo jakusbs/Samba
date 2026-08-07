@@ -45,6 +45,8 @@ except ImportError:
 from config  import (SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup,
                     make_default_config, APP_VERSION)
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, evict_proxy
+from applog  import setup_logging
+from validation import validate_scan_config
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
@@ -84,6 +86,9 @@ def _sb_fmt(sec: float) -> str:
 # Hardware snapshot helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+_HW_SNAP_TIMEOUT_S = 1.5   # per-attribute bound for the pre-scan snapshot
+
+
 def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
     """Read key hardware state immediately before a scan starts.
 
@@ -95,15 +100,27 @@ def _read_hw_snapshot(setup: dict, scan_type: str) -> dict:
       - FIELD: hw_field_mT skipped (field is the swept axis)
     """
     snap: dict = {}
+    _dead: set = set()      # devices that already failed once in this snapshot
 
     def _read(device_path: str, attr: str):
-        if not device_path or not attr:
+        # This runs on the GUI thread at scan start.  With the default 10 s
+        # I/O timeout, ~14 attribute reads spread over ~5 devices meant one
+        # powered-off device froze the UI for tens of seconds between clicking
+        # Start and anything visibly happening.  Two bounds fix that: a short
+        # per-read timeout, and skipping a device's remaining attributes once
+        # one of its reads has failed.  The snapshot is best-effort metadata,
+        # so losing a key on a flaky device is the right trade.
+        if not device_path or not attr or device_path in _dead:
             return None
         try:
             p = get_proxy(device_path)
-            val, rerr = safe_read(p, attr)
-            return val if not rerr else None
+            val, rerr = safe_read(p, attr, timeout=_HW_SNAP_TIMEOUT_S)
+            if rerr:
+                _dead.add(device_path)
+                return None
+            return val
         except Exception:
+            _dead.add(device_path)
             return None
 
     # Keithley AC excitation state
@@ -809,6 +826,10 @@ class MainWindow(QMainWindow):
         self._scan_start_time    = _time.time()
 
     def _connect_signals(self):
+        # Inline duration estimate in the field-sweep box.  Uses the same
+        # per-point model as the status-bar estimate; the ramp/thermalisation
+        # wait is not modelled (see _update_estimate), so this is a floor.
+        self.traj_panel._seg_list.set_time_estimator(self._field_seg_estimate)
         self.cfg_list.load_setups(self._setups)
         self.cfg_list.config_selected.connect(self._on_config_selected)
         self.cfg_list.new_config_requested.connect(self._on_new_config)
@@ -1052,10 +1073,17 @@ class MainWindow(QMainWindow):
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(setup.get("lights_device", ""))
         self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(setup.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
             setup.get("z_device",    ""), setup.get("z_attr",    "position0"),
+            setup.get("act1_unit", ""),   setup.get("act2_unit", ""),
+            setup.get("z_unit",    ""),
         )
         # Now load config values into all widgets
         self.traj_panel.load_config(cfg)
@@ -1125,7 +1153,15 @@ class MainWindow(QMainWindow):
         # but the data (and this name) belong to the OLD one — routing by tab
         # used to transport the old config's name into the new setup's list.
         self.cfg_list.sync_name(idx, old["name"], self._active_setup_name)
-        save_setup(self._active_setup_name, setup)
+        # A failed save must not raise: this runs from _start_scan, and an
+        # unhandled exception in a Qt slot (there is no excepthook) would take
+        # the scan start down with it.  Surface it instead.
+        try:
+            save_setup(self._active_setup_name, setup)
+        except Exception as e:
+            log.error("Config save failed: %s", e, exc_info=True)
+            self.status_lbl.setText(f"⚠ Save failed: {e}")
+            self.status_lbl.setStyleSheet("color:#f38ba8;font-size:11px;")
         self._update_estimate()
 
     def _update_estimate(self):
@@ -1169,6 +1205,11 @@ class MainWindow(QMainWindow):
         def _show(zi_settle=0.0):
             if self._scan_running:
                 return
+            # Cache for the inline field-segment estimate, which cannot afford
+            # its own device read on every spinbox keystroke.
+            self._last_zi_settle = zi_settle
+            if hasattr(self.traj_panel, "_seg_list"):
+                self.traj_panel._seg_list._on_changed()
             parts = []
             if settle    > 0: parts.append(f"{settle:.3g}s settle")
             if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
@@ -1364,10 +1405,17 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_hyst_device(defaults.get("hyst_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(defaults.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),
             defaults.get("z_device",    ""), defaults.get("z_attr",    "position0"),
+            defaults.get("act1_unit", ""),   defaults.get("act2_unit", ""),
+            defaults.get("z_unit",    ""),
         )
 
     def _on_scan_mode_changed(self, mode: str):
@@ -1435,6 +1483,24 @@ class MainWindow(QMainWindow):
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
+
+    def _field_seg_estimate(self, total_pts: int):
+        """Seconds for `total_pts` field points, or None if not computable."""
+        try:
+            if total_pts <= 0:
+                return None
+            int_t  = float(self.traj_panel.int_time.value())
+            settle = max(float(self.traj_panel.settle.value()), 0.05)
+            zi     = float(getattr(self, "_last_zi_settle", 0.0) or 0.0)
+            ramp   = 0.0
+            try:
+                ramp = max(0.0, float(
+                    self._active_setup().get("field_ramp_estimate_s", 0.0)))
+            except Exception:
+                ramp = 0.0
+            return total_pts * (settle + zi + int_t + ramp)
+        except Exception:
+            return None
 
     def _build_full_config(self) -> dict:
         partial  = self.traj_panel.get_config_partial()
@@ -1570,8 +1636,17 @@ class MainWindow(QMainWindow):
 
     # ── Scan helpers (shared logic) ─────────────────────────────────────────
     def _prepare_scan(self, cfg: dict) -> Optional[list]:
-        """Resolve active sensors from cfg.  Returns the active list, or None
-        if validation fails (warning dialog already shown)."""
+        """Validate the scan and resolve its active sensors.
+
+        Returns the active sensor list, or None if validation fails (a warning
+        dialog has already been shown).  Shared by _start_scan and
+        _start_scanlist so both refuse the same bad configurations.
+        """
+        # Geometry / point-count / travel-limit sanity (shared with Cryo)
+        err = validate_scan_config(cfg, self._active_setup())
+        if err:
+            QMessageBox.warning(self, "Invalid scan configuration", err)
+            return None
         if cfg.get("scan_type") == "DC_HYST":
             active = self._hyst_active(cfg)
             if not active:
@@ -2371,8 +2446,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if r == QMessageBox.StandardButton.No: ev.ignore(); return
             self._zero_armed = False   # quitting must never start new stage motion
+            # 10 s, not 2 s: one point can legitimately take longer than 2 s
+            # (lock-in settling + integration), and abandoning the thread
+            # mid-HDF5-write is how a file gets truncated.
             for w in [self._worker, self._sl_worker]:
-                if w: w.abort(); w.wait(2000)
+                if w: w.abort(); w.wait(10000)
+            # _on_worker_finished may never run once the event loop is tearing
+            # down, so release the setup lock here or the rig stays "busy" to
+            # every other computer until the 12 h stale-lock takeover.
+            release_lock(self._active_setup_name)
         self._save_active_config()
         QSettings("ETH-Intermag","SambaV3").setValue("geometry", self.saveGeometry())
         ev.accept()
@@ -2394,6 +2476,11 @@ def main():
             x11.XSetClassHint  # just check it exists
         except Exception:
             pass
+
+    # Rotating file log in ~/.config/moke_scan/logs/ — without this every
+    # log.warning() in hardware/server_sync/setup_lock goes nowhere, so a
+    # hardware problem leaves no trail to diagnose afterwards.
+    setup_logging("samba")
 
     app = QApplication(["samba"])  # argv[0] sets WM_CLASS on X11
     app.setApplicationName("Samba")

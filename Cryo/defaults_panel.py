@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 
-from panels import NoScrollComboBox
+from panels import NoScrollComboBox, NoScrollSpinBox
 
 log = logging.getLogger(__name__)
 
@@ -442,6 +442,22 @@ class SetupDefaultsPanel(QWidget):
         self.fl_dev_combo.currentIndexChanged.connect(self._on_fl_dev_changed)
         self.fl_attr_combo.currentIndexChanged.connect(lambda _: self.defaults_changed.emit())
 
+        # Trailing-point count for the live plots' "Recent" y-scale mode --
+        # a per-setup preference, kept out of the plot toolbars which have no
+        # room to spare.
+        cal_g.addWidget(QLabel("Recent window:"), 1, 0)
+        self.recent_window = NoScrollSpinBox()
+        self.recent_window.setRange(2, 1000)
+        self.recent_window.setValue(10)
+        self.recent_window.setSuffix(" pts")
+        self.recent_window.setToolTip(
+            "How many of the most recent points the live plots' \"Recent\"\n"
+            "y-scale mode looks at. Smaller follows the signal down faster\n"
+            "while nulling; larger is steadier. Applies to the 1D live plot\n"
+            "and the calibration plot.")
+        cal_g.addWidget(self.recent_window, 1, 1)
+        self.recent_window.valueChanged.connect(lambda _: self.defaults_changed.emit())
+
         self._populate_fl_dev()
         root.addWidget(cal_grp)
         root.addStretch()
@@ -495,6 +511,10 @@ class SetupDefaultsPanel(QWidget):
 
     def load(self, setup: dict):
         """Restore all selections from a setup dict."""
+        try:
+            self.recent_window.setValue(int(setup.get("recent_window", 10)))
+        except (TypeError, ValueError):
+            pass
         def _load_piezo(row1, row2, rowz, blk):
             row1.load(blk.get("act1_device", ""), blk.get("act1_attr", "x"))
             row2.load(blk.get("act2_device", ""), blk.get("act2_attr", "y"))
@@ -555,4 +575,5 @@ class SetupDefaultsPanel(QWidget):
             **ad_attrs,
             "focus_averagein":      self.fl_dev_combo.currentData() or "",
             "focus_averagein_attr": self.fl_attr_combo.currentData() or "Value",
+            "recent_window":        self.recent_window.value(),
         }

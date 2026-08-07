@@ -3510,3 +3510,363 @@ Lossless — trailing padding carries no information — and it covers both writ
 written stripped, an interior NUL is removed, a clean string is untouched, and
 a guard test asserting raw h5py still *rejects* embedded NULs (so the strip
 cannot be quietly deleted as redundant).
+
+---
+
+## 60. Recent Changes (August 2026) — Review Fixes: Data Integrity, Shared Safety Code, Units
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.03**.
+Outcome of a full application review; the items below were selected and
+scoped by Jakub, who corrected two hardware assumptions in the process (see
+"Deliberate non-changes").
+
+### Data integrity
+- **An unreachable sensor now refuses the scan** (`core/scan/runner.py`).
+  Actuators and the magnet were already guarded by `_actuator()`, but sensor
+  devices only logged "using sim" and carried on — and `SimProxy` answers any
+  unknown attribute with a constant ~1.0 + noise, so a dead lock-in produced a
+  complete, plausible-looking file of fake data. Sensor connection failures are
+  now collected and, when `TANGO_AVAILABLE`, abort the start with the device
+  paths in the status line. Simulation mode (no pytango) is unchanged so the UI
+  still runs on a dev box.
+- **Stale-value auto-pause names the device.** `_do_acquire` records the
+  implicated device paths in `self._last_bad_devs` (trigger/state failures plus
+  any device with a non-finite reading); `_acquire_point_retry` puts them in the
+  `AUTO-PAUSED` message. "Fix the issue and press Resume" is not actionable
+  without knowing which device to open in Jive — which is the team's recovery
+  path (a reconnect button was considered and **rejected**: Jive is the right
+  tool, and a half-working in-app reconnect is worse than a trusted procedure).
+- **Software provenance in every scan file.** New `_provenance()` (cached per
+  process) writes `samba_version`, `samba_git_commit` (with a `-dirty` suffix),
+  `hostname` and `tango_host` into HDF5 metadata. Called from
+  `_write_hw_metadata`, so both writers (`_open_hdf5` and `_run_dc_hyst`) get it
+  from one edit. The acquisition software changes weekly; without this a file
+  cannot be matched to the code that produced it.
+
+### Demagnetization starts at the field the sample actually saw
+`demagnetize_magnet` hard-coded `start_A = 2` while field segments allow ±20 A,
+so after a large sweep the alternating decay began *below* saturation and left
+remanence in the sample and pole pieces — biasing the next measurement. The
+FIELD path now passes `start_A = max(|x_plan|)`, overridable per setup with
+`demag_start_A`. **Samba_main / Beckhoff only.**
+
+When demagnetization is disabled (the superconducting magnet), the engine now
+logs the field the coil is **left energised at** — the thing to know before
+touching anything else.
+
+### Shared safety code (Cryo ↔ Samba_main, both directions)
+A method-set diff showed the two apps had each accumulated safety
+infrastructure the other lacked. Three Cryo-only pieces moved into `core/`:
+- **`core/validation.py`** — `validate_scan_config(cfg, setup)`, point-count
+  limits (`MAX_POINTS_1D/2D`), a new DC-hyst branch (`hyst_npts` / `hyst_cycles`
+  — the PLC loop cannot be paused once started), and **optional per-axis soft
+  travel limits** (`act1_min`/`act1_max`, …; absent = no check, so existing
+  setups behave exactly as before). Samba_main calls it from `_prepare_scan`,
+  which both `_start_scan` and `_start_scanlist` already share; Cryo's
+  `_validate_scan_config` is now a thin wrapper over it.
+- **`core/applog.py`** — `setup_logging(app_name)`, rotating file in
+  `~/.config/moke_scan/logs/`. Samba_main previously configured **no handler at
+  all**, so every `log.warning` in `hardware.py` / `server_sync.py` /
+  `setup_lock.py` went nowhere and a hardware problem left no trail.
+- **`_safe_save` pattern** — Samba_main's `save_setup` call is now wrapped;
+  it runs from `_start_scan`, and there is no `sys.excepthook`, so a disk-full
+  save used to take the scan start down with it.
+
+Both get the usual per-app re-export shims (`Samba_main/applog.py`, etc.).
+
+Ported Samba_main → Cryo: **hardware-panel mirroring** (`_link_hw_panels`;
+Keithley only — Cryo has no relay and its AttoDRY setpoints are polled live)
+and **polarity-control persistence** (`relay_flip` / `field_flip` round-tripped
+through `load_config` / `get_config_partial`, `polarity_changed` signal,
+config defaults + migration backfill). Setup-load warnings turned out to
+already exist in Cryo.
+
+### Setup lock released on quit
+`closeEvent` (both apps) now calls `release_lock`, and waits 10 s instead of 2 s
+for the worker. `_on_worker_finished` may never run once the event loop is
+tearing down, so quitting mid-scan left the rig "busy" to every other computer
+until the 12 h stale-lock takeover; 2 s is also shorter than a single point.
+
+### Units are no longer assumed
+`CalibrationPanel.configure_stage()` gained `x_unit` / `y_unit` / `z_unit`,
+passed from setup defaults at all three call sites. The jog widgets
+(`DigitJogWidget.set_unit`) and the autofocus spinboxes now show the axis' real
+unit instead of a hard-coded "µm", which was a lie on a stage configured in nm
+or steps. **Display only — no value is rescaled**, so a working setup is
+unaffected apart from correct labels.
+
+### Autofocus
+- **The configured FL attribute is used.** `_measure_fl` hard-coded
+  `safe_read(fl_p, "Value")` while Setup Defaults exposed a `focus_attr` combo,
+  so any non-Beckhoff focus sensor silently produced zero valid readings. The
+  worker now takes `fl_attr`. (Note the historic name collision: the worker's
+  `focus_attr` parameter is the **Z-axis** attribute; the setup key of the same
+  name is the **FL sensor** attribute.)
+- **The ±100 guard is gone.** `abs(pos0_z) > 100` claimed "too far from focus"
+  but assumed both a µm axis and an origin near focus, so it refused to run on
+  any stage with a different coordinate origin. Replaced by a check that the
+  sweep `z0 ± d_zmax` stays inside the optional `z_min`/`z_max` travel limits.
+- **The result carries a confidence.** New `_assess()` reports peak prominence
+  against a robust noise estimate (median |first difference|) and flags a peak
+  that lands on a sweep endpoint. Previously a real peak, a monotonic curve
+  (range never bracketed focus) and pure noise all ended in the same cheerful
+  "Focus found at Z = …". Unreliable results are now prefixed `⚠ … UNRELIABLE:`
+  with the reason, and the peak/noise ratio and failed-read count are shown.
+- Failed FL reads are counted and reported by device and attribute name.
+
+### UI
+- **The inactive field sub-mode is disabled, not just dimmed** (both apps).
+  `_on_submode_changed` only restyled the group *title*, so AC Field Sweep /
+  DC Hysteresis (Samba_main) and Field Sweep / Temperature Sweep (Cryo) both
+  stayed fully editable — inviting careful entry of parameters the scan will
+  never read. Now `setEnabled()` greys the whole inactive box.
+- **Cryo's pre-scan estimate no longer lies about field and temperature
+  sweeps.** `_update_estimate` modelled only `settle + zi_settle + integration`
+  and attached its "+ moves" caveat *only* to spatial scans — exactly backwards,
+  since for FIELD (both the superconducting-magnet sweep and the temperature
+  sweep) the per-point cost is dominated by the ramp/thermalisation wait in
+  `_wait_not_moving`. A 51-point temperature sweep shown as "≈ 3 min" can run
+  for hours. The estimate now includes an optional per-setup
+  `field_ramp_estimate_s` / `temp_settle_estimate_s`, and says plainly when it
+  is not included.
+
+### Deliberate non-changes (hardware constraints)
+- **No "zero after scan" for Cryo.** The review listed it as a Cryo gap; it is
+  not. The ANM200 piezo needs a *retrace* to return to a position, which is what
+  the interleaved trace/retrace already does — writing a setpoint and walking
+  away would leave the scanner settling at an unknown position.
+- **No `apply_field_setpoint` for Cryo.** Writing a field setpoint at scan start
+  is a Beckhoff-coil idea; on the AttoDRY it would trigger a ramp to wait out.
+- **No in-app device reconnect.** `hardware.reconnect_device()` remains unused
+  by the GUI by choice.
+- **No scanlist polarity reminder for Cryo** — whether field flipping is
+  appropriate on a slow superconducting magnet is the operator's call.
+
+### Tests
+`test_runner.py` 94 → 109: `TestScanValidation` (8 — limits, travel limits,
+disabled-axis exemption, absent-limits no-op), `TestUnreachableSensorRefusesStart`
+(2 — refuses with pytango, still runs in sim mode), `TestProvenanceMetadata` (2),
+`TestDemagStartCurrent` (2 — scan peak, setup override), `TestAutoPauseNamesDevice`
+(1). Both applications were additionally smoke-tested headlessly
+(`QT_QPA_PLATFORM=offscreen`): construct, sub-mode enable/disable, calibration
+units, polarity round-trip, `_build_full_config`, and hardware-panel mirroring.
+
+---
+
+## 61. Recent Changes (August 2026) — Review Fixes, Batch 2
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.04**.
+The tail of the review that was not in the first priority cut.
+
+### "Field & Relay" rendered as "Field _Relay"
+`QGroupBox("Field & Relay")` — Qt treats `&` as a mnemonic accelerator, so the
+group has been showing an underscore instead of an ampersand in both apps since
+it was written. `"Field && Relay"` (`hardware_panel.py`, `Cryo/panels.py`).
+Confirmed by rendering both forms side by side.
+
+### A cached SimProxy no longer survives a server restart
+`get_proxy` cached a `SimProxy` on the first failed connection and returned it
+for the life of the process, so restarting a TANGO server was not enough — the
+application had to be restarted, and until then every read on that path returned
+simulated values. Cached sim entries are now retried against the real device at
+most every `_SIM_RETRY_S` (10 s); a real proxy always wins, a failed retry keeps
+the existing sim, and simulation mode (no pytango) never retries. Logs
+"Reconnected to <path> (was simulated)" on recovery.
+
+### Pre-scan hardware snapshot no longer freezes the UI
+`_read_hw_snapshot` runs on the GUI thread at scan start and did ~14 attribute
+reads over ~5 devices at the default 10 s I/O timeout — one powered-off device
+froze the window for tens of seconds between clicking Start and anything
+happening. Now bounded twice: a 1.5 s per-read timeout (`_HW_SNAP_TIMEOUT_S`)
+and a per-device skip once one of its reads has failed. The snapshot is
+best-effort metadata, so losing a key on a flaky device is the right trade.
+
+### A failed magnet setpoint no longer measures at the wrong field
+`_run_point`'s FIELD branch logged a failed `safe_write` and measured anyway:
+the point was recorded at the *previous* field, and when the readback also
+failed on a same-quantity scan, `x_read` fell back to the setpoint that was
+never applied — a wrong x with no marker in the file. It now retries with a
+fresh proxy and auto-pauses on the same point, matching how sensor read
+failures are handled.
+
+### NAS sync is atomic
+`server_sync`'s worker copied straight to the destination name, and the worker
+is SIGKILLed after `_TIMEOUT_S` — so an interrupted transfer left a truncated
+file under the real name that looked exactly like data until the next sync
+noticed the size mismatch. New `_atomic_copy` writes `<name>.part` then
+`os.replace`s it into place, and `.part` files are skipped when scanning the
+source. Still `copyfile` (not `copy2`) because SMB mounts reject the following
+`utime`.
+
+### Keyboard
+`Esc` → abort (with confirmation) and `Space` → pause/resume in **both** apps —
+abort is the safety action and should not require finding a button with the
+mouse. `Space` is ignored while a text field, spinbox or combo has focus.
+Samba_main also gained Cryo's `Ctrl+L` (clear log) and `Ctrl+R` (refresh
+browser); it previously had only `F5`.
+
+### Units on the numbers people actually type
+Start / Stop / Δ (Samba_main) and Δ (Cryo, whose ranges live in the
+`ScanDirectionList`) now carry the axis unit as a spinbox suffix, refreshed
+from Setup Defaults via `_apply_unit_suffix()`. The unit used to appear only in
+a dimmed read-only box two rows away.
+
+Cryo's **adaptive settle** label was hardcoded `s/µm` while the engine
+multiplies the step in the axis' **own** unit (`runner.py`:
+`extra = k × |pos − prev_pos|`). The label now follows `act1_unit` and the
+tooltip states the actual relationship. **Relabelled, not rescaled** — an
+empirically tuned `k` keeps working.
+
+### Inline duration on the field sweep
+The DC Hysteresis box has always shown "Est. ≈ 4 s" while the AC Field Sweep
+box next to it — the one that can run for hours — showed only a point count.
+`FieldSegmentList.set_time_estimator()` (both apps) appends "≈ 40 s" to the
+summary line, fed by `_field_seg_estimate` in each main window using the same
+per-point model as the status bar plus the optional `field_ramp_estimate_s`.
+Returns None → nothing is shown, so it never displays a made-up number.
+
+### Verification
+109 tests still pass. Both apps were exercised headlessly with the real widgets:
+unit suffixes follow a unit change, the adaptive-settle label follows
+Setup Defaults, the field estimate appears and disappears with the estimator,
+`Esc`/`Space`/`Ctrl+L`/`Ctrl+R` are registered, sub-mode enable/disable, and the
+`&&` rendering was confirmed against a rendered PNG. The `server_sync` worker
+source was executed end-to-end (copy, skip-on-second-run, no `.part` left).
+
+---
+
+## 62. Recent Changes (August 2026) — Shortcuts Reverted, Data Browser Search & Live Re-plot
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.05**.
+Corrections and follow-ups from Jakub's review of §61.
+
+### Keyboard shortcuts removed (§61 reverted)
+The `Esc` = abort / `Space` = pause shortcuts added in §61 are **gone**, along
+with their handlers. Rejected by Jakub: an accidental keypress stopping a
+running measurement is a far worse failure than having to reach for the mouse.
+`Ctrl+L` / `Ctrl+R`, which §61 also added to Samba_main, were removed there too
+— Samba_main is back to **F5 only**, and Cryo keeps the three it always had
+(F5, Ctrl+L, Ctrl+R). **Do not re-add abort/pause key bindings.**
+
+### Data browser: not all metadata was shown
+`ScanFile._read_meta` copied a hand-maintained allowlist of ~30 attributes into
+`self.meta`, and `_show_file` rendered a curated subset of those — so anything
+written to `/metadata` but not on either list was invisible in the browser even
+though it was in the file. On the lab's own files that hid **15 attributes**
+(Cryo) and **9** (Green/IR), including `incidence`, `polarization`,
+`mirror_shift_mm`, `lam2` / `lam4` / `noDC`, `lockin_settling_time` and the
+device paths — i.e. most of the MOKE metadata panel the user fills in for every
+measurement, plus the software provenance added in §60.
+
+`ScanFile` now also keeps **`raw_meta`**: every `/metadata` attribute not
+already in the curated dict. `_show_file` appends an **"Other metadata"**
+section listing all of it, skipping only `_SKIP_RAW_META` (the `sensors_json`
+blob, already summarised as "Sensors:", and keys the curated sections print
+verbatim). Booleans render as yes/no, long strings are elided at 120 chars.
+New metadata keys are visible automatically from now on — the allowlists are
+a display *order*, no longer a filter.
+
+### Data browser: search
+No way existed to find a scan except expanding date folders by hand. A search
+box above the tree filters on the filename **and** the metadata already loaded
+for each file (sample, operator, notes, scan type, config name, device id,
+incidence, polarization — reading `meta` and `raw_meta`). Space-separated terms
+must all match; matching date folders auto-expand; clearing restores the tree.
+Deliberately does **not** force a `ScanFile` load while typing (§40 made
+loading lazy to keep setup switches fast), so a collapsed folder is searched by
+filename until it is opened.
+
+### Data browser: live re-plot ("Live" checkbox)
+The file list already refreshes when a scan finishes, but a scan still *running*
+keeps growing on disk — so overlaying the live scan on an older one needed a
+manual click to see each new point. A 3 s timer re-runs the current plot
+(`_overlay_selected` for a multi-selection, else `_plot_current`); it touches
+neither the tree nor the selection, skips when the panel is hidden or the box is
+unchecked, and swallows read errors from a file mid-write. Default **on**.
+
+### `_plot_current` no longer clobbers the metadata panel
+With nothing selected it wrote "⚠ Select a scan file first." into `meta_text`,
+destroying the metadata being read — and with the live timer that could now
+happen while the user was looking at it. It clears the plot instead.
+
+### Not doing (decided this round)
+- **Soft travel limits**: no Setup Defaults UI. The `act1_min`/`act1_max`/
+  `z_min`/`z_max` support in `core/validation.py` and the autofocus sweep check
+  stays, but is inert unless the keys are set by hand — the lab does not want
+  the feature.
+- **`t_FM` / `t_S` = 0 meaning "unset"** is correct and stays as is.
+
+---
+
+## 63. Recent Changes (August 2026) — "Recent" Y-Scale Window 50 → 10
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.06**.
+
+`RECENT_WINDOW` in `core/plot_interact.py` lowered from 50 to **10** points
+(Jakub's request). The Recent y-scale mode exists so the axis follows a signal
+down while nulling; a 50-point window let a value that was large 50 points ago
+hold the scale open long after the signal had come down. Measured on a
+[1000, then 20 × 0.01] trace: the axis is now ±0.0105 instead of ±1050.
+
+Affects the Full/Recent pill on the live 1D plot and both calibration-plot
+modes (§58). The constant is the default argument of
+`recent_symmetric_ylim(y_arrays, window=RECENT_WINDOW)`, so callers can still
+pass their own window; the two existing tests pass explicit values and are
+unaffected.
+
+---
+
+## 64. Recent Changes (August 2026) — "Recent" Window Configurable in Setup Defaults
+
+Branch `claude/review-fixes-batch1` (112 tests). App version → **v13.07**.
+
+The Recent y-scale window (§63) is now a **per-setup setting** instead of a
+module constant. It lives in **Setup Defaults → Calibration → "Recent window"**
+(a 2–1000 spinbox, default 10) rather than in the plot toolbars: it is a
+preference set once per rig, not something adjusted during a measurement, and
+the plotting tabs have no space to spare.
+
+- New setup key **`recent_window`** (10) in `SETUP_HW_DEFAULTS` for every setup
+  in both apps, round-tripped through each defaults panel's `load()` /
+  `get_defaults()` (Samba_main) / `get_values()` (Cryo).
+- `Live1DWidget` and `FocusPlotWidget` gained `set_recent_window(n)` and an
+  instance `_recent_window` (seeded from `RECENT_WINDOW`), used in place of the
+  module default at all three `recent_symmetric_ylim` call sites. The setter
+  clamps to ≥ 2 and ignores non-numeric input, then marks the plot dirty
+  (`_dirty` + `_ts_dirty`) so the next redraw picks it up.
+- Pushed to both widgets from `_load_active_config` and `_on_defaults_changed`
+  (Samba_main) and `_apply_defaults` (Cryo) — the same places `configure_stage`
+  is applied, so a defaults edit takes effect immediately.
+- `RECENT_WINDOW` remains the fallback for any caller that does not set one.
+
+### Tests
+`test_runner.py` 109 → 112: `TestRecentWindowSetting` — the default is 10 in
+every setup of both apps, the module constant is 10, and a 10-point window
+ignores a transient that a 50-point window still sees. The full chain
+(spinbox → `get_defaults` → setup dict → both plot widgets) was verified
+headlessly against the real windows in both applications.
+
+---
+
+## 65. Recent Changes (August 2026) — Data Browser: Metadata Beside the File List
+
+Branch `claude/review-fixes-batch1` (112 tests). App version → **v13.08**.
+
+The metadata panel moved from the bottom of the left column into its **own
+splitter column**, between the file list and the plot. It was a `QGroupBox`
+stacked under the tree with `meta_text.setMaximumHeight(240)`, which both
+truncated the metadata — there is much more of it since §62 added the raw
+attributes — and stole vertical space from the file list, leaving the search
+box and tree cramped.
+
+Now three columns, all full height: **file list + search | metadata | plot**.
+Splitter sizes `[300, 300, 520]`, with stretch only on the plot so the two
+left columns keep their width when the window is resized; the metadata column
+has `setMinimumWidth(230)` and both dividers are draggable. The height cap is
+gone. Measured at the app's 1180 px minimum width: tree 572 px (was ~330),
+metadata 654 px (was ≤ 240), nothing clipped.
+
+Word wrap is deliberately left at the Qt default (`WidgetWidth`). An early
+version set `NoWrap` for column alignment, which pushed long values — the
+sensor list, TANGO device paths — behind a horizontal scrollbar; wrapping
+costs nothing now that the panel is tall.

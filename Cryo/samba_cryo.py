@@ -24,7 +24,6 @@ Shared (unchanged): scan.py, plot_widgets.py, data_browser.py, hardware.py,
                       calibration.py, device_registry.py, config.py
 """
 import sys, os, copy, logging, threading, time as _time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import numpy as np
 
@@ -59,6 +58,9 @@ except ImportError:
 
 from config  import SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup, make_default_config
 from hardware import get_proxy, safe_read, evict_proxy, _pcache
+from applog import setup_logging
+from validation import (validate_scan_config,
+                        MAX_POINTS_1D, MAX_POINTS_2D)
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
@@ -96,6 +98,9 @@ def _sb_fmt(sec: float) -> str:
 # Hardware snapshot helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+_HW_SNAP_TIMEOUT_S = 1.5   # per-attribute bound for the pre-scan snapshot
+
+
 def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) -> dict:
     """Read key hardware state immediately before a Cryo scan starts.
 
@@ -103,15 +108,27 @@ def _read_hw_snapshot(setup: dict, scan_type: str, is_temp_sweep: bool = False) 
     ``is_temp_sweep`` == True suppresses hw_temperature_K (temp is being swept).
     """
     snap: dict = {}
+    _dead: set = set()      # devices that already failed once in this snapshot
 
     def _read(device_path: str, attr: str):
-        if not device_path or not attr:
+        # This runs on the GUI thread at scan start.  With the default 10 s
+        # I/O timeout, ~14 attribute reads spread over ~5 devices meant one
+        # powered-off device froze the UI for tens of seconds between clicking
+        # Start and anything visibly happening.  Two bounds fix that: a short
+        # per-read timeout, and skipping a device's remaining attributes once
+        # one of its reads has failed.  The snapshot is best-effort metadata,
+        # so losing a key on a flaky device is the right trade.
+        if not device_path or not attr or device_path in _dead:
             return None
         try:
             p = get_proxy(device_path)
-            val, rerr = safe_read(p, attr)
-            return val if not rerr else None
+            val, rerr = safe_read(p, attr, timeout=_HW_SNAP_TIMEOUT_S)
+            if rerr:
+                _dead.add(device_path)
+                return None
+            return val
         except Exception:
+            _dead.add(device_path)
             return None
 
     # Keithley AC excitation state
@@ -965,6 +982,13 @@ class CryoMainWindow(QMainWindow):
         self._scan_start_time    = _time.time()
 
     def _connect_signals(self):
+        # Inline duration estimate in the field-sweep box.  Uses the same
+        # per-point model as the status-bar estimate; the ramp/thermalisation
+        # wait is not modelled (see _update_estimate), so this is a floor.
+        self.traj_panel._seg_list.set_time_estimator(self._field_seg_estimate)
+        # Keep the two tabs' hardware panels showing the same values
+        self._link_hw_panels()
+        self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
         # ConfigListPanel — load only Cryo setup
         self.cfg_list.load_setups(self._setups)
         self.cfg_list.config_selected.connect(self._on_config_selected)
@@ -1116,6 +1140,7 @@ class CryoMainWindow(QMainWindow):
         self.right_panel.set_display(cfg.get("display_sensor","ZI2 x1"), cfg.get("colormap","RdBu_r"))
         self.right_panel.set_dc_mode(False)   # no DC_HYST in cryo
         self.sl_panel.set_active_name(cfg.get("name","—"))
+        self.sl_panel.load_config(cfg)      # polarity control (silent)
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
@@ -1155,6 +1180,7 @@ class CryoMainWindow(QMainWindow):
         if not configs: return
         idx = min(self._active_cfg_idx, len(configs)-1)
         old = configs[idx]; old.update(self.traj_panel.get_config_partial())
+        old.update(self.sl_panel.get_config_partial())   # polarity control
         old["sensors"]        = self.right_panel.get_sensors()
         old["display_sensor"] = self.right_panel.get_display_sensor()
         old["colormap"]       = self.right_panel.get_colormap()
@@ -1194,16 +1220,45 @@ class CryoMainWindow(QMainWindow):
         elif mode == "TIME": settle = 0.0
         n_pts = n_x * n_y
         pts   = f"{n_x}" if n_y == 1 else f"{n_x}×{n_y}"
-        move_note = " + moves" if mode not in ("TIME", "FIELD") else ""
+
+        # FIELD covers both the superconducting-magnet field sweep and the
+        # temperature sweep.  For both, the per-point cost is dominated by the
+        # ramp / thermalisation wait in ScanRunner._wait_not_moving — which the
+        # formula below does not model.  Saying "+ moves" only for spatial
+        # scans (where the omission is milliseconds) while presenting field and
+        # temperature estimates as complete (where it is the whole
+        # measurement) is exactly backwards: a temperature sweep shown as
+        # "≈ 3 min" can run for hours.
+        ramp = 0.0
+        if mode == "FIELD":
+            is_temp = "temp_start" in cfg
+            ramp_key = ("temp_settle_estimate_s" if is_temp
+                        else "field_ramp_estimate_s")
+            try:
+                ramp = max(0.0, float(setup.get(ramp_key, 0.0)))
+            except (TypeError, ValueError):
+                ramp = 0.0
+            what = "thermalisation" if is_temp else "field ramp"
+            move_note = ("" if ramp > 0 else
+                         f" + {what} per point (not included — "
+                         f"set {ramp_key} in the setup to estimate it)")
+        else:
+            move_note = " + moves" if mode != "TIME" else ""
 
         def _show(zi_settle=0.0):
             if self._scan_running:
                 return
+            # Cache for the inline field-segment estimate, which cannot afford
+            # its own device read on every spinbox keystroke.
+            self._last_zi_settle = zi_settle
+            if hasattr(self.traj_panel, "_seg_list"):
+                self.traj_panel._seg_list._on_changed()
             parts = []
             if settle    > 0: parts.append(f"{settle:.3g}s settle")
+            if ramp      > 0: parts.append(f"{ramp:.3g}s ramp")
             if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
             parts.append(f"{int_t:.3g}s integ")
-            total = n_pts * (settle + zi_settle + int_t)
+            total = n_pts * (settle + ramp + zi_settle + int_t)
             self.status_lbl.setText(
                 f"≈ {_fmt(total)}  ({pts} pts × [{' + '.join(parts)}]{move_note})")
             self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
@@ -1395,11 +1450,55 @@ class CryoMainWindow(QMainWindow):
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
         self.calib_panel.set_anc_device(anc_dev)
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(setup.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             piezo_block.get("act1_device", ""), piezo_block.get("act1_attr", "x"),
             piezo_block.get("act2_device", ""), piezo_block.get("act2_attr", "y"),
             piezo_block.get("z_device",    ""), piezo_block.get("z_attr",    "z"),
+            piezo_block.get("act1_unit", ""),   piezo_block.get("act2_unit", ""),
+            piezo_block.get("z_unit",    ""),
         )
+
+    def _on_polarity_changed(self):
+        """Persist a user toggle of Relay/Field flip into the active config.
+
+        Skipped while a scan runs: the running worker holds its own polarity
+        settings, so writing a mid-run change to disk would misdescribe the
+        measurement in progress.
+        """
+        if self._scan_running:
+            return
+        self._save_active_config()
+
+    def _link_hw_panels(self):
+        """Mirror the Trajectory and Scanlist hardware panels.
+
+        Both tabs show the same physical Keithley, so their write windows must
+        agree — otherwise a current typed on one tab leaves the other showing a
+        stale value, and it is not obvious which one the hardware actually has.
+        Mirroring moves displayed values only (writes still happen on
+        Return/Enter in the panel being edited).  Qt suppresses no-change
+        setValue signals, so the cross-connections cannot loop.
+
+        Cryo has no relay, and its field/temperature setpoints live on the
+        AttoDRY group which ReadbackWorker already polls live, so only the
+        Keithley controls need mirroring.
+        """
+        a, b = self.traj_panel.hw, self.sl_panel.hw
+        for name in ("amp_spin", "freq_spin", "compl_spin"):
+            sa, sb = getattr(a, name, None), getattr(b, name, None)
+            if sa is None or sb is None:
+                continue
+            sa.valueChanged.connect(sb.setValue)
+            sb.valueChanged.connect(sa.setValue)
+        ca, cb = getattr(a, "range_combo", None), getattr(b, "range_combo", None)
+        if ca is not None and cb is not None:
+            ca.currentIndexChanged.connect(cb.setCurrentIndex)
+            cb.currentIndexChanged.connect(ca.setCurrentIndex)
 
     def _on_scan_mode_changed(self, mode):
         # Temperature sweep uses the standard FIELD engine — no DC mode needed
@@ -1460,6 +1559,24 @@ class CryoMainWindow(QMainWindow):
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
+
+    def _field_seg_estimate(self, total_pts: int):
+        """Seconds for `total_pts` field points, or None if not computable."""
+        try:
+            if total_pts <= 0:
+                return None
+            int_t  = float(self.traj_panel.int_time.value())
+            settle = max(float(self.traj_panel.settle.value()), 0.05)
+            zi     = float(getattr(self, "_last_zi_settle", 0.0) or 0.0)
+            ramp   = 0.0
+            try:
+                ramp = max(0.0, float(
+                    self._active_setup().get("field_ramp_estimate_s", 0.0)))
+            except Exception:
+                ramp = 0.0
+            return total_pts * (settle + zi + int_t + ramp)
+        except Exception:
+            return None
 
     def _build_full_config(self) -> dict:
         partial  = self.traj_panel.get_config_partial()
@@ -1573,58 +1690,19 @@ class CryoMainWindow(QMainWindow):
 
     # ── Single scan ──────────────────────────────────────────────────────────
     # Max allowed points per dimension to prevent memory exhaustion.
-    _MAX_POINTS_1D = 10_000
-    _MAX_POINTS_2D = 500_000   # 1000×500 ≈ typical upper bound for spatial maps
+    # Point-count safety limits now live in core/validation.py (shared with
+    # Samba_main); kept here as aliases for anything referencing them.
+    _MAX_POINTS_1D = MAX_POINTS_1D
+    _MAX_POINTS_2D = MAX_POINTS_2D
 
     def _validate_scan_config(self, cfg: dict) -> Optional[str]:
         """Validate scan parameters before starting.
 
-        Returns an error string if the config is invalid, or None if OK.
-        Checks are intentionally conservative — only catch values that would
-        cause immediate problems (OOM, hangs, nonsensical geometry).
+        Thin wrapper over the shared core implementation, which Samba_main
+        now calls too — one copy, so a check added for one rig protects both.
+        Passing the setup enables the optional per-axis soft travel limits.
         """
-        scan_type = cfg.get("scan_type", "SPATIAL")
-
-        if scan_type in ("SPATIAL",):
-            n_x = int(cfg.get("act1_npts", 1))
-            n_y = int(cfg.get("act2_npts", 1))
-            scan_2d = cfg.get("scan_x", True) and cfg.get("scan_y", False)
-
-            if n_x < 1:
-                return f"X points must be ≥ 1 (got {n_x})."
-            if n_y < 1:
-                return f"Y points must be ≥ 1 (got {n_y})."
-            if n_x > self._MAX_POINTS_1D:
-                return (f"X points ({n_x:,}) exceeds the safety limit of "
-                        f"{self._MAX_POINTS_1D:,}.")
-            total = n_x * n_y if scan_2d else n_x
-            if total > self._MAX_POINTS_2D:
-                return (f"Total scan points ({total:,}) = {n_x}×{n_y} exceeds "
-                        f"the safety limit of {self._MAX_POINTS_2D:,}.\n"
-                        "Reduce n_pts or scan range.")
-
-        elif scan_type == "FIELD":
-            segs = cfg.get("field_segments", [])
-            total_field_pts = sum(int(s[2]) for s in segs if len(s) >= 3)
-            if total_field_pts < 2:
-                return "Field scan requires at least 2 points."
-            if total_field_pts > self._MAX_POINTS_1D:
-                return (f"Field scan points ({total_field_pts:,}) exceeds "
-                        f"the safety limit of {self._MAX_POINTS_1D:,}.")
-
-        elif scan_type == "TIME":
-            n_t = int(cfg.get("act1_npts", 1))
-            if n_t < 1:
-                return "Time scan requires at least 1 point."
-            if n_t > self._MAX_POINTS_1D:
-                return (f"Time scan points ({n_t:,}) exceeds the safety limit "
-                        f"of {self._MAX_POINTS_1D:,}.")
-
-        integ = float(cfg.get("integration_time", 0.1))
-        if integ <= 0:
-            return f"Integration time must be > 0 (got {integ})."
-
-        return None  # all OK
+        return validate_scan_config(cfg, self._active_setup())
 
     # ── Setup lock helper ─────────────────────────────────────────────────────
     def _acquire_setup_lock(self) -> bool:
@@ -2293,8 +2371,16 @@ class CryoMainWindow(QMainWindow):
             r = QMessageBox.question(self, "Scan running", "Abort and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if r == QMessageBox.StandardButton.No: ev.ignore(); return
+            # 10 s, not 2 s: one point can legitimately take longer than 2 s
+            # (lock-in settling + integration, and far longer on a field or
+            # temperature point), and abandoning the thread mid-HDF5-write is
+            # how a file gets truncated.
             for w in [self._worker, self._sl_worker]:
-                if w: w.abort(); w.wait(2000)
+                if w: w.abort(); w.wait(10000)
+            # _on_worker_finished may never run once the event loop is tearing
+            # down, so release the setup lock here or the rig stays "busy" to
+            # every other computer until the 12 h stale-lock takeover.
+            release_lock(self._active_setup_name)
         # Stop the readback thread
         self._rb_worker.stop()
         self._rb_worker.wait(2000)
@@ -2307,39 +2393,12 @@ class CryoMainWindow(QMainWindow):
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def _setup_logging():
-    """Configure root logger with both console and rotating file output.
+    """Configure the root logger (rotating file + console).
 
-    Log files are stored in ~/.config/moke_scan/logs/.  Each file is capped at
-    2 MB and up to 5 backups are kept, giving ~10 MB max on disk.  This allows
-    post-mortem debugging of hardware issues without flooding the disk.
+    Delegates to the shared core implementation, which Samba_main now
+    uses as well — one copy of the logging policy for both apps.
     """
-    from config import CONFIG_DIR
-    log_dir = CONFIG_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "samba_cryo.log"
-
-    fmt = logging.Formatter(
-        "%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-
-    # Rotating file handler — 2 MB per file, keep 5 backups
-    fh = RotatingFileHandler(log_path, maxBytes=2 * 1024 * 1024,
-                             backupCount=5, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    # Console handler — INFO and above only (keeps terminal clean)
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    logging.getLogger(__name__).info("Logging to %s", log_path)
+    setup_logging("samba_cryo")
 
 
 def main():

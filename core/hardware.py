@@ -5,6 +5,7 @@ safe read/write helpers with optional timeout, and demagnetization utility.
 """
 import logging
 import threading
+import time
 import numpy as np
 from typing import Dict, Optional, Tuple
 
@@ -114,6 +115,9 @@ class SimProxy:
 # ─────────────────────────────────────────────────────────────────────────────
 _pcache: Dict[str, object] = {}
 _pcache_lock = threading.Lock()
+# path -> last time a cached SimProxy was retried against the real device
+_sim_retry_at: Dict[str, float] = {}
+_SIM_RETRY_S = 10.0
 
 
 def get_proxy(path: str) -> object:
@@ -126,19 +130,40 @@ def get_proxy(path: str) -> object:
         return SimProxy(path)
     path = path.strip()
     with _pcache_lock:
-        if path in _pcache:
-            return _pcache[path]
+        cached = _pcache.get(path)
+        # A SimProxy cached after one failed connection used to persist for the
+        # life of the process, so restarting a TANGO server was not enough —
+        # the app had to be restarted too, and until then every read returned
+        # simulated values.  Retry the real device, but no more often than
+        # _SIM_RETRY_S so a genuinely dead device costs one attempt per period
+        # instead of one per call.
+        if cached is not None and not isinstance(cached, SimProxy):
+            return cached
+        if cached is not None and not TANGO_AVAILABLE:
+            return cached                       # simulation mode: never retry
+        if cached is not None:
+            last = _sim_retry_at.get(path, 0.0)
+            if time.time() - last < _SIM_RETRY_S:
+                return cached
+            _sim_retry_at[path] = time.time()
     # Build the proxy outside the lock (network I/O can block)
     try:
         proxy = tango.DeviceProxy(path) if TANGO_AVAILABLE else SimProxy(path)
     except Exception:
         proxy = SimProxy(path)
     with _pcache_lock:
-        # Another thread may have populated the entry while we were connecting;
-        # use the existing entry if so (avoids duplicate connections).
-        if path not in _pcache:
-            _pcache[path] = proxy
-        return _pcache[path]
+        existing = _pcache.get(path)
+        # Keep a real proxy another thread may have installed meanwhile; a
+        # cached SimProxy is always replaceable by a real one.
+        if existing is not None and not isinstance(existing, SimProxy):
+            return existing
+        if isinstance(proxy, SimProxy) and existing is not None:
+            return existing                     # retry failed, keep the old sim
+        _pcache[path] = proxy
+        if not isinstance(proxy, SimProxy):
+            _sim_retry_at.pop(path, None)
+            log.info("Reconnected to %s (was simulated)", path)
+        return proxy
 
 
 def fresh_proxy(path: str) -> Tuple[object, Optional[str]]:

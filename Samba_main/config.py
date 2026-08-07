@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.02"
+APP_VERSION = "13.08"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 8
@@ -71,6 +71,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_Green",
+        "recent_window":       10,
         "notebook_dir":          "~/moke_data",
         "server_sync_dir":       "",
         "act1_device":           "smaract2/control/IR-controller",
@@ -112,6 +113,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_IR",
+        "recent_window":       10,
         "notebook_dir":          "~/moke_data",
         "server_sync_dir":       "",
         "act1_device":           "smaract2/control/IR-controller",
@@ -152,6 +154,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_Cryo",
+        "recent_window":       10,
         "notebook_dir":          "~/moke_data",
         "server_sync_dir":       "",
         "act1_device":           "smaract2/control/IR-controller",

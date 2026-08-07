@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal
 
-from panels._widgets import NoScrollComboBox
+from panels._widgets import NoScrollComboBox, NoScrollSpinBox
 
 
 # ── Known attribute-name lists (fall-back when registry has no channels) ──────
@@ -224,6 +224,22 @@ class SetupDefaultsPanel(QWidget):
         self.lights_dev.setPlaceholderText("e.g. hpp-N42/camera/lights — blank to disable")
         cg.addWidget(self.lights_dev, 1, 1, 1, 3)
 
+        # Trailing-point count for the live plots' "Recent" y-scale mode.
+        # Lives here rather than in the plot toolbars: it is a per-setup
+        # preference, not something adjusted during a measurement, and the
+        # plotting tabs have no room to spare.
+        cg.addWidget(QLabel("Recent window:"), 2, 0)
+        self.recent_window = NoScrollSpinBox()
+        self.recent_window.setRange(2, 1000)
+        self.recent_window.setValue(10)
+        self.recent_window.setSuffix(" pts")
+        self.recent_window.setToolTip(
+            "How many of the most recent points the live plots' \"Recent\"\n"
+            "y-scale mode looks at. Smaller follows the signal down faster\n"
+            "while nulling; larger is steadier. Applies to the 1D live plot\n"
+            "and the calibration plot.")
+        cg.addWidget(self.recent_window, 2, 1)
+
         cl.addWidget(cal_grp)
 
         # ── TR-MOKE ───────────────────────────────────────────────────────────
@@ -413,6 +429,7 @@ class SetupDefaultsPanel(QWidget):
             _set(self.act1_attr,          setup_data.get("act1_attr",             "x"))
             self.act1_lbl.setText(        setup_data.get("act1_label",            "X"))
             self.act1_unit.setText(       setup_data.get("act1_unit",             "nm"))
+            self.recent_window.setValue(int(setup_data.get("recent_window",       10)))
 
             _set_by_path(self.act2_dev,  setup_data.get("act2_device",           ""))
             _set(self.act2_attr,          setup_data.get("act2_attr",             "y"))
@@ -469,6 +486,7 @@ class SetupDefaultsPanel(QWidget):
     def get_defaults(self) -> dict:
         """Return current widget values as a flat dict of setup keys."""
         return {
+            "recent_window":            self.recent_window.value(),
             "act1_device":              _get_path(self.act1_dev),
             "act1_attr":                self.act1_attr.currentText(),
             "act1_label":               self.act1_lbl.text(),

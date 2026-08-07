@@ -29,8 +29,28 @@ _TIMEOUT_S = 60  # kill the copy process if it hangs longer than this
 # Python source run inside the child process.
 # sys.argv[1] is a JSON payload; stdout is a JSON result line.
 _WORKER_SRC = r"""
-import sys, shutil, json
+import sys, os, shutil, json
 from pathlib import Path
+
+def _atomic_copy(src, dst):
+    # Copy via a .part sidecar, then rename into place.
+    # A direct copyfile to the NAS leaves a truncated file under the real name
+    # if the transfer is interrupted -- and this worker is SIGKILLed after a
+    # timeout, so that happens whenever the share is slow.  Until the next sync
+    # notices the size mismatch, that partial file looks exactly like data.
+    # os.replace is atomic within a filesystem, so a reader sees either the old
+    # file or the complete new one.  copyfile (not copy2) because SMB mounts
+    # reject the utime() that copy2 makes afterwards.
+    tmp = dst.with_name(dst.name + '.part')
+    try:
+        shutil.copyfile(str(src), str(tmp))
+        os.replace(str(tmp), str(dst))
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 def sync_dir(src, dst):
     sp = Path(src)
@@ -42,10 +62,12 @@ def sync_dir(src, dst):
     for f in sorted(sp.rglob('*')):
         if not f.is_file():
             continue
+        if f.name.endswith('.part'):
+            continue                    # our own interrupted transfer
         df = dp / f.relative_to(sp)
         df.parent.mkdir(parents=True, exist_ok=True)
         if not df.exists() or df.stat().st_size != f.stat().st_size:
-            shutil.copyfile(str(f), str(df))
+            _atomic_copy(f, df)
             copied += 1
         else:
             skipped += 1
@@ -59,7 +81,7 @@ def sync_file(src, dst_dir):
     dp.mkdir(parents=True, exist_ok=True)
     df = dp / sp.name
     if not df.exists() or df.stat().st_size != sp.stat().st_size:
-        shutil.copyfile(str(sp), str(df))
+        _atomic_copy(sp, df)
 
 args  = json.loads(sys.argv[1])
 lines = []

@@ -133,7 +133,11 @@ SCALE_FULL   = "full"
 SCALE_RECENT = "recent"
 
 #: How many trailing points the "Recent" y-scale mode looks at.
-RECENT_WINDOW = 50
+#: 10, not 50: while nulling, the axis should follow the knob.  A 50-point
+#: window keeps a value that was large 50 points ago holding the scale open
+#: long after the signal has come down, which is exactly what this mode
+#: exists to avoid.
+RECENT_WINDOW = 10
 
 
 def recent_symmetric_ylim(y_arrays, window: int = RECENT_WINDOW):

@@ -40,6 +40,13 @@ from nstep import NStepPair
 # ─────────────────────────────────────────────────────────────────────────────
 # NoScroll variants — prevent accidental value changes when hovering
 # ─────────────────────────────────────────────────────────────────────────────
+def _fmt_duration(sec: float) -> str:
+    """Compact duration for inline estimates."""
+    if sec < 120:   return f"{sec:.0f} s"
+    if sec < 3600:  return f"{sec / 60:.1f} min"
+    return f"{sec / 3600:.1f} h"
+
+
 class NoScrollComboBox(QComboBox):
     def wheelEvent(self, ev): ev.ignore()
 
@@ -265,7 +272,7 @@ class HardwarePanel(QGroupBox):
         root.addWidget(cs)
 
         # ── Right: Field + Relay ──────────────────────────────────────────────
-        fr  = QGroupBox("Field & Relay"); frg = QGridLayout(fr)
+        fr  = QGroupBox("Field && Relay"); frg = QGridLayout(fr)
         frg.setSpacing(3); frg.setContentsMargins(6, 6, 6, 6)
 
         row = 0
@@ -1348,8 +1355,28 @@ class FieldSegmentList(QWidget):
         self.updateGeometry()          # row count may have changed → new sizeHint
         total = sum(self._seg_npts(t) for t in self._rows)
         n = len(self._rows)
-        self._summary_lbl.setText(f"Total N = {total},  {n} segment{'s' if n != 1 else ''}")
+        txt = f"Total N = {total},  {n} segment{'s' if n != 1 else ''}"
+        # A superconducting-magnet field sweep is the long one; showing only a
+        # point count here hides that.
+        est = self._estimate_s(total)
+        if est is not None:
+            txt += f"  ·  ≈ {_fmt_duration(est)}"
+        self._summary_lbl.setText(txt)
         self.changed.emit()
+
+    def set_time_estimator(self, fn):
+        """Install a callable(total_points) -> seconds (or None)."""
+        self._estimator = fn
+        self._on_changed()
+
+    def _estimate_s(self, total: int):
+        fn = getattr(self, "_estimator", None)
+        if fn is None:
+            return None
+        try:
+            return fn(total)
+        except Exception:
+            return None
 
     def _seg_npts(self, tup) -> int:
         return max(2, tup[2].value())
@@ -1570,6 +1597,19 @@ class ActuatorGroup(QGroupBox):
         self._dev_display.setToolTip(dev_path)
         self._attr_display.setText(attr)
         self.lbl.setText(label); self.unit_edit.setText(unit)
+        self._apply_unit_suffix()
+
+    def _apply_unit_suffix(self):
+        """Put the axis unit on the step spinbox.
+
+        The unit was shown only in a dimmed read-only box, so the number the
+        user edits carried none.
+        """
+        u = self.unit_edit.text().strip()
+        try:
+            self.step_spin.setSuffix(f" {u}" if u else "")
+        except Exception:
+            pass
 
     def set_registry(self, registry: list):
         pass   # device info comes from Setup Defaults
@@ -1879,11 +1919,18 @@ class TrajectoryPanel(QWidget):
         # Adaptive settle — extra wait proportional to step size (ANM200 creep compensation)
         self.adap_settle_cb = QCheckBox("Adaptive settle")
         self.adap_settle_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.adap_settle_cb.setToolTip("Extra settle per step — compensates ANM200 piezo creep")
+        self.adap_settle_cb.setToolTip(
+            "Extra settle proportional to the step size — compensates ANM200 "
+            "piezo creep")
         tl.addWidget(self.adap_settle_cb, 3, 0, 1, 2)
-        tl.addWidget(QLabel("s/µm:"), 4, 0)
+        self._adap_unit_lbl = QLabel("s/µm:")
+        tl.addWidget(self._adap_unit_lbl, 4, 0)
         self.adap_settle_k = dbl(0, 10, 4, 0.05)
-        self.adap_settle_k.setToolTip("Extra seconds of settle per µm of position step")
+        self.adap_settle_k.setToolTip(
+            "Extra seconds of settle per unit of position step.\n"
+            "The engine multiplies this by the step in the axis' OWN unit "
+            "(runner.py: extra = k × |pos − prev_pos|), so the unit shown "
+            "here follows Setup Defaults — it is not always µm.")
         tl.addWidget(self.adap_settle_k, 4, 1)
         bot.addWidget(tg)
 
@@ -1923,6 +1970,12 @@ class TrajectoryPanel(QWidget):
                  "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}")
         self._ac_grp.setStyleSheet(_ACT  if mode_id == 0 else _IDLE)
         self._dc_grp.setStyleSheet(_ACT  if mode_id == 1 else _IDLE)
+        # Disable the inactive sub-mode's controls, not just dim its title.
+        # Field Sweep and Temperature Sweep sit side by side and both stayed
+        # fully editable, so parameters could be set carefully in the box the
+        # scan will never read.  Qt greys the whole content out for free.
+        self._ac_grp.setEnabled(mode_id == 0)
+        self._dc_grp.setEnabled(mode_id == 1)
         self.scan_mode_changed.emit("TEMP_SWEEP" if mode_id == 1 else "FIELD")
 
     def _temp_get_npts(self) -> int:
@@ -2217,6 +2270,10 @@ class TrajectoryPanel(QWidget):
         """Called when Setup Defaults change — push device info into both actuator groups."""
         self.act1_grp.set_device_info(act1_dev, "", act1_attr, act1_lbl, act1_unit)
         self.act2_grp.set_device_info(act2_dev, "", act2_attr, act2_lbl, act2_unit)
+        # Adaptive settle multiplies the step in the axis' OWN unit, so the
+        # label must follow Setup Defaults rather than claim µm.
+        if hasattr(self, "_adap_unit_lbl"):
+            self._adap_unit_lbl.setText(f"s/{(act1_unit or 'µm').strip()}:")
 
     # ── Load / get config ─────────────────────────────────────────────────────
     def load_config(self, cfg: dict):
@@ -2365,6 +2422,9 @@ class TrajectoryPanel(QWidget):
 # ScanlistPanel
 # ─────────────────────────────────────────────────────────────────────────────
 class ScanlistPanel(QWidget):
+    # Emitted when a polarity toggle changes, so the main window can persist it
+    polarity_changed = pyqtSignal()
+
     def __init__(self, setup_getter, parent=None, hw_panel_class=None):
         super().__init__(parent)
         self._setup_getter = setup_getter
@@ -2408,6 +2468,8 @@ class ScanlistPanel(QWidget):
         self.field_flip_btn = QPushButton("Field flip: OFF"); self.field_flip_btn.setCheckable(True)
         self.field_flip_btn.toggled.connect(lambda c: self.field_flip_btn.setText("Field flip: ON" if c else "Field flip: OFF"))
         pl.addWidget(self.relay_flip_btn); pl.addWidget(self.field_flip_btn)
+        for _b in (self.relay_flip_btn, self.field_flip_btn):
+            _b.toggled.connect(lambda _: self.polarity_changed.emit())
         sl_row.addWidget(pg)
 
         ng = QGroupBox("Scanlist"); nl = QGridLayout(ng); nl.setSpacing(6); nl.setContentsMargins(8, 8, 8, 8)
@@ -2440,6 +2502,39 @@ class ScanlistPanel(QWidget):
     def set_active_name(self, name: str):
         self.active_lbl.setText(name)
         self._update_auto_name()
+
+    # ── Polarity control persistence ──────────────────────────────────────────
+    @staticmethod
+    def _load_flip(btn, label: str, on: bool):
+        """Set a polarity toggle without emitting toggled().
+
+        The caption is refreshed explicitly: the toggled() handler that
+        normally keeps it in sync is suppressed by blockSignals, so a silent
+        setChecked would leave the button showing the previous state.
+        """
+        blocked = btn.blockSignals(True)
+        btn.setChecked(on)
+        btn.blockSignals(blocked)
+        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+
+    def load_config(self, cfg: dict):
+        """Restore the polarity toggles from a scan config (silently)."""
+        self._load_flip(self.relay_flip_btn, "Relay flip",
+                        bool(cfg.get("relay_flip", False)))
+        self._load_flip(self.field_flip_btn, "Field flip",
+                        bool(cfg.get("field_flip", False)))
+
+    def get_config_partial(self) -> dict:
+        """Polarity state for persistence into the active scan config.
+
+        Without this the toggles were session-only UI state: they reset to OFF
+        on every restart, and nothing in the saved data recorded whether
+        flipping had been enabled.
+        """
+        return {
+            "relay_flip": self.relay_flip_btn.isChecked(),
+            "field_flip": self.field_flip_btn.isChecked(),
+        }
 
     def get_settings(self) -> dict:
         # field_spin exists on HardwarePanel; CryoHardwarePanel has field_sp
