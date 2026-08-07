@@ -26,7 +26,8 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
-                           recent_symmetric_ylim, SCALE_RECENT)
+                           recent_symmetric_ylim, SCALE_RECENT,
+                           RECENT_WINDOW)
 from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
@@ -189,6 +190,7 @@ class FocusPlotWidget(QWidget):
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
         # Y-scale mode: Full (all data) or Recent (±max|y| of the last N pts)
+        self._recent_window = RECENT_WINDOW
         self._scale_w, self._scale_mode = make_scale_pills(
             self._on_scale_mode, self)
         top.addWidget(self._scale_w)
@@ -223,6 +225,19 @@ class FocusPlotWidget(QWidget):
         # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
         eng_axis(self.ax.yaxis)
 
+    def set_recent_window(self, n: int):
+        """Trailing-point count used by the Recent y-scale mode.
+
+        Set from Setup Defaults (`recent_window`); the plot redraws with the
+        new window on the next update.
+        """
+        try:
+            self._recent_window = max(2, int(n))
+        except (TypeError, ValueError):
+            return
+        self._dirty = True
+        self._ts_dirty = True        # time-scan mode redraws on its next tick
+
     def _on_scale_mode(self):
         """Y-scale pill changed — re-apply the limits immediately."""
         self._ts_dirty = True        # time scan picks it up on the next tick
@@ -238,7 +253,8 @@ class FocusPlotWidget(QWidget):
             return
         self.ax.relim(); self.ax.autoscale_view()
         if self._scale_mode() == SCALE_RECENT:
-            lim = recent_symmetric_ylim([self._fl_data])
+            lim = recent_symmetric_ylim([self._fl_data],
+                                        window=self._recent_window)
             if lim is not None:
                 self.ax.set_ylim(*lim)
 
@@ -412,7 +428,7 @@ class FocusPlotWidget(QWidget):
                 ys = [l.get_ydata() for l in all_lines if l.axes is axis]
                 if not ys: continue
                 if recent:
-                    lim = recent_symmetric_ylim(ys)
+                    lim = recent_symmetric_ylim(ys, window=self._recent_window)
                     if lim is not None:
                         axis.set_ylim(*lim)
                     continue

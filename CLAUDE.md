@@ -3813,3 +3813,35 @@ modes (§58). The constant is the default argument of
 `recent_symmetric_ylim(y_arrays, window=RECENT_WINDOW)`, so callers can still
 pass their own window; the two existing tests pass explicit values and are
 unaffected.
+
+---
+
+## 64. Recent Changes (August 2026) — "Recent" Window Configurable in Setup Defaults
+
+Branch `claude/review-fixes-batch1` (112 tests). App version → **v13.07**.
+
+The Recent y-scale window (§63) is now a **per-setup setting** instead of a
+module constant. It lives in **Setup Defaults → Calibration → "Recent window"**
+(a 2–1000 spinbox, default 10) rather than in the plot toolbars: it is a
+preference set once per rig, not something adjusted during a measurement, and
+the plotting tabs have no space to spare.
+
+- New setup key **`recent_window`** (10) in `SETUP_HW_DEFAULTS` for every setup
+  in both apps, round-tripped through each defaults panel's `load()` /
+  `get_defaults()` (Samba_main) / `get_values()` (Cryo).
+- `Live1DWidget` and `FocusPlotWidget` gained `set_recent_window(n)` and an
+  instance `_recent_window` (seeded from `RECENT_WINDOW`), used in place of the
+  module default at all three `recent_symmetric_ylim` call sites. The setter
+  clamps to ≥ 2 and ignores non-numeric input, then marks the plot dirty
+  (`_dirty` + `_ts_dirty`) so the next redraw picks it up.
+- Pushed to both widgets from `_load_active_config` and `_on_defaults_changed`
+  (Samba_main) and `_apply_defaults` (Cryo) — the same places `configure_stage`
+  is applied, so a defaults edit takes effect immediately.
+- `RECENT_WINDOW` remains the fallback for any caller that does not set one.
+
+### Tests
+`test_runner.py` 109 → 112: `TestRecentWindowSetting` — the default is 10 in
+every setup of both apps, the module constant is 10, and a 10-point window
+ignores a transient that a 50-point window still sees. The full chain
+(spinbox → `get_defaults` → setup dict → both plot widgets) was verified
+headlessly against the real windows in both applications.

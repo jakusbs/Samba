@@ -2033,5 +2033,54 @@ class TestAutoPauseNamesDevice(unittest.TestCase):
         self.assertIn("hpp-N42/measure/ZI2", paused[0])
 
 
+class TestRecentWindowSetting(unittest.TestCase):
+    """The Recent y-scale window is a per-setup value, not a constant.
+
+    It lives in Setup Defaults rather than the plot toolbars — a per-setup
+    preference, not something adjusted mid-measurement."""
+
+    def _cfgmod(self, app):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"recent_window_cfg_{app}",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         app, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_default_is_ten_in_every_setup(self):
+        for app in ("Samba_main", "Cryo"):
+            mod = self._cfgmod(app)
+            for name, setup in mod.SETUP_HW_DEFAULTS.items():
+                self.assertEqual(setup.get("recent_window"), 10,
+                                 f"{app}/{name} missing or wrong recent_window")
+
+    def test_constant_lowered_to_ten(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recent_window_pi",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "core", "plot_interact.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.RECENT_WINDOW, 10)
+
+    def test_window_argument_is_honoured(self):
+        """A smaller window must ignore an earlier large transient."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recent_window_pi2",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "core", "plot_interact.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        y = [1000.0] + [0.01] * 20
+        lo10, hi10 = mod.recent_symmetric_ylim([y], window=10)
+        lo50, hi50 = mod.recent_symmetric_ylim([y], window=50)
+        self.assertLess(hi10, 1.0)
+        self.assertGreater(hi50, 100.0)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

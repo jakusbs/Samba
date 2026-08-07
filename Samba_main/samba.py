@@ -1073,6 +1073,11 @@ class MainWindow(QMainWindow):
         self.calib_panel.set_fl_device(setup.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(setup.get("lights_device", ""))
         self.calib_panel.load_timescan_settings(setup.get("calib_timescan", {}))
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(setup.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             setup.get("act1_device", ""), setup.get("act1_attr", "x"),
             setup.get("act2_device", ""), setup.get("act2_attr", "y"),
@@ -1400,6 +1405,11 @@ class MainWindow(QMainWindow):
         self.traj_panel.set_hyst_device(defaults.get("hyst_device", ""))
         self.calib_panel.set_fl_device(defaults.get("focus_averagein", ""))
         self.calib_panel.set_lights_device(defaults.get("lights_device", ""))
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(defaults.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             defaults.get("act1_device", ""), defaults.get("act1_attr", "x"),
             defaults.get("act2_device", ""), defaults.get("act2_attr", "y"),

@@ -1450,6 +1450,11 @@ class CryoMainWindow(QMainWindow):
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))
         self.calib_panel.set_anc_device(anc_dev)
+        # Live-plot "Recent" y-scale window — a per-setup preference set in
+        # Setup Defaults (the plot toolbars have no room for another control).
+        _rw = int(setup.get("recent_window", 10) or 10)
+        self.plot1d.set_recent_window(_rw)
+        self.calib_panel.focus_plot.set_recent_window(_rw)
         self.calib_panel.configure_stage(
             piezo_block.get("act1_device", ""), piezo_block.get("act1_attr", "x"),
             piezo_block.get("act2_device", ""), piezo_block.get("act2_attr", "y"),
