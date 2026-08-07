@@ -3732,3 +3732,66 @@ Setup Defaults, the field estimate appears and disappears with the estimator,
 `Esc`/`Space`/`Ctrl+L`/`Ctrl+R` are registered, sub-mode enable/disable, and the
 `&&` rendering was confirmed against a rendered PNG. The `server_sync` worker
 source was executed end-to-end (copy, skip-on-second-run, no `.part` left).
+
+---
+
+## 62. Recent Changes (August 2026) — Shortcuts Reverted, Data Browser Search & Live Re-plot
+
+Branch `claude/review-fixes-batch1` (109 tests). App version → **v13.05**.
+Corrections and follow-ups from Jakub's review of §61.
+
+### Keyboard shortcuts removed (§61 reverted)
+The `Esc` = abort / `Space` = pause shortcuts added in §61 are **gone**, along
+with their handlers. Rejected by Jakub: an accidental keypress stopping a
+running measurement is a far worse failure than having to reach for the mouse.
+`Ctrl+L` / `Ctrl+R`, which §61 also added to Samba_main, were removed there too
+— Samba_main is back to **F5 only**, and Cryo keeps the three it always had
+(F5, Ctrl+L, Ctrl+R). **Do not re-add abort/pause key bindings.**
+
+### Data browser: not all metadata was shown
+`ScanFile._read_meta` copied a hand-maintained allowlist of ~30 attributes into
+`self.meta`, and `_show_file` rendered a curated subset of those — so anything
+written to `/metadata` but not on either list was invisible in the browser even
+though it was in the file. On the lab's own files that hid **15 attributes**
+(Cryo) and **9** (Green/IR), including `incidence`, `polarization`,
+`mirror_shift_mm`, `lam2` / `lam4` / `noDC`, `lockin_settling_time` and the
+device paths — i.e. most of the MOKE metadata panel the user fills in for every
+measurement, plus the software provenance added in §60.
+
+`ScanFile` now also keeps **`raw_meta`**: every `/metadata` attribute not
+already in the curated dict. `_show_file` appends an **"Other metadata"**
+section listing all of it, skipping only `_SKIP_RAW_META` (the `sensors_json`
+blob, already summarised as "Sensors:", and keys the curated sections print
+verbatim). Booleans render as yes/no, long strings are elided at 120 chars.
+New metadata keys are visible automatically from now on — the allowlists are
+a display *order*, no longer a filter.
+
+### Data browser: search
+No way existed to find a scan except expanding date folders by hand. A search
+box above the tree filters on the filename **and** the metadata already loaded
+for each file (sample, operator, notes, scan type, config name, device id,
+incidence, polarization — reading `meta` and `raw_meta`). Space-separated terms
+must all match; matching date folders auto-expand; clearing restores the tree.
+Deliberately does **not** force a `ScanFile` load while typing (§40 made
+loading lazy to keep setup switches fast), so a collapsed folder is searched by
+filename until it is opened.
+
+### Data browser: live re-plot ("Live" checkbox)
+The file list already refreshes when a scan finishes, but a scan still *running*
+keeps growing on disk — so overlaying the live scan on an older one needed a
+manual click to see each new point. A 3 s timer re-runs the current plot
+(`_overlay_selected` for a multi-selection, else `_plot_current`); it touches
+neither the tree nor the selection, skips when the panel is hidden or the box is
+unchecked, and swallows read errors from a file mid-write. Default **on**.
+
+### `_plot_current` no longer clobbers the metadata panel
+With nothing selected it wrote "⚠ Select a scan file first." into `meta_text`,
+destroying the metadata being read — and with the live timer that could now
+happen while the user was looking at it. It clears the plot instead.
+
+### Not doing (decided this round)
+- **Soft travel limits**: no Setup Defaults UI. The `act1_min`/`act1_max`/
+  `z_min`/`z_max` support in `core/validation.py` and the autofocus sweep check
+  stays, but is inert unless the keys are set by hand — the lab does not want
+  the feature.
+- **`t_FM` / `t_S` = 0 meaning "unset"** is correct and stays as is.

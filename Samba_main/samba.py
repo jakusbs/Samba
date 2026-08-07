@@ -27,7 +27,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 from typing import Dict, Optional, Tuple
 
-from PyQt6.QtWidgets import (QAbstractSpinBox,
+from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QTabWidget, QTabBar, QTextEdit, QMessageBox, QSplitter,
     QComboBox, QLineEdit, QPushButton, QFileDialog, QButtonGroup, QFrame, QStyle,
@@ -894,12 +894,6 @@ class MainWindow(QMainWindow):
 
         # ── Keyboard shortcuts (F5 only — no accidental abort/pause) ──────────
         QShortcut(QKeySequence("F5"), self, activated=self._unified_start)
-        # Abort is the safety action: it must not require hunting for a
-        # button with the mouse while the stage is heading somewhere wrong.
-        QShortcut(QKeySequence("Escape"),   self, activated=self._shortcut_abort)
-        QShortcut(QKeySequence("Space"),    self, activated=self._shortcut_pause)
-        QShortcut(QKeySequence("Ctrl+L"), self, activated=self.log_text.clear)
-        QShortcut(QKeySequence("Ctrl+R"), self, activated=self.data_browser.refresh)
 
     # ── Bottom tab handling ──────────────────────────────────────────────────
     def _on_bottom_tab_changed(self, idx):
@@ -1479,27 +1473,6 @@ class MainWindow(QMainWindow):
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
-
-    # ── Keyboard shortcuts ────────────────────────────────────────────────────
-    def _shortcut_abort(self):
-        """Escape → abort whichever run is active (with the usual confirm)."""
-        if not self._scan_running:
-            return
-        if QMessageBox.question(
-                self, "Abort", "Abort the running measurement?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
-            return
-        self._unified_abort()
-
-    def _shortcut_pause(self):
-        """Space → pause/resume, but never while typing in a field."""
-        if not self._scan_running:
-            return
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox)):
-            return          # Space belongs to the widget being edited
-        self._toggle_pause()
 
     def _field_seg_estimate(self, total_pts: int):
         """Seconds for `total_pts` field points, or None if not computable."""

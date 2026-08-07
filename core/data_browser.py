@@ -25,9 +25,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTreeWidget, QTreeWidgetItem, QLabel, QPushButton,
     QComboBox, QGroupBox, QTextEdit, QCheckBox,
-    QFileDialog, QMessageBox, QHeaderView
+    QFileDialog, QMessageBox, QHeaderView, QLineEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
 
 from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
@@ -37,6 +37,13 @@ from theme import DIVERGING_CMAPS
 
 # Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
 # instead of any stored actuator/field/time axis. Not a real dataset name.
+# Raw-metadata keys not worth repeating in the "Other metadata" block:
+# sensors_json is a long JSON blob already summarised as "Sensors:", and the
+# rest are duplicated verbatim by the curated sections above.
+_SKIP_RAW_META = {"sensors_json", "scan_name", "n_x", "n_y",
+                  "points_acquired", "points_planned", "duration_seconds",
+                  "integration_time", "settle_time"}
+
 INDEX_KEY = "__index__"
 
 
@@ -51,6 +58,9 @@ class ScanFile:
         self.basename = os.path.basename(path)
         self.valid = False
         self.meta: Dict = {}
+        # Every /metadata attribute not already in the curated `meta` dict, so
+        # nothing written to the file is invisible in the browser.
+        self.raw_meta: Dict = {}
         self.sensor_keys: List[str] = []
         self.sensor_labels: Dict[str, str] = {}  # key → label
         self._read_meta()
@@ -137,6 +147,18 @@ class ScanFile:
                     v = _meta_src.attrs.get(k)
                     if v is not None:
                         self.meta[k] = v
+
+                # Everything else that was written to /metadata.  The list
+                # above is a hand-curated display order; without this catch-all
+                # any attribute not on it — polarization, device_id, the
+                # thicknesses, the software provenance, the polarity flags —
+                # was invisible in the browser even though it is in the file.
+                try:
+                    for _k in _meta_src.attrs:
+                        if _k not in self.meta:
+                            self.raw_meta[str(_k)] = _meta_src.attrs[_k]
+                except Exception:
+                    pass
 
                 # Normalise scan_type for display
                 if self.meta.get("is_temp_sweep"):
@@ -534,6 +556,10 @@ class DataBrowserPanel(QWidget):
         self._loaded_files: Dict[str, ScanFile] = {}  # path → ScanFile
         self._overlay_paths: List[str] = []  # paths selected for overlay
         self._last_y_key: str = ""   # remember last viewed detector across files
+        self._autoplot_timer = QTimer(self)
+        self._autoplot_timer.setInterval(3000)
+        self._autoplot_timer.timeout.connect(self._autoplot_tick)
+        self._autoplot_timer.start()
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(4)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -549,8 +575,36 @@ class DataBrowserPanel(QWidget):
         browse_btn = QPushButton("📂 Open…"); browse_btn.clicked.connect(self._open_file)
         browse_btn.setToolTip("Load a specific HDF5 scan file from anywhere on the filesystem")
         ctrl_row.addWidget(browse_btn)
+        # Re-read and re-draw whatever is currently plotted, on a timer.  The
+        # file list already refreshes when a scan finishes, but a scan that is
+        # still RUNNING keeps growing on disk — so overlaying the live scan on
+        # an older one used to need a manual click to see each new point.
+        # Re-plots only; the tree and the selection are left alone.
+        self.autoplot_cb = QCheckBox("Live")
+        self.autoplot_cb.setChecked(True)
+        self.autoplot_cb.setToolTip(
+            "Re-read and re-draw the plotted file(s) every few seconds, so a\n"
+            "scan that is still running keeps updating — including when it is\n"
+            "overlaid on an older scan. Does not touch the file list or your\n"
+            "selection.")
+        ctrl_row.addWidget(self.autoplot_cb)
         ctrl_row.addStretch()
         left_l.addLayout(ctrl_row)
+
+        # ── Search ────────────────────────────────────────────────────────────
+        # There was no way to find a scan except expanding date folders by hand,
+        # which gets worse every month.  Matches the filename and the metadata
+        # already loaded for a file (sample, operator, notes, config name,
+        # scan type), so "wu89" or "PMOKE" narrows the tree immediately.
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search  (sample, notes, operator, filename…)")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._apply_filter)
+        self.search_edit.setToolTip(
+            "Filter the file tree. Matches the filename and any metadata already\n"
+            "read for that file. Space-separated terms must all match.\n"
+            "Collapsed date folders are searched by filename only until opened.")
+        left_l.addWidget(self.search_edit)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["File", "Status", "Points"])
@@ -719,6 +773,12 @@ class DataBrowserPanel(QWidget):
             self._loaded_files[fp] = sf
         return sf
 
+    def _reapply_filter(self):
+        """Re-run the active search (after a refresh or a lazy load)."""
+        txt = self.search_edit.text() if hasattr(self, 'search_edit') else ''
+        if txt.strip():
+            self._apply_filter(txt)
+
     def _on_date_expanded(self, date_item):
         """Fill in metadata for a lazily-added date folder on first expand."""
         for i in range(date_item.childCount()):
@@ -733,6 +793,51 @@ class DataBrowserPanel(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
                 continue
             self._fill_item_meta(item, sf)
+
+    # ── Search / filter ───────────────────────────────────────────────────────
+    def _match_terms(self, fp: str, item, terms) -> bool:
+        """True when every term appears in the filename or the file's metadata."""
+        hay = [item.text(0).lower()]
+        sf = self._loaded_files.get(fp)      # do NOT force a load: filtering
+        if sf is not None:                   # must stay cheap while typing
+            for k in ("sample_id", "operator", "notes", "scan_type",
+                      "scan_name", "device_id", "incidence", "polarization"):
+                v = sf.meta.get(k, sf.raw_meta.get(k))
+                if v not in (None, ""):
+                    hay.append(str(v).lower())
+        blob = " ".join(hay)
+        return all(t in blob for t in terms)
+
+    def _apply_filter(self, text: str = ""):
+        """Show only files matching the search box; hide empty date folders."""
+        terms = [t for t in (text or "").lower().split() if t]
+        for i in range(self.tree.topLevelItemCount()):
+            date_item = self.tree.topLevelItem(i)
+            shown = 0
+            for j in range(date_item.childCount()):
+                child = date_item.child(j)
+                fp = child.data(0, Qt.ItemDataRole.UserRole)
+                ok = True if not terms else self._match_terms(fp, child, terms)
+                child.setHidden(not ok)
+                shown += 1 if ok else 0
+            date_item.setHidden(bool(terms) and shown == 0)
+            if terms and shown:
+                date_item.setExpanded(True)
+
+    def _autoplot_tick(self):
+        """Re-draw the current plot so a running scan keeps updating."""
+        cb = getattr(self, 'autoplot_cb', None)
+        if cb is None or not cb.isChecked() or not self.isVisible():
+            return
+        try:
+            sel = [i for i in self.tree.selectedItems()
+                   if i.data(0, Qt.ItemDataRole.UserRole)]
+            if len(sel) > 1:
+                self._overlay_selected()
+            elif sel:
+                self._plot_current()
+        except Exception:
+            pass        # a file being written can fail a read; try again next tick
 
     def _update_overlay_btn(self):
         """Enable overlay button only when at least one file is selected."""
@@ -885,6 +990,32 @@ class DataBrowserPanel(QWidget):
             lines.append("Hardware at scan start:")
             lines.extend(hw_rows)
 
+        # Everything else in /metadata.  The sections above are a curated
+        # display order; this catch-all guarantees that anything written to the
+        # file is visible here, instead of silently dropping whatever is not on
+        # the hand-maintained list (incidence, polarization, mirror shift, the
+        # thicknesses, software provenance, ...).
+        other = []
+        for key in sorted(sf.raw_meta):
+            if key in _SKIP_RAW_META:
+                continue
+            v = sf.raw_meta[key]
+            if isinstance(v, (bool, np.bool_)):
+                txt = "yes" if v else "no"
+            elif isinstance(v, (int, float, np.integer, np.floating)):
+                txt = f"{v:.6g}"
+            else:
+                txt = str(v)
+                if len(txt) > 120:
+                    txt = txt[:117] + "…"
+            if txt == "" or txt == "nan":
+                continue
+            other.append(f"{key}: {txt}")
+        if other:
+            lines.append("─" * 28)
+            lines.append("Other metadata:")
+            lines.extend(other)
+
         self.meta_text.setPlainText("\n".join(l for l in lines if l))
 
         # Populate column combos (guard auto-replot while we rebuild them)
@@ -957,7 +1088,10 @@ class DataBrowserPanel(QWidget):
                 fp = candidate
                 break
         if not fp:
-            self.meta_text.setPlainText("⚠ Select a scan file first.")
+            # Do not write plot status into the metadata panel: it replaces
+            # the metadata the user is reading, and with the live re-plot
+            # timer it can fire while they are looking at it.
+            self.plot.clear()
             return
         x_key = self.x_combo.currentData()
         y_key = self.y_combo.currentData()
