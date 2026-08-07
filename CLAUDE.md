@@ -3845,3 +3845,28 @@ every setup of both apps, the module constant is 10, and a 10-point window
 ignores a transient that a 50-point window still sees. The full chain
 (spinbox → `get_defaults` → setup dict → both plot widgets) was verified
 headlessly against the real windows in both applications.
+
+---
+
+## 65. Recent Changes (August 2026) — Data Browser: Metadata Beside the File List
+
+Branch `claude/review-fixes-batch1` (112 tests). App version → **v13.08**.
+
+The metadata panel moved from the bottom of the left column into its **own
+splitter column**, between the file list and the plot. It was a `QGroupBox`
+stacked under the tree with `meta_text.setMaximumHeight(240)`, which both
+truncated the metadata — there is much more of it since §62 added the raw
+attributes — and stole vertical space from the file list, leaving the search
+box and tree cramped.
+
+Now three columns, all full height: **file list + search | metadata | plot**.
+Splitter sizes `[300, 300, 520]`, with stretch only on the plot so the two
+left columns keep their width when the window is resized; the metadata column
+has `setMinimumWidth(230)` and both dividers are draggable. The height cap is
+gone. Measured at the app's 1180 px minimum width: tree 572 px (was ~330),
+metadata 654 px (was ≤ 240), nothing clipped.
+
+Word wrap is deliberately left at the Qt default (`WidgetWidth`). An early
+version set `NoWrap` for column alignment, which pushed long values — the
+sensor list, TANGO device paths — behind a horizontal scrollbar; wrapping
+costs nothing now that the panel is tall.

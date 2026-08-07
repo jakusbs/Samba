@@ -629,18 +629,6 @@ class DataBrowserPanel(QWidget):
         ov_row.addWidget(self.overlay_btn)
         left_l.addLayout(ov_row)
 
-        # Metadata panel
-        meta_grp = QGroupBox("Metadata")
-        meta_l = QVBoxLayout(meta_grp); meta_l.setContentsMargins(6, 6, 6, 6)
-        self.meta_text = QTextEdit(); self.meta_text.setReadOnly(True)
-        self.meta_text.setMaximumHeight(240)
-        self.meta_text.setStyleSheet(
-            "QTextEdit{background:#12121f;border:1px solid #313244;"
-            "border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;"
-            "font-size:10px;}")
-        meta_l.addWidget(self.meta_text)
-        left_l.addWidget(meta_grp)
-
         # Column selectors
         self._populating_combos = False
         sel_row = QHBoxLayout()
@@ -678,10 +666,30 @@ class DataBrowserPanel(QWidget):
 
         splitter.addWidget(left)
 
+        # ── Middle: metadata ──────────────────────────────────────────────────
+        # Its own splitter column rather than stacked under the tree: it used
+        # to be capped at 240 px at the bottom of the left column, which both
+        # truncated the metadata (there is a lot more of it since the raw
+        # attributes were added) and stole height from the file list.  Here
+        # both get the full height of the tab, and the divider is draggable.
+        meta_grp = QGroupBox("Metadata")
+        meta_l = QVBoxLayout(meta_grp); meta_l.setContentsMargins(6, 6, 6, 6)
+        self.meta_text = QTextEdit(); self.meta_text.setReadOnly(True)
+        self.meta_text.setStyleSheet(
+            "QTextEdit{background:#12121f;border:1px solid #313244;"
+            "border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;"
+            "font-size:10px;}")
+        meta_l.addWidget(self.meta_text)
+        meta_grp.setMinimumWidth(230)
+        splitter.addWidget(meta_grp)
+
         # ── Right: plot ───────────────────────────────────────────────────────
         self.plot = BrowserPlotWidget()
         splitter.addWidget(self.plot)
-        splitter.setSizes([320, 500]); splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 300, 520])
+        splitter.setStretchFactor(0, 0)     # file list keeps its width
+        splitter.setStretchFactor(1, 0)     # metadata keeps its width
+        splitter.setStretchFactor(2, 1)     # the plot takes the extra space
 
         root.addWidget(splitter)
 
