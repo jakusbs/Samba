@@ -3,12 +3,17 @@ core/bd_calibration.py — Samba v3
 BDCalibrationPanel — λ/2 plate (BD) calibration table.
 Tick positions: 0, 5, 10, 15, 20, 25  →  6 mV values.
 """
+import os
+from datetime import datetime
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QGroupBox, QMessageBox, QFrame,
-    QDoubleSpinBox,
+    QDoubleSpinBox, QFileDialog,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
+
+import bd_fit
 
 TICKS = [0, 5, 10, 15, 20, 25]
 
@@ -30,9 +35,27 @@ class BDCalibrationPanel(QWidget):
         root.setContentsMargins(12, 10, 12, 10); root.setSpacing(10)
 
         # ── Header ────────────────────────────────────────────────────────────
+        hdr_row = QHBoxLayout(); hdr_row.setSpacing(10)
         hdr = QLabel("λ/2 Plate Calibration")
         hdr.setStyleSheet("color:#cba6f7;font-size:13px;font-weight:bold;")
-        root.addWidget(hdr)
+        hdr_row.addWidget(hdr)
+
+        self._fit_btn = QPushButton("⤓ Fit && Import")
+        self._fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._fit_btn.setFixedHeight(26)
+        self._fit_btn.setToolTip(
+            "Read the newest TIME …_calibration.h5 in today's data folder,\n"
+            "fit the DC staircase, and fill the six mV values below.\n"
+            "If the newest file isn't a calibration scan you can pick one.")
+        self._fit_btn.setStyleSheet(
+            "QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;"
+            "border-radius:5px;padding:3px 12px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#45475a;}"
+            "QPushButton:disabled{color:#6c7086;}")
+        self._fit_btn.clicked.connect(self._on_fit_import)
+        hdr_row.addWidget(self._fit_btn)
+        hdr_row.addStretch()
+        root.addLayout(hdr_row)
 
         desc = QLabel(
             "Enter the measured MOKE signal (mV) at each tick position of the λ/2 plate.\n"
@@ -74,7 +97,9 @@ class BDCalibrationPanel(QWidget):
         self._mv_spins: list = []
         for col in range(6):
             sp = _NoScrollDoubleSpinBox()
-            sp.setRange(-1e6, 1e6); sp.setDecimals(4); sp.setValue(0.0)
+            # 2 decimals: the plateau levels are ~0.01 mV repeatable at best,
+            # so more digits only imply precision the measurement doesn't have.
+            sp.setRange(-1e6, 1e6); sp.setDecimals(2); sp.setValue(0.0)
             sp.setMinimumWidth(80)
             sp.valueChanged.connect(self._on_value_changed)
             cal_lay.addWidget(sp, 2, col + 1)
@@ -117,6 +142,8 @@ class BDCalibrationPanel(QWidget):
         # External callbacks — set by samba.py / samba_cryo.py
         self._save_cb = None   # callable(vals: list)
         self._load_cb = None   # callable() -> (vals, date_str) or (None, "")
+        self._dir_cb  = None   # callable() -> data base directory (str)
+        self._plot_cb = None   # callable(FitResult) — show trace + fit
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -127,6 +154,105 @@ class BDCalibrationPanel(QWidget):
         """
         self._save_cb = save_cb
         self._load_cb = load_cb
+
+    def set_fit_context(self, dir_cb, plot_cb=None):
+        """Wire "Fit & Import" to its host window.
+
+        dir_cb()  -> the data base directory (the Dir field at the top).
+        plot_cb(result) -> optional; show the trace and the fitted steps.
+        """
+        self._dir_cb  = dir_cb
+        self._plot_cb = plot_cb
+
+    # ── Fit & Import ──────────────────────────────────────────────────────────
+    def _day_folder(self) -> str:
+        """Today's data folder — scans are written to <save_dir>/<YYYYMMDD>/."""
+        base = ""
+        if self._dir_cb is not None:
+            try:
+                base = os.path.expanduser((self._dir_cb() or "").strip())
+            except Exception:
+                base = ""
+        if not base:
+            return ""
+        day = os.path.join(base, datetime.now().strftime("%Y%m%d"))
+        return day if os.path.isdir(day) else base
+
+    def _ask_for_file(self, folder: str) -> str:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a calibration scan", folder, "HDF5 scans (*.h5)")
+        return path or ""
+
+    def _on_fit_import(self):
+        folder = self._day_folder()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(
+                self, "No data folder",
+                "Could not find today's data folder.\n\n"
+                f"Looked in: {folder or '(the Dir field is empty)'}")
+            return
+
+        newest = bd_fit.latest_h5(folder)
+        if newest and bd_fit.is_time_calibration(newest):
+            path = newest
+        else:
+            # Newest file isn't a TIME …_calibration.h5 — let the user pick.
+            why = ("The folder contains no .h5 files."
+                   if not newest else
+                   f"The newest file is not a TIME calibration scan:\n"
+                   f"{os.path.basename(newest)}")
+            QMessageBox.information(self, "Choose a calibration file",
+                                    f"{why}\n\nPick the calibration scan to use.")
+            path = self._ask_for_file(folder)
+            if not path:
+                return
+        self._fit_path(path)
+
+    def _fit_path(self, path: str):
+        """Fit one file, fill the boxes on success, explain on failure."""
+        try:
+            result = bd_fit.fit_file(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Could not read file",
+                                f"{os.path.basename(path)}\n\n{e}")
+            return
+
+        # Always show the trace — on failure it is the fastest way to see why.
+        if self._plot_cb is not None:
+            try:
+                self._plot_cb(result)
+            except Exception:
+                pass
+
+        if result.ok:
+            self.load_calibration(result.levels_mV)
+            self.calibration_changed.emit(self.get_calibration())
+            self.set_status(
+                f"Fitted {os.path.basename(path)} — "
+                f"{len(result.all_plateaus)} plateau(s) found, 6 imported. "
+                f"Review, then Save calibration.")
+            return
+
+        # Failure: leave the boxes untouched, offer another file.
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Could not fit this file")
+        box.setText(f"{os.path.basename(path)} could not be fitted.")
+        box.setInformativeText(
+            f"{result.reason}.\n\n"
+            "The trace is plotted so you can see what was recorded. "
+            "The calibration values were left unchanged.")
+        other = box.addButton("Open another file…",
+                              QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is other:
+            nxt = self._ask_for_file(os.path.dirname(path) or self._day_folder())
+            if nxt:
+                self._fit_path(nxt)
+        else:
+            self.set_status(f"Fit failed for {os.path.basename(path)} — "
+                            f"{result.reason}.")
 
     def get_calibration(self) -> list:
         return [sp.value() for sp in self._mv_spins]

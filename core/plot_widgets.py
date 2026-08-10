@@ -469,6 +469,38 @@ class Live1DWidget(QWidget):
         self.ax1.set_xlabel(txt, color="#aaaacc", fontsize=self._font_pt)
         self.canvas.draw_idle()
 
+    def show_static(self, x, y, xlabel: str = "", ylabel: str = "",
+                    title: str = "", overlay=None, overlay_label: str = "fit"):
+        """Draw a one-off trace (plus an optional overlay) instead of scan data.
+
+        Used by the BD-calibration "Fit & Import" button to show the DC
+        staircase with the fitted levels on top.  The scan buffers are dropped,
+        so the next alloc()/apply_config() at scan start takes over cleanly —
+        this view is transient by design and is replaced when a scan begins.
+        """
+        self.ax1.cla(); self.ax2.cla(); self._style_axes()
+        self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
+        self._dirty = False
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
+
+        self.ax1.plot(np.asarray(x, dtype=float), np.asarray(y, dtype=float),
+                      color=LEFT_COLORS[0], linewidth=1.0, label=ylabel or "data")
+        if overlay is not None:
+            ox, oy = overlay
+            self.ax1.plot(np.asarray(ox, dtype=float),
+                          np.asarray(oy, dtype=float),
+                          color=RIGHT_COLORS[0], linewidth=2.4,
+                          solid_capstyle="butt", label=overlay_label)
+        self.ax1.set_xlabel(xlabel, color="#aaaacc", fontsize=self._font_pt)
+        self.ax1.set_ylabel(ylabel, color=LEFT_COLORS[0], fontsize=self._font_pt)
+        if title:
+            self.ax1.set_title(title, color="#6c7086", fontsize=self._font_pt)
+        self.ax1.legend(fontsize=self._LEGEND_PT, facecolor="#313244",
+                        edgecolor="#45475a", labelcolor="#cdd6f4", loc="best")
+        self.ax2.set_yticks([])
+        self._layout()
+
     def clear(self):
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
