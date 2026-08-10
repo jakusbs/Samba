@@ -97,7 +97,9 @@ class BDCalibrationPanel(QWidget):
         self._mv_spins: list = []
         for col in range(6):
             sp = _NoScrollDoubleSpinBox()
-            sp.setRange(-1e6, 1e6); sp.setDecimals(4); sp.setValue(0.0)
+            # 2 decimals: the plateau levels are ~0.01 mV repeatable at best,
+            # so more digits only imply precision the measurement doesn't have.
+            sp.setRange(-1e6, 1e6); sp.setDecimals(2); sp.setValue(0.0)
             sp.setMinimumWidth(80)
             sp.valueChanged.connect(self._on_value_changed)
             cal_lay.addWidget(sp, 2, col + 1)

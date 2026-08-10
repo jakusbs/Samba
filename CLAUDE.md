@@ -3891,8 +3891,13 @@ the operator transcribing them by hand.
 - **Fit**: `/data/DC` (V) against `/data/time` (s), split into plateaus, each
   level taken as the mean of the **last 25 %** of its plateau — the settled
   part, right before the next transition.
-- **Import**: the six levels are written to the boxes **× 1000** (V → mV).
-  Values are only filled, never auto-saved: the operator reviews and presses
+- **Import**: the six levels are written to the boxes **× 1000** (V → mV),
+  which display and store **2 decimals** — the plateau levels are ~0.01 mV
+  repeatable at best, so further digits imply precision the measurement does
+  not have.  Values are only filled, **never auto-saved**: a fit that picked
+  the wrong six plateaus yields plausible-looking numbers, and auto-saving
+  would silently overwrite a good stored calibration and embed the wrong
+  values in every later scan.  The operator reviews and presses
   *Save calibration*.
 - **Plot**: the trace and the fitted levels are drawn in the existing **1D
   Plot** tab (`Live1DWidget.show_static`), which sits beside the BD tab so the
