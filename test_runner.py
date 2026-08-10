@@ -1851,22 +1851,87 @@ class TestBDStepFit(unittest.TestCase):
             np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=3e-5,
                                        err_msg=f"ramp={ramp}")
 
-    def test_extra_plateaus_closest_to_zero_are_kept(self):
-        extra = np.concatenate([[40e-3], self.LEVELS, [-25e-3]])
-        t, dc = _staircase(extra, seed=2)
+    def test_parking_holds_around_the_sweep_are_excluded(self):
+        """The real-data failure this rule exists for.
+
+        Levels and layout taken from
+        20260810/102928_TIME_N37Cr_10_Ni_15__001_calibration.h5: the operator
+        parks the plate at +37 mV before the sweep and returns to −5 mV after
+        it.  Selecting "the six closest to 0 V" picks both parking holds and
+        drops two genuine ticks; the sweep is not centred on zero.
+        """
+        sweep = np.array([43.0, 21.6, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        trace = np.concatenate([[37.3e-3, 38.0e-3], sweep, [-4.8e-3]])
+        t, dc = _staircase(trace, seed=11)
         r = _bd.fit_calibration(t, dc)
         self.assertTrue(r.ok, r.reason)
-        self.assertEqual(len(r.all_plateaus), 8)
-        np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=2e-5)
+        np.testing.assert_allclose(r.levels_V, sweep, atol=3e-5)
+        # The parking levels must not appear among the imported values.
+        for parked in (37.3, 38.0, -4.8):
+            self.assertFalse(any(abs(v - parked) < 0.5 for v in r.levels_mV),
+                             f"{parked} mV leaked into the calibration")
+
+    def test_spurious_holds_nearer_zero_than_real_ticks(self):
+        """A parking hold close to 0 V must still lose to the even staircase."""
+        sweep = np.array([43.0, 21.6, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        trace = np.concatenate([[0.4e-3], sweep, [-1.0e-3]])
+        t, dc = _staircase(trace, seed=12)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, sweep, atol=3e-5)
 
     def test_selected_levels_are_time_ordered(self):
-        """Selection ranks by |value|, but the boxes are ticks 0..25 in the
-        order the operator stepped through them — i.e. time order."""
-        extra = np.concatenate([[40e-3], self.LEVELS, [-25e-3]])
-        t, dc = _staircase(extra, seed=2)
+        """The boxes are ticks 0..25 in the order the operator stepped
+        through them — i.e. time order."""
+        trace = np.concatenate([[37e-3], self.LEVELS, [-25e-3]])
+        t, dc = _staircase(trace, seed=2)
         r = _bd.fit_calibration(t, dc)
         times = [p.t0 for p in r.selected]
         self.assertEqual(times, sorted(times))
+
+    def test_uniform_spacing_reported(self):
+        t, dc = _staircase(self.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        self.assertLess(r.spacing_cv, 0.05)
+        self.assertAlmostEqual(r.mean_step_V * 1000, 1.09, places=1)
+
+    def test_split_hold_is_rejoined(self):
+        """A hold broken in two by a glitch would otherwise shift the whole
+        consecutive run by one plateau."""
+        sweep = np.array([43.0, 21.6, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        # Second tick recorded as two nearly-equal fragments.
+        trace = np.array([43.0, 21.6, 21.55, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        t, dc = _staircase(trace, seed=13)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(len(r.levels_V), 6)
+        np.testing.assert_allclose(r.levels_V, sweep, atol=1e-4)
+
+    def test_drifting_flat_trace_refused(self):
+        """A flat trace with slow drift can be carved into six evenly spaced
+        "levels" tens of µV apart — uniform enough to pass the spacing test on
+        its own.  Three real files on the lab machine did exactly that.  The
+        step must also be large compared with the noise."""
+        t = np.arange(3000) * 0.02
+        dc = 0.017 + np.linspace(0, -1e-4, t.size)          # 0.1 mV of drift
+        dc = dc + np.random.default_rng(15).normal(0, 3e-5, t.size)
+        r = _bd.fit_calibration(t, dc)
+        self.assertFalse(r.ok, f"accepted a flat trace: {r.levels_mV}")
+
+    def test_real_step_survives_the_noise_guard(self):
+        """The guard must not reject a genuine sweep: real files measure
+        250-420 sigma per step, the flat ones under 10."""
+        t, dc = _staircase(self.LEVELS, noise=2e-5)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+
+    def test_uneven_spacing_refused(self):
+        """Six holds that are not an even staircase are not a λ/2 sweep."""
+        ragged = np.array([1.0, 1.4, 9.0, 9.3, 25.0, 25.2]) * 1e-3
+        t, dc = _staircase(ragged, seed=14)
+        r = _bd.fit_calibration(t, dc)
+        self.assertFalse(r.ok)
+        self.assertIn("unevenly spaced", r.reason)
 
     def test_offset_trace(self):
         """Real DC sits well away from 0 V (~16 mV on the IR setup)."""

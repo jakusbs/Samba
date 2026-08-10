@@ -3899,12 +3899,25 @@ the operator transcribing them by hand.
   fit is visible immediately. Skipped while a scan is running — the live plot
   belongs to the measurement.
 
-### Selecting six out of more
-A sweep may contain more holds than tick positions. The six plateaus **closest
-to 0 V** are kept (the λ/2 sweep sits around the balanced-diode null, so a hold
-far off zero is a spurious excursion), and those six are then ordered **by
-time** — the order the operator stepped through the ticks, i.e. the order of
-the boxes.
+### Selecting six out of more — consecutive + evenly spaced
+A recording contains more holds than tick positions: the operator parks the
+plate before starting and again after finishing, at arbitrary levels. The tick
+positions are recognised by being **consecutive in time** and **evenly spaced
+in value** — a fixed tick increment changes the signal by a nearly constant
+amount. Every run of six neighbouring plateaus is scored by the coefficient of
+variation of its five steps, and the most uniform run wins; those six are
+already in time order, which is the order of the boxes.
+
+**This replaced a "keep the six closest to 0 V" rule, which was wrong.** On
+`20260810/102928_TIME_N37Cr_10_Ni_15__001_calibration.h5` the sweep runs
++43 → −63.6 mV while the parking holds sit at +37 and −5 mV, so "closest to
+zero" picked both parking holds and dropped two genuine ticks. The sweep is
+not centred on zero. The uniformity rule gets it right: steps −21.4, −20.7,
+−21.0, −21.8, −21.8 mV (2 % spread).
+
+A hold split in two by a brief glitch is rejoined first (`merge_split_holds`,
+fragments closer than 15 % of the typical step), otherwise it would shift the
+whole consecutive run by one.
 
 ### Detection is flatness-based, not difference-based (important)
 The first implementation thresholded the sample-to-sample difference. That is
@@ -3929,10 +3942,20 @@ always shows a large spread, however gradual the ramp. Supporting choices:
 
 ### Refusing rather than guessing
 A wrong calibration silently rescales every later SOT result, so the fit
-refuses unless the trace really is a staircase: fewer than 6 plateaus, or more
-than 4 × 6 (fragmentation — transitions as slow as the holds). On refusal the
-boxes are **left untouched**, the trace is still plotted, and a dialog gives
-the reason with **Close** / **Open another file…**.
+refuses unless the trace really is a staircase:
+- fewer than 6 plateaus, or more than 4 × 6 (fragmentation);
+- steps that vary by more than **20 %** (`MAX_SPACING_CV`);
+- steps smaller than **20 σ** of the trace noise (`MIN_STEP_SIGMA`).
+
+The last two thresholds were set from the 294 calibration files on the lab
+machine, not guessed: genuine sweeps come out at 1–8 % spread and 250–420 σ
+per step, while flat traces — which the detector otherwise carves into six
+look-alike "levels" a few tens of µV apart — land at 31–49 % and under 10 σ.
+Three real files were being accepted with six near-identical values before the
+noise guard was added.
+
+On refusal the boxes are **left untouched**, the trace is still plotted, and a
+dialog gives the reason with **Close** / **Open another file…**.
 
 ### Structure
 Fitting lives in **`core/bd_fit.py`**, deliberately free of Qt and matplotlib
@@ -3951,7 +3974,9 @@ and calls `set_fit_context(dir_cb, plot_cb)`, wired by both main windows.
   retry path, unreadable files, and `show_static` drawing data + overlay with
   NaN breaks between plateaus.
 
-### Known limitation
-The five calibration files on the lab machine are short aborted runs with a
-flat DC, so the fit is validated against synthetic staircases only. It has not
-yet been checked against a real λ/2 sweep.
+### Validated against the real archive
+Run across all **294** calibration files under `Data_Samba_IR`: 7 fit (spread
+0.9–7.9 %, steps 5.6–28.5 mV — all genuine staircases on inspection) and 287
+are refused, the great majority because they are short aborted scans (143 have
+too few plateaus) or were recorded with lock-in channels instead of DC (97).
+`102928` reproduces the expected `43.0, 21.6, 0.9, −20.0, −41.8, −63.6 mV`.

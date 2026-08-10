@@ -30,6 +30,23 @@ TAIL_FRAC = 0.25
 # rather than a real hold.
 MIN_PLATEAU_PTS = 3
 
+# Two neighbouring plateaus closer together than this fraction of the typical
+# step are treated as one hold that got split by a glitch.
+SPLIT_MERGE_FRAC = 0.15
+
+# How uneven the six steps may be before the run is rejected, as a coefficient
+# of variation.  Turning the plate by a fixed tick gives a nearly constant
+# change: measured across the real calibration files on the lab machine,
+# genuine sweeps come out at 1-8 % while traces that are really flat (and get
+# carved into six look-alike plateaus) land at 31-49 %.
+MAX_SPACING_CV = 0.20
+
+# The step between ticks must also be large compared with the noise.  A flat
+# trace with a slow drift can produce six evenly spaced "levels" a few tens of
+# µV apart, which would pass the uniformity test alone.  Real sweeps measure
+# 250-420 sigma per step; the flat ones, 0.5-9.
+MIN_STEP_SIGMA = 20.0
+
 # Calibration TIME-scan filenames look like
 #   103813_TIME_W_15_2e_calibration.h5
 # i.e. HHMMSS, the TIME scan marker, then a name ending in "calibration".
@@ -95,6 +112,19 @@ class Plateau:
                 f"{self.value*1000:.4g} mV, n={self.i1 - self.i0 + 1})")
 
 
+def _noise_sigma(dc: np.ndarray) -> float:
+    """Per-sample noise σ from the MAD of the differences (σ_diff = √2·σ).
+
+    The MAD is used rather than a std because the step edges cannot inflate
+    it — a std would be dragged up by the very transitions being measured.
+    """
+    if dc.size < 2:
+        return 0.0
+    d = np.diff(dc)
+    mad = float(np.median(np.abs(d - float(np.median(d)))))
+    return (1.4826 * mad) / np.sqrt(2.0)
+
+
 def detect_plateaus(t: np.ndarray, dc: np.ndarray,
                     min_pts: int = MIN_PLATEAU_PTS,
                     tail_frac: float = TAIL_FRAC) -> List[Plateau]:
@@ -116,10 +146,7 @@ def detect_plateaus(t: np.ndarray, dc: np.ndarray,
     if t.size < 2 or n != t.size:
         return []
 
-    # Per-sample noise σ, from the MAD of the differences (σ_diff = √2 · σ).
-    d = np.diff(dc)
-    mad = float(np.median(np.abs(d - float(np.median(d)))))
-    sigma = (1.4826 * mad) / np.sqrt(2.0)
+    sigma = _noise_sigma(dc)
     if sigma <= 0.0:                    # perfectly clean (synthetic) trace
         sigma = max(float(np.max(dc) - np.min(dc)), 1e-15) * 1e-4
 
@@ -178,10 +205,10 @@ class FitResult:
     """
 
     __slots__ = ("ok", "reason", "levels_V", "selected", "all_plateaus",
-                 "t", "dc", "path")
+                 "t", "dc", "path", "spacing_cv", "mean_step_V")
 
     def __init__(self, ok, reason, levels_V, selected, all_plateaus,
-                 t, dc, path=""):
+                 t, dc, path="", spacing_cv=float("nan"), mean_step_V=0.0):
         self.ok = ok
         self.reason = reason
         self.levels_V = levels_V          # list[float], time-ordered
@@ -189,6 +216,8 @@ class FitResult:
         self.all_plateaus = all_plateaus  # list[Plateau], every one found
         self.t, self.dc = t, dc           # the raw trace (for plotting)
         self.path = path
+        self.spacing_cv = spacing_cv      # step uniformity of the chosen run
+        self.mean_step_V = mean_step_V    # mean step between ticks [V]
 
     @property
     def levels_mV(self) -> List[float]:
@@ -210,23 +239,74 @@ class FitResult:
         return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
 
 
+def merge_split_holds(plateaus: List[Plateau],
+                      factor: float = SPLIT_MERGE_FRAC) -> List[Plateau]:
+    """Rejoin a single hold that got split into look-alike fragments.
+
+    A brief disturbance mid-hold (someone nudging the table, a readout
+    glitch) breaks one plateau into two at almost the same level.  Left
+    alone, that shifts every later plateau in the consecutive-run search by
+    one.  Fragments are recognised by being far closer together than the
+    typical step between neighbouring plateaus; the merged level is taken
+    from the later fragment, whose tail is the most settled.
+    """
+    if len(plateaus) < 2:
+        return list(plateaus)
+    diffs = np.abs(np.diff([p.value for p in plateaus]))
+    med = float(np.median(diffs))
+    if med <= 0.0:
+        return list(plateaus)
+    thr = factor * med
+    out = [plateaus[0]]
+    for p in plateaus[1:]:
+        q = out[-1]
+        if abs(p.value - q.value) < thr:
+            out[-1] = Plateau(q.i0, p.i1, q.t0, p.t1, p.value)
+        else:
+            out.append(p)
+    return out
+
+
+def _spacing_cv(values: List[float]) -> Tuple[float, float]:
+    """(coefficient of variation, mean step) of successive differences.
+
+    A perfectly even staircase gives 0.  Sign changes push the mean towards
+    zero and the CV up, so a run that turns around scores badly without
+    needing a separate monotonicity rule.
+    """
+    d = np.diff(np.asarray(values, dtype=float))
+    if d.size == 0:
+        return float("inf"), 0.0
+    mean = float(np.mean(d))
+    if abs(mean) < 1e-15:
+        return float("inf"), mean
+    return float(np.std(d)) / abs(mean), mean
+
+
 def fit_calibration(t: np.ndarray, dc: np.ndarray, path: str = "",
                     n_levels: int = N_LEVELS,
                     tail_frac: float = TAIL_FRAC) -> FitResult:
     """Fit *n_levels* plateau levels out of a staircase DC trace.
 
-    When more plateaus are found than needed, the ones **closest to 0 V** are
-    kept: a λ/2 sweep sits around the balanced-diode null, so a hold far off
-    zero is a spurious excursion rather than a tick position.  The kept
-    plateaus are then returned in time order, which is the order the operator
-    stepped through the ticks — i.e. the order of the calibration boxes.
+    A recording usually contains more holds than tick positions: the operator
+    parks the plate before starting and again after finishing, and those
+    holds sit at arbitrary levels.  The tick positions are instead recognised
+    by being **consecutive in time** and **evenly spaced in value** — turning
+    the plate by a fixed tick increment changes the signal by a nearly
+    constant amount.  So every run of *n_levels* neighbouring plateaus is
+    scored by how uniform its steps are, and the most uniform run wins.
+
+    (An earlier rule kept the plateaus closest to 0 V.  On real data that
+    picks the pre- and post-sweep parking holds and drops genuine ticks —
+    the sweep is not centred on zero.)
     """
-    plateaus = detect_plateaus(t, dc, tail_frac=tail_frac)
+    found = detect_plateaus(t, dc, tail_frac=tail_frac)
+    plateaus = merge_split_holds(found)
     if len(plateaus) < n_levels:
         return FitResult(
             False,
             f"found only {len(plateaus)} plateau(s), need {n_levels}",
-            [], [], plateaus, t, dc, path)
+            [], [], found, t, dc, path)
 
     # Fragmentation guard.  When the transitions are as slow as the holds
     # there is no staircase to speak of, and the detector emits a long run of
@@ -238,15 +318,38 @@ def fit_calibration(t: np.ndarray, dc: np.ndarray, path: str = "",
             False,
             f"found {len(plateaus)} plateaus — too fragmented to be a "
             f"{n_levels}-step staircase (transitions as slow as the holds?)",
-            [], [], plateaus, t, dc, path)
+            [], [], found, t, dc, path)
 
-    if len(plateaus) > n_levels:
-        keep = sorted(plateaus, key=lambda p: abs(p.value))[:n_levels]
-    else:
-        keep = list(plateaus)
-    keep.sort(key=lambda p: p.t0)          # tick order = time order
-    return FitResult(True, "", [p.value for p in keep], keep,
-                     plateaus, t, dc, path)
+    best_cv, best_step, best = float("inf"), 0.0, None
+    for i in range(len(plateaus) - n_levels + 1):
+        win = plateaus[i:i + n_levels]
+        cv, mean = _spacing_cv([p.value for p in win])
+        if cv < best_cv:
+            best_cv, best_step, best = cv, mean, win
+
+    if best is None or not np.isfinite(best_cv):
+        return FitResult(False,
+                         "no run of evenly spaced plateaus found",
+                         [], [], found, t, dc, path)
+    sigma = _noise_sigma(dc)
+    if sigma > 0.0 and abs(best_step) < MIN_STEP_SIGMA * sigma:
+        return FitResult(
+            False,
+            f"the steps between plateaus ({abs(best_step)*1000:.3g} mV) are "
+            f"comparable to the noise ({sigma*1000:.3g} mV) — the signal is "
+            "essentially flat, not a λ/2 staircase",
+            [], [], found, t, dc, path)
+    if best_cv > MAX_SPACING_CV:
+        return FitResult(
+            False,
+            f"the {n_levels} best consecutive plateaus are unevenly spaced "
+            f"(steps vary by {best_cv*100:.0f} %, mean {best_step*1000:+.2f} mV)"
+            " — this does not look like a λ/2 sweep",
+            [], [], found, t, dc, path)
+
+    return FitResult(True, "", [p.value for p in best], list(best),
+                     found, t, dc, path, spacing_cv=best_cv,
+                     mean_step_V=best_step)
 
 
 def fit_file(path: str, n_levels: int = N_LEVELS,
