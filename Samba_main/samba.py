@@ -891,6 +891,12 @@ class MainWindow(QMainWindow):
             save_cb=self._bd_cal_save,
             load_cb=self._bd_cal_load,
         )
+        # "Fit & Import": read a TIME calibration scan from the Dir folder and
+        # show the fitted staircase in the 1D plot.
+        self.bd_cal_panel.set_fit_context(
+            dir_cb=lambda: self.save_dir.text(),
+            plot_cb=self._bd_plot_fit,
+        )
 
         # ── Keyboard shortcuts (F5 only — no accidental abort/pause) ──────────
         QShortcut(QKeySequence("F5"), self, activated=self._unified_start)
@@ -1321,6 +1327,27 @@ class MainWindow(QMainWindow):
         if self._scan_running:
             return
         self._save_active_config()
+
+    def _bd_plot_fit(self, result):
+        """Show a BD calibration trace (and its fitted levels) in the 1D plot.
+
+        Skipped while a scan runs — the live plot belongs to the measurement.
+        """
+        if getattr(self, "_scan_running", False):
+            self.status_lbl.setText(
+                "Fit done — 1D plot not touched while a scan is running.")
+            return
+        overlay = result.step_curve() if result.ok else None
+        name = os.path.basename(result.path or "")
+        self.plot1d.show_static(
+            result.t, result.dc,
+            xlabel="Time (s)", ylabel="DC (V)",
+            title=f"BD calibration — {name}" if name else "BD calibration",
+            overlay=overlay, overlay_label="fitted levels")
+        try:
+            self.live_tabs.setCurrentWidget(self.plot1d.parentWidget())
+        except Exception:
+            pass
 
     # ── BD Calibration callbacks ──────────────────────────────────────────────
     def _bd_cal_save(self, vals: list):

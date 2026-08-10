@@ -1801,6 +1801,170 @@ class TestNulByteStringAttrs(unittest.TestCase):
                                dtype=h5py.string_dtype())
 
 
+import bd_fit as _bd                                     # noqa: E402
+
+
+def _staircase(levels, hold=300, ramp=60, noise=2e-5, seed=1, t_step=0.01):
+    """A hand-turned λ/2 sweep: flat holds joined by gradual ramps."""
+    r = np.random.default_rng(seed)
+    y = []
+    for i, L in enumerate(levels):
+        if i and ramp:
+            y.extend(np.linspace(levels[i - 1], L, ramp + 2)[1:-1])
+        y.extend([L] * hold)
+    y = np.asarray(y, dtype=float) + r.normal(0, noise, len(y))
+    return np.arange(len(y)) * t_step, y
+
+
+class TestBDStepFit(unittest.TestCase):
+    """core/bd_fit.py — λ/2 calibration staircase fitting.
+
+    A wrong calibration silently rescales every later SOT result, so the
+    contract is: fit accurately when the trace really is a staircase, and
+    refuse outright otherwise.  Never return plausible-looking numbers for a
+    trace that isn't one."""
+
+    LEVELS = np.array([0.05, 1.10, 2.18, 3.27, 4.40, 5.51]) * 1e-3   # volts
+
+    def test_six_levels_recovered(self):
+        t, dc = _staircase(self.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(len(r.levels_V), 6)
+        np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=2e-5)
+
+    def test_values_converted_to_mV(self):
+        """The panel's boxes are mV; the trace is V."""
+        t, dc = _staircase(self.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        np.testing.assert_allclose(r.levels_mV,
+                                   np.asarray(r.levels_V) * 1000.0)
+        self.assertAlmostEqual(r.levels_mV[-1], 5.51, places=1)
+
+    def test_gradual_transitions(self):
+        """The plate is turned by hand, so transitions span many samples.
+        A per-sample-difference detector walks straight through those."""
+        for ramp in (6, 60, 200, 300):
+            t, dc = _staircase(self.LEVELS, ramp=ramp)
+            r = _bd.fit_calibration(t, dc)
+            self.assertTrue(r.ok, f"ramp={ramp}: {r.reason}")
+            np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=3e-5,
+                                       err_msg=f"ramp={ramp}")
+
+    def test_extra_plateaus_closest_to_zero_are_kept(self):
+        extra = np.concatenate([[40e-3], self.LEVELS, [-25e-3]])
+        t, dc = _staircase(extra, seed=2)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(len(r.all_plateaus), 8)
+        np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=2e-5)
+
+    def test_selected_levels_are_time_ordered(self):
+        """Selection ranks by |value|, but the boxes are ticks 0..25 in the
+        order the operator stepped through them — i.e. time order."""
+        extra = np.concatenate([[40e-3], self.LEVELS, [-25e-3]])
+        t, dc = _staircase(extra, seed=2)
+        r = _bd.fit_calibration(t, dc)
+        times = [p.t0 for p in r.selected]
+        self.assertEqual(times, sorted(times))
+
+    def test_offset_trace(self):
+        """Real DC sits well away from 0 V (~16 mV on the IR setup)."""
+        lv = self.LEVELS + 16.5e-3
+        t, dc = _staircase(lv, seed=3)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, lv, atol=2e-5)
+
+    def test_too_few_plateaus_refused(self):
+        t, dc = _staircase(self.LEVELS[:3], seed=6)
+        r = _bd.fit_calibration(t, dc)
+        self.assertFalse(r.ok)
+        self.assertIn("need 6", r.reason)
+        self.assertEqual(r.levels_V, [])
+
+    def test_flat_trace_refused(self):
+        """An aborted scan is flat — it must not yield a calibration."""
+        t = np.arange(500) * 0.01
+        dc = 0.0165 + np.random.default_rng(7).normal(0, 2e-5, 500)
+        r = _bd.fit_calibration(t, dc)
+        self.assertFalse(r.ok)
+
+    def test_fragmented_trace_refused(self):
+        """Sawtooth, not a staircase: no holds at all.  Must refuse rather
+        than carve six look-alike levels out of the ramps."""
+        t = np.arange(4000) * 0.01
+        dc = 5e-3 * np.abs(((t / 2.0) % 2.0) - 1.0)
+        dc = dc + np.random.default_rng(9).normal(0, 2e-5, dc.size)
+        r = _bd.fit_calibration(t, dc)
+        self.assertFalse(r.ok)
+
+    def test_step_curve_breaks_between_plateaus(self):
+        """The overlay must not connect across holds — NaN separators."""
+        t, dc = _staircase(self.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        x, y = r.step_curve()
+        self.assertEqual(np.isnan(x).sum(), 6)
+        finite = y[np.isfinite(y)]
+        np.testing.assert_allclose(np.unique(np.round(finite, 12)).size, 6)
+
+    def test_filename_pattern(self):
+        self.assertTrue(_bd.is_time_calibration("103813_TIME_W_15_2e_calibration.h5"))
+        self.assertTrue(_bd.is_time_calibration(
+            "/a/b/151505_TIME_N37Cr_10_Ni_5__001_-Federica_calibration.h5"))
+        for bad in ("151610_TIME_W_15_2e_SOT_y.h5",     # not a calibration
+                    "123125_TIME_x_scan_y.h5",
+                    "calibration.h5",                    # no HHMMSS_TIME_
+                    "103813_SPATIAL_W_calibration.h5"):  # not a TIME scan
+            self.assertFalse(_bd.is_time_calibration(bad), bad)
+
+    def test_load_dc_time_roundtrip(self):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "103813_TIME_x_calibration.h5")
+        t_in, dc_in = _staircase(self.LEVELS)
+        with h5py.File(p, "w") as f:
+            g = f.create_group("data")
+            g.create_dataset("time", data=t_in)
+            g.create_dataset("DC", data=dc_in)
+        t, dc = _bd.load_dc_time(p)
+        self.assertEqual(t.size, t_in.size)
+        r = _bd.fit_file(p)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, self.LEVELS, atol=2e-5)
+
+    def test_load_rejects_file_without_dc(self):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "x.h5")
+        with h5py.File(p, "w") as f:
+            f.create_group("data").create_dataset("time", data=np.arange(5.0))
+        with self.assertRaises(ValueError):
+            _bd.load_dc_time(p)
+
+    def test_nan_samples_dropped(self):
+        import h5py, tempfile
+        p = os.path.join(tempfile.mkdtemp(), "n.h5")
+        t_in, dc_in = _staircase(self.LEVELS)
+        dc_in = dc_in.copy(); dc_in[::500] = np.nan      # partial/aborted rows
+        with h5py.File(p, "w") as f:
+            g = f.create_group("data")
+            g.create_dataset("time", data=t_in)
+            g.create_dataset("DC", data=dc_in)
+        t, dc = _bd.load_dc_time(p)
+        self.assertTrue(np.isfinite(dc).all())
+        self.assertLess(t.size, t_in.size)
+
+    def test_latest_h5_picks_newest(self):
+        import tempfile, time as _t
+        d = tempfile.mkdtemp()
+        for name in ("a.h5", "b.h5"):
+            with open(os.path.join(d, name), "w") as f:
+                f.write("x")
+            _t.sleep(0.01)
+        open(os.path.join(d, "notes.txt"), "w").close()
+        self.assertEqual(os.path.basename(_bd.latest_h5(d)), "b.h5")
+        self.assertIsNone(_bd.latest_h5(os.path.join(d, "nope")))
+
+
 class TestAppVersion(unittest.TestCase):
     """Samba_main window title carries the vX.YZ application version."""
 

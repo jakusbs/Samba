@@ -3870,3 +3870,88 @@ Word wrap is deliberately left at the Qt default (`WidgetWidth`). An early
 version set `NoWrap` for column alignment, which pushed long values — the
 sensor list, TANGO device paths — behind a horizontal scrollbar; wrapping
 costs nothing now that the panel is tall.
+
+---
+
+## 66. Recent Changes (August 2026) — BD Calibration "Fit & Import"
+
+Branch `claude/bd-fit-and-import` (127 tests). App version → **v13.09**.
+Both apps — `core/bd_calibration.py` is shared, and Cryo has the same
+`save_dir` / `plot1d` hooks.
+
+### What it does
+A **"⤓ Fit & Import"** button next to the "λ/2 Plate Calibration" header reads
+a calibration TIME scan and fills the six mV boxes automatically, instead of
+the operator transcribing them by hand.
+
+- **File choice**: looks in `<Dir>/<YYYYMMDD>/` (the Dir field at the top,
+  plus today's date folder — where scans are actually written). If the newest
+  `.h5` there matches `HHMMSS_TIME_…_calibration.h5` it is used directly;
+  otherwise a file dialog opens **in that folder** so the user picks one.
+- **Fit**: `/data/DC` (V) against `/data/time` (s), split into plateaus, each
+  level taken as the mean of the **last 25 %** of its plateau — the settled
+  part, right before the next transition.
+- **Import**: the six levels are written to the boxes **× 1000** (V → mV).
+  Values are only filled, never auto-saved: the operator reviews and presses
+  *Save calibration*.
+- **Plot**: the trace and the fitted levels are drawn in the existing **1D
+  Plot** tab (`Live1DWidget.show_static`), which sits beside the BD tab so the
+  fit is visible immediately. Skipped while a scan is running — the live plot
+  belongs to the measurement.
+
+### Selecting six out of more
+A sweep may contain more holds than tick positions. The six plateaus **closest
+to 0 V** are kept (the λ/2 sweep sits around the balanced-diode null, so a hold
+far off zero is a spurious excursion), and those six are then ordered **by
+time** — the order the operator stepped through the ticks, i.e. the order of
+the boxes.
+
+### Detection is flatness-based, not difference-based (important)
+The first implementation thresholded the sample-to-sample difference. That is
+wrong for this measurement: the plate is turned **by hand**, so a transition is
+a ramp spread over many samples whose per-sample change is the step height
+divided by the ramp length — below the noise floor for a realistic turn. The
+detector then walks straight through transitions and merges several ticks into
+one plateau. It appeared to work only because noise occasionally pushed a ramp
+sample over the threshold.
+
+Detection now marks a sample flat when the **peak-to-peak spread across a
+window** around it is consistent with noise alone; a window straddling a ramp
+always shows a large spread, however gradual the ramp. Supporting choices:
+- Noise scale from the **MAD** of the differences — the step edges cannot
+  inflate it, whereas a plain std would be dragged up by the very transitions
+  being looked for.
+- The threshold is **not** tied to the full data range: one spurious excursion
+  far off the null would otherwise raise the bar above the genuine ~mV tick
+  steps and swallow them.
+- A hold must be at least one window long, which stops the middle of a very
+  slow ramp being emitted as a run of tiny look-alike plateaus.
+
+### Refusing rather than guessing
+A wrong calibration silently rescales every later SOT result, so the fit
+refuses unless the trace really is a staircase: fewer than 6 plateaus, or more
+than 4 × 6 (fragmentation — transitions as slow as the holds). On refusal the
+boxes are **left untouched**, the trace is still plotted, and a dialog gives
+the reason with **Close** / **Open another file…**.
+
+### Structure
+Fitting lives in **`core/bd_fit.py`**, deliberately free of Qt and matplotlib
+so it is unit-testable in CI (numpy + h5py only); `Samba_main/bd_fit.py` and
+`Cryo/bd_fit.py` are the usual re-export shims. The panel keeps only the UI
+and calls `set_fit_context(dir_cb, plot_cb)`, wired by both main windows.
+
+### Tests / verification
+- `test_runner.py` +15 → 127: `TestBDStepFit` — six levels recovered to
+  <0.02 mV, V→mV conversion, gradual ramps of 6…300 samples, spurious plateaus
+  dropped, time ordering, offset traces (real DC sits ~16 mV), too-few / flat /
+  fragmented all refused, NaN rows dropped, filename pattern, newest-file pick.
+- Qt-stubbed run of the real panel + real matplotlib axes (27 checks, not
+  committed): auto-read vs dialog, dialog folder, cancel is a no-op, failure
+  leaves boxes untouched while still plotting, the two-button dialog and its
+  retry path, unreadable files, and `show_static` drawing data + overlay with
+  NaN breaks between plateaus.
+
+### Known limitation
+The five calibration files on the lab machine are short aborted runs with a
+flat DC, so the fit is validated against synthetic staircases only. It has not
+yet been checked against a real λ/2 sweep.
