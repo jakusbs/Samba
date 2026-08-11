@@ -2203,6 +2203,77 @@ class TestBDSymmetryTieBreak(unittest.TestCase):
             _bd.MAX_SPACING_CV)
 
 
+class TestSafeReadStringAttr(unittest.TestCase):
+    """safe_read must never turn a string attribute into its first character.
+
+    `float(raw[0]) if hasattr(raw, "__len__")` was written for SmarAct
+    position arrays, but a str also has __len__ — so the Keithley's string
+    `range` attribute read back as float(("20mA")[0]) == 2.0, and "100mA" as
+    1.0.  Plausible numbers that matched no range in the combo, which is what
+    made the panel report `range=2.0 (not selectable)` while the device was
+    plainly on 20mA.  String attributes must go through safe_read_str.
+    """
+
+    @staticmethod
+    def _hardware():
+        """Import the real core/hardware.py (the suite stubs `hardware`)."""
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "core", "hardware.py")
+        spec = importlib.util.spec_from_file_location("_hw_real", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    class _P:
+        def __init__(self, val): self.val = val
+        def read_attribute(self, attr):
+            r = MagicMock(); r.value = self.val; return r
+        def set_timeout_millis(self, ms): pass
+
+    def test_range_strings_are_not_truncated_to_a_number(self):
+        hw = self._hardware()
+        for s in ("0.0002mA", "0.002mA", "0.02mA", "0.2mA",
+                  "2mA", "20mA", "100mA"):
+            val, err = hw.safe_read(self._P(s), "range", timeout=None)
+            self.assertIsNone(
+                val, f"safe_read({s!r}) must not yield a number, got {val!r}")
+            self.assertIsNotNone(err, f"safe_read({s!r}) must report an error")
+
+    def test_safe_read_str_returns_the_whole_string(self):
+        hw = self._hardware()
+        val, err = hw.safe_read_str(self._P("20mA"), "range", timeout=None)
+        self.assertIsNone(err)
+        self.assertEqual(val, "20mA")
+
+    def test_numeric_string_still_converts(self):
+        """A device that reports a number as text must keep working."""
+        hw = self._hardware()
+        val, err = hw.safe_read(self._P("1.5"), "x", timeout=None)
+        self.assertIsNone(err)
+        self.assertAlmostEqual(val, 1.5)
+
+    def test_arrays_and_scalars_unaffected(self):
+        hw = self._hardware()
+        self.assertAlmostEqual(
+            hw.safe_read(self._P([3.5, 9.9]), "x", timeout=None)[0], 3.5)
+        self.assertAlmostEqual(
+            hw.safe_read(self._P(np.array([2.25])), "x", timeout=None)[0], 2.25)
+        self.assertAlmostEqual(
+            hw.safe_read(self._P(7.0), "x", timeout=None)[0], 7.0)
+
+    def test_panels_read_the_range_as_a_string(self):
+        """All three Keithley panel copies must use safe_read_str for range."""
+        root = os.path.dirname(os.path.abspath(__file__))
+        for rel in ("Samba_main/panels/hardware_panel.py",
+                    "Cryo/keithley_mixin.py",
+                    "Cryo/panels.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn("rng, e5 = safe_read_str(", src,
+                          f"{rel}: the range read must use safe_read_str")
+
+
 class TestDefaultsPanelLoadGuard(unittest.TestCase):
     """Setup Defaults must not echo `defaults_changed` while load() runs.
 

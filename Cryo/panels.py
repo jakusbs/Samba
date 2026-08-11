@@ -402,7 +402,7 @@ class HardwarePanel(QGroupBox):
         # The range is a memorized string attribute on the Keithley server, so
         # it survives a server restart and is the only trustworthy source for
         # the range the hardware is actually on.
-        rng, e5 = safe_read(p, s.get("keithley_attr_range")      or "range")
+        rng, e5 = safe_read_str(p, s.get("keithley_attr_range")  or "range")
         errs = [e for e in [e1, e2] if e]
         if errs:
             self._set_err(self.ks_status, errs[0][:60]); return
