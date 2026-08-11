@@ -3990,7 +3990,9 @@ too few plateaus) or were recorded with lock-in channels instead of DC (97).
 
 ## 67. Recent Changes (August 2026) — BD Fit Centring, Stale-Lock-in Auto-Pause, Keithley Range Readback
 
-Branch `claude/review-fixes-batch1` (143 tests). App version → **v13.12**.
+Branch `claude/bd-centring-lockin-fault-keithley-range` (147 tests), with the
+device-server half on TANGO_Devices `claude/zi-start-raises-on-fault`.
+App version → **v13.12**.
 Three user-reported items.
 
 ### BD fit: the six plateaus must straddle zero, not merely be evenly spaced
