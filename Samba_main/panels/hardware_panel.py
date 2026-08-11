@@ -23,7 +23,7 @@ class HardwarePanel(QGroupBox):
     # is not reliably delivered in PyQt6 without a context QObject on the thread.
     _zi_ok  = pyqtSignal(object, object, object)   # (tc, ord_, st)
     _zi_err = pyqtSignal(str)
-    _ks_ok  = pyqtSignal(object, object, object, object)  # (amp, frq, cpl, cur)
+    _ks_ok  = pyqtSignal(object, object, object, object, object)  # (amp, frq, cpl, cur, range)
     _ks_err = pyqtSignal(str)
     _mr_ok  = pyqtSignal(object, object)           # (magnet_current_A, relay_state)
 
@@ -261,8 +261,17 @@ class HardwarePanel(QGroupBox):
 
     # ── Keithley ──────────────────────────────────────────────────────────────
     def _read_keithley(self):
-        """Read Keithley parameters in a background thread (same rationale as _read_lockin)."""
+        """Read Keithley parameters in a background thread (same rationale as _read_lockin).
+
+        Attribute names come from the setup defaults rather than being
+        hardcoded, so a rig whose Keithley server names them differently is
+        read with the same names it is written with.
+        """
         s = self._setup(); dev = s.get("keithley_device", "")
+        a_amp = s.get("keithley_amplitude_attr")  or "amplitude"
+        a_frq = s.get("keithley_frequency_attr")  or "frequency"
+        a_cpl = s.get("keithley_compliance_attr") or "compliance"
+        a_rng = s.get("keithley_range_attr")      or "range"
         self._update_dev_labels()
         self.ks_status.setText("Reading…")
 
@@ -271,19 +280,23 @@ class HardwarePanel(QGroupBox):
             if conn_err:
                 self._ks_err.emit(conn_err)
                 return
-            amp, e1 = safe_read(p, "amplitude")
-            frq, e2 = safe_read(p, "frequency")
-            cpl, e3 = safe_read(p, "compliance")
+            amp, e1 = safe_read(p, a_amp)
+            frq, e2 = safe_read(p, a_frq)
+            cpl, e3 = safe_read(p, a_cpl)
             cur, e4 = safe_read(p, "current")
+            # The range is a memorized string attribute on the Keithley
+            # server, so it survives a server restart and is the only
+            # trustworthy source for what range the hardware is actually on.
+            rng, e5 = safe_read(p, a_rng)
             errs = [e for e in [e1, e2] if e]
             if errs:
                 self._ks_err.emit(errs[0][:60])
                 return
-            self._ks_ok.emit(amp, frq, cpl, cur)
+            self._ks_ok.emit(amp, frq, cpl, cur, None if e5 else rng)
 
         threading.Thread(target=_do, daemon=True).start()
 
-    def _apply_keithley_readback(self, amp, frq, cpl, cur):
+    def _apply_keithley_readback(self, amp, frq, cpl, cur, rng=None):
         """Apply Keithley readback values to the UI (must be called on the main thread)."""
         if amp is not None: self.amp_spin.setValue(amp)
         if frq is not None: self.freq_spin.setValue(frq)
@@ -292,11 +305,36 @@ class HardwarePanel(QGroupBox):
             self.current_rb.setText(f"{cur:.4g} mA")
         else:
             self.current_rb.setText("— mA")
+
+        rng_note = self._apply_range_readback(rng)
+
         parts = []
         if amp is not None: parts.append(f"amp={amp:.4g}")
         if frq is not None: parts.append(f"freq={frq:.4g}")
         if cpl is not None: parts.append(f"compl={cpl:.2f}V")
+        if rng_note:        parts.append(rng_note)
         self._set_ok(self.ks_status, "  ".join(parts))
+
+    def _apply_range_readback(self, rng) -> str:
+        """Select the device's reported range in the combo.
+
+        Returns a short note for the status line.  The combo offers only the
+        three ranges Samba uses, so a device sitting on one of the Keithley's
+        other ranges is reported in the status line instead of being silently
+        misrepresented as the combo's current selection.
+        """
+        if rng is None:
+            return "range=?"
+        rng = str(rng).replace("\x00", "").strip()
+        if not rng:
+            # Never written since the server started — say so rather than
+            # letting the combo's default imply a hardware state.
+            return "range=unset"
+        idx = self.range_combo.findText(rng)
+        if idx >= 0:
+            self.range_combo.setCurrentIndex(idx)
+            return f"range={rng}"
+        return f"range={rng} (not selectable)"
 
     # ── Individual-attribute writes (called by Enter on each spinbox) ──────────
     def _write_range(self):
@@ -359,7 +397,7 @@ class HardwarePanel(QGroupBox):
             self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p):
             self._set_sim(self.ks_status); return
-        # Write range first — even though it can't be read back, it can be set
+        # Range first: it bounds the amplitude the source will accept
         e1 = safe_write(p, "range",     self.range_combo.currentText())
         e2 = safe_write(p, "amplitude", self.amp_spin.value())
         e3 = safe_write(p, "frequency", self.freq_spin.value())

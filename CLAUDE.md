@@ -3985,3 +3985,191 @@ Run across all **294** calibration files under `Data_Samba_IR`: 7 fit (spread
 are refused, the great majority because they are short aborted scans (143 have
 too few plateaus) or were recorded with lock-in channels instead of DC (97).
 `102928` reproduces the expected `43.0, 21.6, 0.9, −20.0, −41.8, −63.6 mV`.
+
+---
+
+## 67. Recent Changes (August 2026) — BD Fit Centring, Stale-Lock-in Auto-Pause, Keithley Range Readback
+
+Branch `claude/review-fixes-batch1` (143 tests). App version → **v13.12**.
+Three user-reported items.
+
+### BD fit: the six plateaus must straddle zero, not merely be evenly spaced
+`Fit & Import` picked a set of levels that was not symmetric about zero.
+Reproduced on `20260811/124802_TIME_Gd0_25Pt0_75_8_CoFe_3__ETH12_calibration_BD.h5`:
+the operator stepped through **8** uniformly spaced holds (~37 mV apart, +95.6
+down to −163.6 mV) but there are only 6 tick positions, so several overlapping
+runs of six are all evenly spaced. §66's rule took the single most uniform run
+and the candidates were separated by a hair:
+
+| run | levels (mV) | step CV | span centre |
+|---|---|---|---|
+| plateaus 1–6 | +95.6 … −89.9 | 1.9 % | **+2.8 mV** |
+| plateaus 2–7 *(old pick)* | +59.1 … −127.3 | 1.8 % | −34.1 mV |
+
+Step uniformity cannot resolve this — 0.1 % of CV decided it. The physical
+constraint that does: **the λ/2 sweep is taken about the balance point, where
+the balanced diode reads zero**, so the tick levels span roughly +X to −X.
+`fit_calibration` now scores every consecutive run on uniformity as before,
+then, **among the runs that are comparably uniform**, takes the one whose span
+is centred closest to zero (`_midpoint`, new `CV_TIE_FRAC = 1.5` /
+`CV_TIE_ABS = 0.02`).
+
+Both criteria are load-bearing and the order matters:
+- **Uniformity first.** Symmetry alone picks the pre-/post-sweep parking holds
+  — that is why the original "six values closest to 0 V" rule was removed in
+  §66. Those holds break the even spacing, so the uniformity filter excludes
+  them *before* symmetry is consulted. The §66 counter-example (`102928`, sweep
+  +43 → −63.6 with parking holds at +37/−5, span centre −10.3 mV) has only one
+  uniform run and is therefore untouched — kept as a unit test.
+- **The tie tolerance is clamped** to `MAX_SPACING_CV` and always includes the
+  most-uniform run, so a run admitted only by the tolerance can never then fail
+  the uniformity bar and turn a working fit into a refusal.
+
+`FitResult` gained `n_candidates` (how many equally-uniform runs the trace
+offered) and `midpoint_mV`. When `n_candidates > 1` the panel says so —
+"3 evenly spaced runs of 6 were possible; took the one centred on zero
+(centre +2.84 mV)" — because the operator is the one who knows how far the
+plate was actually stepped. Values are still only *filled*, never auto-saved.
+
+**Validated across all 738 calibration files** under the three `Data_Samba_*`
+roots: 30 fit, of which **16 changed selection and 14 were identical; 0 files
+stopped fitting and 0 started**. Every one of the 16 moved the span centre
+toward zero (worst cases 94.7 → 2.4, 111.7 → 15.9, 104.0 → 23.6 mV) at a cost
+of at most 1.5× in step CV (e.g. 1.76 % → 1.96 %, both clean staircases). So
+**over half of the files that fit were previously getting the wrong six
+levels** — this was not a single-file quirk.
+
+### A lock-in that lost its instrument no longer poisons the scan silently
+A ZI lock-in dropped its MFLI connection mid-measurement; the TANGO device
+stayed reachable but showed an error, and **the scan ran to completion**
+recording frozen values. Root cause is a contract that was only half
+implemented. `ThreadZI2.run()` already ends in `FAULT` on an acquisition
+failure, with the comment *"a clean RUNNING->ON transition after a failed
+acquisition makes the scan engine read stale values as a successful point"* —
+but the scan engine never looked at the state as part of the reading:
+
+1. `Start()` finds the device in `FAULT`, takes its `else` branch, writes
+   `warn_stream("Thread is already running.")` and **returns successfully** —
+   no exception reaches the client, so §23's trigger-recovery never fires.
+2. Phase A waits 200 ms for `RUNNING`, never sees it, and — before this change
+   — **silently ignored the timeout**.
+3. Phase B sees `FAULT ∉ _RUNNING` and instantly calls the device "done".
+4. The read succeeds, returning the server's cached `_x[i]` — the previous
+   point's values. `ok=True`, point recorded. Repeat to the end of the scan.
+
+`core/scan/runner.py` — new `_unhealthy_states()` (FAULT/UNKNOWN/ALARM/DISABLE,
+resolved by name so a DevState enum lacking any of them degrades gracefully)
+and three closures in `_do_acquire`:
+- **Phase A timeout** → if the device is in an unhealthy state (or its state
+  cannot be read) the point fails. If it is still `ON` the timeout is only
+  logged: both ZI and the C++ `DoubleInBeckhoffAverage` set `RUNNING`
+  *synchronously inside* the command handler, but a very short integration can
+  legitimately complete inside the 2 ms poll gap, and a false positive would
+  cost a retry rather than a warning.
+- **Phase B terminal state** unhealthy → point fails (thread crashed into
+  FAULT).
+- **Phase B timeout** → point fails. Supersedes §42's deliberate
+  log-and-proceed: a device that never left RUNNING inside `move_timeout` did
+  not finish integrating, so what it returns is not this point's value. The log
+  line says to raise the Timeout if the device is merely slow.
+- **A non-finite value from a *successful* read** now also fails the point; it
+  previously left `ok=True`, so a NaN was recorded as a good measurement.
+
+All of these feed the existing `_acquire_point_retry` machinery — 5 attempts
+with a proxy refresh, then auto-pause on the same point, naming the device.
+
+**TANGO_Devices** (branch `claude/scanlist-setup-lock`, **needs redeploy** —
+the Samba-side fix above works against the currently deployed servers on its
+own): all 4 copies of the ZI/ZI2 servers now **raise** from `Start()` when the
+device is in any state other than `ON`/`RUNNING` instead of returning quietly,
+and all 4 thread copies write **NaN** rather than `0.0` for a demodulator whose
+poll returned no samples — `0` is indistinguishable from a genuinely nulled
+balanced-diode signal, which is exactly the measurement being made.
+
+### Keithley range (and the amplitude question)
+The Current Source range combo always came up at its default `2mA` after a
+restart, even after pressing Read. `_read_keithley` never read the attribute at
+all, and the comment in `_write_keithley` asserted it "can't be read back" —
+`range` is in fact a `READ_WRITE`, `memorized=True, hw_memorized=True` string
+attribute on `PyKeithley`/`PyKeithley2`, so it survives a *server* restart and
+is the one trustworthy source for the hardware's range.
+
+Read and applied in all three panel copies — `Samba_main/panels/hardware_panel.py`
+(async, `_ks_ok` gained a 5th argument), `Cryo/keithley_mixin.py`
+(`CryoHardwarePanel`) and `Cryo/panels.py` (`HardwarePanel`, synchronous) —
+via a shared-by-convention `_apply_range_readback`. It runs on the startup
+`_initial_hw_read` and every Trajectory/Scanlist tab switch, and §50's panel
+mirroring propagates it to the other tab. All four attribute names now come
+from the setup keys (`keithley_range_attr` / Cryo `keithley_attr_range`, …)
+instead of being hardcoded.
+
+Honest about what it does not know, rather than letting the combo imply a
+state: `range=unset` when the server returns `""` (never written since it
+started), `range=<v> (not selectable)` for one of the Keithley's other four
+ranges that Samba's combo does not offer, `range=?` when the read fails (old
+server without the attribute) — in every one of those the combo is left alone.
+Null-padded TANGO strings are stripped (§59).
+
+**Amplitude needs no code change and should not get one.** It is already read,
+but `amplitude` is the only Keithley attribute deliberately *not* memorized, so
+after a **Keithley server** restart it reads `0` — which is the truth:
+`init_device` sends `SOUR:WAVE:ABOR` + `OUTP OFF`, so no current is flowing.
+Making it `hw_memorized=True` like the others would make TANGO replay the
+remembered value at init, and `amplitude.write` calls `WAVEOFF()` + `SINEWAVE()`
+— i.e. the server would **start driving current through the sample on startup**.
+Frequency and compliance are memorized and were therefore always correct, which
+matches the report. Note the server only ever `WriteLine`s; it never queries the
+instrument, so every one of these attributes is a cache of the last write.
+
+### Cryo Setup Defaults echoed a half-loaded panel back into the setup (and saved it)
+Chasing "the Cryo `keithley_device` is a lock-in path" turned up a live config
+corruptor, not a stale value. `Cryo/defaults_panel.py` never had the `_loading`
+guard that §37 gave Samba_main's `setup_defaults.load()`:
+
+1. `SetupDefaultsPanel.load()` sets widgets top-to-bottom. The `recent_window`
+   spinbox (§64) is near the **top**; the Keithley device combo is ~25 lines
+   **below** it.
+2. `recent_window.valueChanged` was wired straight to `defaults_changed.emit()`,
+   so whenever the stored value differed from the spinbox's construction default
+   the signal fired **mid-load**.
+3. `CryoMainWindow._on_defaults_changed` responds with
+   `setup.update(self.defaults_panel.get_values())` **and `_safe_save()`** — so a
+   panel that was only half restored got written into the setup and to disk.
+   Every widget below the emitter still held its construction default: the
+   Keithley combo sat on **registry index 0**, which on this machine is the
+   `ZI2Samba` lock-in.
+
+Fixed with the §37 pattern: `load()` → `_loading = True` / `_load()` /
+`finally _loading = False`, and **all seven** emit sites funnelled through a new
+`_emit_changed()` that consults the flag. Four of them were signal-to-signal
+connections (`row.changed.connect(self.defaults_changed)`), which cannot check a
+flag at all — that is why the funnel exists rather than a per-widget
+`blockSignals`.
+
+Verified deterministically against a **copy** of the real config with
+`SAMBA_CONFIG_DIR` and a seeded `recent_window` mismatch: pre-fix 1 emit during
+load and `keithley_device` → `hpp-N42/measure/ZI2Samba` in memory *and on disk*;
+post-fix 0 emits and the correct path everywhere.
+
+**Samba_main is not affected** — its `_on_changed` already checks `_loading`, and
+its `_entries()` helper falls back to the whole registry when no device matches
+the type filter (`return matched or list(reg)`), so a Keithley registered under
+type `"other"` is still offered. Green and IR both round-trip `keithley_device`
+correctly against the live registry.
+
+`test_runner.py` +4 → 147: `TestDefaultsPanelLoadGuard` asserts, for **both**
+apps' defaults panels, that `load()` sets and clears the guard, that the funnel
+checks it, that nothing is wired straight to `defaults_changed`, and that
+exactly one `.emit()` exists. Deliberately source-level: the failure mode is a
+*new* widget being wired straight to the signal, which no behavioural test of
+today's widgets would catch, and Qt is stubbed in this suite.
+
+**Lesson for diagnostics: never construct a main window against the live
+`~/.config/moke_scan`.** Doing so while investigating this triggered the very
+bug under investigation and saved a drifted `dc_monitor_device`/`dc_monitor_attr`
+(`Hysteresis_longi`/`field` → `ZI2Samba`/`x1`) into the user's `Cryo.json`, plus
+registry-driven relabelling of disabled sensor rows. Enabled sensors and all
+device paths were unaffected; the two monitor keys were restored by hand.
+Cryo already honoured `SAMBA_CONFIG_DIR`; **`Samba_main/config.py` was given the
+same override in this batch** (it previously hardcoded the path), so both apps
+can now be pointed at a throwaway copy for any diagnostic run.

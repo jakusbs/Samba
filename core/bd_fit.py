@@ -47,6 +47,15 @@ MAX_SPACING_CV = 0.20
 # 250-420 sigma per step; the flat ones, 0.5-9.
 MIN_STEP_SIGMA = 20.0
 
+# When the operator steps past the six tick positions, several consecutive runs
+# are all evenly spaced and uniformity alone cannot say which six are the
+# ticks: on a real file the two best candidates scored 1.8 % and 1.9 %.  Runs
+# within this factor (or this absolute margin, whichever is looser) of the best
+# CV are therefore treated as equally uniform, and the tie is broken on
+# symmetry about zero — see _midpoint.
+CV_TIE_FRAC = 1.5
+CV_TIE_ABS = 0.02
+
 # Calibration TIME-scan filenames look like
 #   103813_TIME_W_15_2e_calibration.h5
 # i.e. HHMMSS, the TIME scan marker, then a name ending in "calibration".
@@ -205,10 +214,11 @@ class FitResult:
     """
 
     __slots__ = ("ok", "reason", "levels_V", "selected", "all_plateaus",
-                 "t", "dc", "path", "spacing_cv", "mean_step_V")
+                 "t", "dc", "path", "spacing_cv", "mean_step_V", "n_candidates")
 
     def __init__(self, ok, reason, levels_V, selected, all_plateaus,
-                 t, dc, path="", spacing_cv=float("nan"), mean_step_V=0.0):
+                 t, dc, path="", spacing_cv=float("nan"), mean_step_V=0.0,
+                 n_candidates=1):
         self.ok = ok
         self.reason = reason
         self.levels_V = levels_V          # list[float], time-ordered
@@ -218,6 +228,17 @@ class FitResult:
         self.path = path
         self.spacing_cv = spacing_cv      # step uniformity of the chosen run
         self.mean_step_V = mean_step_V    # mean step between ticks [V]
+        # How many equally-uniform runs of n_levels the trace offered.  >1
+        # means the operator held at more positions than there are ticks and
+        # the symmetry tie-break decided which six were used — worth saying
+        # out loud, because the operator is the one who knows.
+        self.n_candidates = n_candidates
+
+    @property
+    def midpoint_mV(self) -> float:
+        """Centre of the chosen span in mV (≈0 for a sweep about the null)."""
+        lv = self.levels_mV
+        return (max(lv) + min(lv)) / 2.0 if lv else float("nan")
 
     @property
     def levels_mV(self) -> List[float]:
@@ -267,6 +288,20 @@ def merge_split_holds(plateaus: List[Plateau],
     return out
 
 
+def _midpoint(values: List[float]) -> float:
+    """Centre of a run's span: 0 when the sweep straddles zero symmetrically.
+
+    The λ/2 sweep is taken about the balance point, where the balanced diode
+    reads zero, so the tick levels run from roughly +X to −X and their span is
+    centred on zero.  This is the physical fact that resolves which six of a
+    longer uniform staircase are the tick positions — the operator often steps
+    past them, and step uniformity then cannot tell the candidates apart.
+    """
+    if not values:
+        return float("inf")
+    return (max(values) + min(values)) / 2.0
+
+
 def _spacing_cv(values: List[float]) -> Tuple[float, float]:
     """(coefficient of variation, mean step) of successive differences.
 
@@ -289,16 +324,22 @@ def fit_calibration(t: np.ndarray, dc: np.ndarray, path: str = "",
     """Fit *n_levels* plateau levels out of a staircase DC trace.
 
     A recording usually contains more holds than tick positions: the operator
-    parks the plate before starting and again after finishing, and those
-    holds sit at arbitrary levels.  The tick positions are instead recognised
-    by being **consecutive in time** and **evenly spaced in value** — turning
-    the plate by a fixed tick increment changes the signal by a nearly
-    constant amount.  So every run of *n_levels* neighbouring plateaus is
-    scored by how uniform its steps are, and the most uniform run wins.
+    parks the plate before starting and again after finishing, and often steps
+    past the six ticks.  The tick positions are recognised by being
+    **consecutive in time** and **evenly spaced in value** — turning the plate
+    by a fixed tick increment changes the signal by a nearly constant amount.
+    Every run of *n_levels* neighbouring plateaus is scored on how uniform its
+    steps are; among the runs that are comparably uniform, the one whose span
+    is **centred on zero** wins, because the sweep is taken about the balance
+    point where the balanced diode reads zero.
 
-    (An earlier rule kept the plateaus closest to 0 V.  On real data that
-    picks the pre- and post-sweep parking holds and drops genuine ticks —
-    the sweep is not centred on zero.)
+    Both criteria are needed.  Uniformity alone cannot choose between the
+    overlapping runs of a staircase longer than six holds: on a real file the
+    two candidates scored 1.8 % and 1.9 %, and the 1.8 % one was the wrong six
+    (span centred at −34 mV instead of +3 mV).  Symmetry alone is worse still —
+    it picks the parking holds, which is why an earlier "keep the plateaus
+    closest to 0 V" rule was removed; those holds break the even spacing and
+    are now excluded by the uniformity filter before symmetry is consulted.
     """
     found = detect_plateaus(t, dc, tail_frac=tail_frac)
     plateaus = merge_split_holds(found)
@@ -320,17 +361,35 @@ def fit_calibration(t: np.ndarray, dc: np.ndarray, path: str = "",
             f"{n_levels}-step staircase (transitions as slow as the holds?)",
             [], [], found, t, dc, path)
 
-    best_cv, best_step, best = float("inf"), 0.0, None
+    # Score every consecutive run on step uniformity …
+    runs = []
     for i in range(len(plateaus) - n_levels + 1):
         win = plateaus[i:i + n_levels]
-        cv, mean = _spacing_cv([p.value for p in win])
-        if cv < best_cv:
-            best_cv, best_step, best = cv, mean, win
+        vals = [p.value for p in win]
+        cv, mean = _spacing_cv(vals)
+        if np.isfinite(cv):
+            runs.append((cv, mean, abs(_midpoint(vals)), win))
 
-    if best is None or not np.isfinite(best_cv):
+    if not runs:
         return FitResult(False,
                          "no run of evenly spaced plateaus found",
                          [], [], found, t, dc, path)
+
+    # … then, among the runs that are comparably uniform, take the one whose
+    # span is centred closest to zero.  With more holds than tick positions
+    # several runs are evenly spaced and the most uniform one can be the wrong
+    # six by a fraction of a percent; the sweep being symmetric about the
+    # balance point is the stronger physical constraint.
+    min_cv = min(r[0] for r in runs)
+    tol = max(min_cv * CV_TIE_FRAC, CV_TIE_ABS)
+    # Never let the tie-break reach past the uniformity bar (a run admitted
+    # only by the tie tolerance must not then fail the MAX_SPACING_CV check
+    # that the most-uniform run would have passed), and always keep the
+    # most-uniform run itself in the running.
+    tol = max(min(tol, MAX_SPACING_CV), min_cv)
+    tied = [r for r in runs if r[0] <= tol]
+    n_tied = len(tied)
+    best_cv, best_step, _best_mid, best = min(tied, key=lambda r: (r[2], r[0]))
     sigma = _noise_sigma(dc)
     if sigma > 0.0 and abs(best_step) < MIN_STEP_SIGMA * sigma:
         return FitResult(
@@ -349,7 +408,7 @@ def fit_calibration(t: np.ndarray, dc: np.ndarray, path: str = "",
 
     return FitResult(True, "", [p.value for p in best], list(best),
                      found, t, dc, path, spacing_cv=best_cv,
-                     mean_step_V=best_step)
+                     mean_step_V=best_step, n_candidates=n_tied)
 
 
 def fit_file(path: str, n_levels: int = N_LEVELS,

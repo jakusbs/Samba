@@ -132,6 +132,7 @@ class KeithleyMixin:
         frq_a = s.get("keithley_attr_frequency",  "frequency")
         cpl_a = s.get("keithley_attr_compliance", "compliance")
         cur_a = s.get("keithley_attr_current",    "current")
+        rng_a = s.get("keithley_attr_range",      "range")
 
         def _do():
             p, conn_err = fresh_proxy(dev)
@@ -142,15 +143,19 @@ class KeithleyMixin:
             frq, e2 = safe_read(p, frq_a)
             cpl, e3 = safe_read(p, cpl_a)
             cur, e4 = safe_read(p, cur_a)
+            # The range is a memorized string attribute on the Keithley
+            # server, so it survives a server restart and is the only
+            # trustworthy source for the range the hardware is actually on.
+            rng, e5 = safe_read(p, rng_a)
             errs = [e for e in [e1, e2] if e]
             if errs:
                 self._ks_err.emit(errs[0][:60])
                 return
-            self._ks_ok.emit(amp, frq, cpl, cur)
+            self._ks_ok.emit(amp, frq, cpl, cur, None if e5 else rng)
 
         threading.Thread(target=_do, daemon=True).start()
 
-    def _apply_keithley_readback(self, amp, frq, cpl, cur):
+    def _apply_keithley_readback(self, amp, frq, cpl, cur, rng=None):
         if amp is not None: self.amp_spin.setValue(amp)
         if frq is not None: self.freq_spin.setValue(frq)
         if cpl is not None: self.compl_spin.setValue(cpl)
@@ -158,11 +163,36 @@ class KeithleyMixin:
             self.current_rb.setText(f"{cur:.4g} mA")
         else:
             self.current_rb.setText("— mA")
+
+        rng_note = self._apply_range_readback(rng)
+
         parts = []
         if amp is not None: parts.append(f"amp={amp:.4g}")
         if frq is not None: parts.append(f"freq={frq:.4g}")
         if cpl is not None: parts.append(f"compl={cpl:.2f}V")
+        if rng_note:        parts.append(rng_note)
         set_ok(self.ks_status, "  ".join(parts))
+
+    def _apply_range_readback(self, rng) -> str:
+        """Select the device's reported range in the combo.
+
+        Returns a short note for the status line.  The combo offers only the
+        ranges Samba uses, so a device sitting on one of the Keithley's other
+        ranges is reported in the status line instead of being silently
+        misrepresented as the combo's current selection.
+        """
+        if rng is None:
+            return "range=?"
+        rng = str(rng).replace("\x00", "").strip()
+        if not rng:
+            # Never written since the server started — say so rather than
+            # letting the combo's default imply a hardware state.
+            return "range=unset"
+        idx = self.range_combo.findText(rng)
+        if idx >= 0:
+            self.range_combo.setCurrentIndex(idx)
+            return f"range={rng}"
+        return f"range={rng} (not selectable)"
 
     def _write_range(self):
         s = self._setup(); dev = s.get("keithley_device", "")

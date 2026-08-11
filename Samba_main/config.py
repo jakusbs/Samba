@@ -2,7 +2,7 @@
 config.py — Samba v3
 Constants, hardware defaults, scan config schema, and JSON persistence.
 """
-import copy, json, logging, shutil
+import copy, json, logging, os, shutil
 from pathlib import Path
 from typing import Dict, List, TypedDict, Optional
 
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.11"
+APP_VERSION = "13.12"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 8
@@ -276,7 +276,12 @@ def make_default_setup(name: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Config persistence
 # ─────────────────────────────────────────────────────────────────────────────
-CONFIG_DIR = Path.home() / ".config" / "moke_scan"
+# SAMBA_CONFIG_DIR redirects the whole config tree, as in Cryo/config.py.
+# Set it when driving the app for diagnostics so a run cannot write to the
+# operator's live ~/.config/moke_scan.
+_cfg_env   = os.environ.get("SAMBA_CONFIG_DIR", "")
+CONFIG_DIR = (Path(_cfg_env).expanduser() if _cfg_env
+              else Path.home() / ".config" / "moke_scan")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Versioned config migrations

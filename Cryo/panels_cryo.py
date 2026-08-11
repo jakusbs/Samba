@@ -36,7 +36,7 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
     # Signals for thread-safe cross-thread UI updates.
     _zi_ok  = pyqtSignal(object, object, object)        # (tc, ord_, st)
     _zi_err = pyqtSignal(str)
-    _ks_ok  = pyqtSignal(object, object, object, object) # (amp, frq, cpl, cur)
+    _ks_ok  = pyqtSignal(object, object, object, object, object) # (amp, frq, cpl, cur, range)
     _ks_err = pyqtSignal(str)
     _ad_ok  = pyqtSignal(object, object, object, object, object)  # fld,tmp,vti,mgt,err
     _ad_err = pyqtSignal(str)

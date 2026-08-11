@@ -339,6 +339,105 @@ class TestTriggerRecovery(unittest.TestCase):
                          "Counter must reset to 0 after successful recovery")
 
 
+class TestUnhealthyDeviceFailsPoint(unittest.TestCase):
+    """
+    A lock-in that has lost its instrument connection stays reachable over
+    TANGO: ZI/ZI2 Start() silently no-ops when the device is not ON (it only
+    warn_streams "Thread is already running"), the state never becomes
+    RUNNING, and attribute reads keep answering with the CACHED values of the
+    last successful integration.  Every individual call succeeds, so the scan
+    used to record a full file of frozen, plausible-looking data.
+    """
+
+    def _faulted(self, read_val=7.77):
+        class Faulted(InstantProxy):
+            """Reachable, answers reads, but permanently in FAULT."""
+            def command_inout_asynch(self, cmd, *a):
+                pass                      # no exception, and no integration
+            def command_inout(self, cmd, *a):
+                pass
+            def state(self):
+                return 'FAULT'
+        return Faulted(read_val=read_val)
+
+    def test_faulted_device_fails_point_with_nan(self):
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        devp         = {dev: self._faulted()}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 5.0}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+
+        self.assertFalse(ok, "A device in FAULT must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']),
+                        "Stale cached value must be replaced by NaN, "
+                        "never recorded as a measurement")
+        self.assertIn(dev, r._last_bad_devs,
+                      "Auto-pause message must name the faulted device")
+
+    def test_faulted_device_stays_in_trigger_devs(self):
+        """It must keep being triggered so a Reconnect in Jive recovers it."""
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        trigger_devs = {dev: 'Start'}
+        _acquire(r, {dev: self._faulted()},
+                 {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]},
+                 trigger_devs, {'move_timeout': 5.0})
+        self.assertIn(dev, trigger_devs)
+
+    def test_healthy_device_unaffected(self):
+        """The guard must not fire on a normal acquisition."""
+        r = _make_runner()
+        devp, dev_sensors, trigger_devs, cfg = _std_args(read_val=2.5)
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(vals['ZI x1'], 2.5)
+        self.assertEqual(r._last_bad_devs, [])
+
+    def test_stuck_running_times_out_and_fails_point(self):
+        """
+        A device whose acquisition thread died without resetting the state
+        stays RUNNING forever.  Phase B used to log the timeout and read
+        anyway — an unfinished integration is not this point's value.
+        """
+        r   = _make_runner()
+        dev = 'dev://zi1'
+
+        class StuckRunning(InstantProxy):
+            def state(self):
+                return 'RUNNING'
+
+        devp         = {dev: StuckRunning(read_val=1.0)}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 0.05}     # keep the test fast
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+
+        self.assertFalse(ok, "Phase-B timeout must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']))
+        self.assertIn(dev, r._last_bad_devs)
+
+    def test_nan_from_successful_read_fails_point(self):
+        """
+        A device that reports NaN (lock-in poll returned no samples) has not
+        measured anything, even though the read call succeeded.
+        """
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        devp         = {dev: InstantProxy(read_val=float('nan'))}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs,
+                                {'move_timeout': 5.0})
+
+        self.assertFalse(ok, "A NaN reading must not count as a good point")
+        self.assertIn(dev, r._last_bad_devs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Per-point retry loop (the logic in run() that calls _do_acquire)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2028,6 +2127,148 @@ class TestBDStepFit(unittest.TestCase):
         open(os.path.join(d, "notes.txt"), "w").close()
         self.assertEqual(os.path.basename(_bd.latest_h5(d)), "b.h5")
         self.assertIsNone(_bd.latest_h5(os.path.join(d, "nope")))
+
+
+class TestBDSymmetryTieBreak(unittest.TestCase):
+    """Choosing WHICH six of a longer uniform staircase are the tick positions.
+
+    The operator often steps past the six ticks, leaving several overlapping
+    runs of six that are all evenly spaced.  Step uniformity then cannot tell
+    them apart — on the real file 20260811/124802 the two candidates scored
+    1.8 % and 1.9 %, and the 1.8 % winner was the wrong six.  The λ/2 sweep is
+    taken about the balance point, where the balanced diode reads zero, so the
+    tick levels straddle zero; that is the tie-breaker.
+    """
+
+    def test_centred_run_wins_over_marginally_more_uniform_one(self):
+        """Reproduces 124802: 8 uniform holds, the centred six must win."""
+        levels = np.array([95.59, 59.14, 22.36, -14.06, -52.39,
+                           -89.90, -127.33, -163.61]) * 1e-3
+        t, dc = _staircase(levels, hold=250, ramp=80, noise=2e-5, seed=7)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, levels[:6], atol=5e-5)
+        self.assertLess(abs(r.midpoint_mV), 10.0,
+                        f"chosen span must straddle zero, got "
+                        f"{r.midpoint_mV:+.2f} mV")
+        self.assertGreater(r.n_candidates, 1,
+                           "the ambiguity must be reported to the operator")
+
+    def test_offcentre_sweep_still_fits(self):
+        """A sweep genuinely not centred on zero must not be distorted.
+
+        Only one run is evenly spaced here (the parking holds break the
+        spacing), so symmetry must not be allowed to pull the selection away
+        from it — this is the 102928 case that killed the old
+        'six values closest to zero' rule.
+        """
+        ticks = np.array([43.0, 21.6, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        levels = np.concatenate(([37.0e-3], ticks, [-5.0e-3]))
+        t, dc = _staircase(levels, hold=250, ramp=60, noise=2e-5, seed=3)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, ticks, atol=5e-5)
+
+    def test_uniformity_still_dominates_a_badly_uneven_run(self):
+        """A perfectly centred but unevenly spaced run must not win.
+
+        Symmetry only breaks ties between comparably uniform runs; it can
+        never promote a run that is not a staircase.
+        """
+        # A clean staircase far from zero, then a wildly uneven set of holds
+        # that happens to be centred on zero.  The uneven group must not
+        # continue the 10 mV spacing, or it would extend the staircase and
+        # legitimately offer a more centred uniform run.
+        good = np.array([100.0, 90.0, 80.0, 70.0, 60.0, 50.0]) * 1e-3
+        uneven = np.array([-39.0, 35.0, -36.0, 2.0, -40.0, 38.0]) * 1e-3
+        t, dc = _staircase(np.concatenate((good, uneven)),
+                           hold=250, ramp=60, noise=2e-5, seed=11)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, good, atol=5e-5)
+
+    def test_single_candidate_reports_no_ambiguity(self):
+        t, dc = _staircase(TestBDStepFit.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.n_candidates, 1)
+
+    def test_tie_tolerance_never_exceeds_the_uniformity_bar(self):
+        """A run admitted only by the tie tolerance must still pass
+        MAX_SPACING_CV, so the tie-break can never turn a good fit into a
+        refusal."""
+        self.assertLessEqual(
+            max(min(_bd.MAX_SPACING_CV * _bd.CV_TIE_FRAC, _bd.CV_TIE_ABS),
+                _bd.MAX_SPACING_CV),
+            _bd.MAX_SPACING_CV)
+
+
+class TestDefaultsPanelLoadGuard(unittest.TestCase):
+    """Setup Defaults must not echo `defaults_changed` while load() runs.
+
+    The main windows respond to that signal by merging get_values() into the
+    setup dict and SAVING it.  Fired mid-load it captures a half-restored
+    panel: every widget after the one that emitted still holds the previous
+    setup's state or its construction default.  Observed damage was Cryo's
+    `keithley_device` being overwritten with the first device-registry entry
+    (a lock-in) and persisted to disk, because the Keithley combo is restored
+    further down load() than the spinbox that fired.
+
+    Checked at source level: the failure mode is someone wiring a NEW widget
+    straight to `defaults_changed`, which no behavioural test of today's
+    widgets would notice.  Qt is stubbed in this suite, so the panels
+    themselves cannot be instantiated here.
+    """
+
+    PANELS = [
+        ("Cryo/defaults_panel.py", "_emit_changed"),
+        ("Samba_main/panels/setup_defaults.py", "_on_changed"),
+    ]
+
+    def _src(self, rel):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_load_sets_the_loading_guard(self):
+        for rel, _funnel in self.PANELS:
+            src = self._src(rel)
+            self.assertIn("self._loading = True", src,
+                          f"{rel}: load() must set the _loading guard")
+            self.assertIn("self._loading = False", src,
+                          f"{rel}: the guard must be cleared again")
+
+    def test_funnel_consults_the_guard(self):
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            i = src.index(f"def {funnel}(")
+            body = src[i:i + 600]
+            self.assertIn("if not self._loading:", body,
+                          f"{rel}: {funnel}() must check _loading before emitting")
+
+    def test_no_widget_is_wired_straight_to_defaults_changed(self):
+        """Every emit must route through the funnel.
+
+        A signal-to-signal connection (`w.changed.connect(self.defaults_changed)`)
+        or a `lambda: self.defaults_changed.emit()` cannot consult the guard.
+        """
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            bad = [ln.strip() for n, ln in enumerate(src.splitlines(), 1)
+                   if ".connect(self.defaults_changed)" in ln
+                   or ("defaults_changed.emit()" in ln
+                       and "lambda" in ln)]
+            self.assertEqual(bad, [], f"{rel}: wire these through {funnel}(): {bad}")
+
+    def test_only_the_funnel_emits(self):
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            emits = [n for n, ln in enumerate(src.splitlines(), 1)
+                     if "self.defaults_changed.emit()" in ln]
+            self.assertEqual(
+                len(emits), 1,
+                f"{rel}: defaults_changed should be emitted only inside "
+                f"{funnel}(), found {len(emits)} emit(s) at lines {emits}")
 
 
 class TestAppVersion(unittest.TestCase):

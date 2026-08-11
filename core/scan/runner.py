@@ -240,6 +240,26 @@ TRIGGER_START_GUARD_MS = 200
 MIN_LOCKIN_SETTLING_MS = 50
 
 
+def _unhealthy_states() -> set:
+    """States in which a sensor device cannot have produced a fresh reading.
+
+    A device that answers attribute reads while in one of these states hands
+    back the CACHED values of its last successful integration — the ZI/ZI2
+    acquisition thread deliberately ends in FAULT after a failed acquisition
+    for exactly this reason ("a clean RUNNING->ON transition after a failed
+    acquisition makes the scan engine read stale values as a successful
+    point").  The engine must therefore treat the state as part of the
+    reading, not just as a completion signal.
+    """
+    if not TANGO_AVAILABLE:
+        return set()
+    # Resolved by name so a DevState enum missing any of these (or a test
+    # stub) degrades to the states it does have instead of raising.
+    return {s for s in (getattr(tango.DevState, n, None)
+                        for n in ("FAULT", "UNKNOWN", "ALARM", "DISABLE"))
+            if s is not None}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ScanRunner — pure scan logic, no Qt dependencies
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1577,6 +1597,7 @@ class ScanRunner:
         # Phase A — wait for every triggered device to enter RUNNING
         if trigger_devs:
             triggered = set(trigger_devs.keys()) - set(trigger_failed)
+            _unhealthy = _unhealthy_states()
 
             not_yet_running = set(triggered)
             t_start = time.time()
@@ -1591,8 +1612,30 @@ class ScanRunner:
                 not_yet_running -= confirmed
                 if not_yet_running: time.sleep(0.002)
 
+            # A device that never entered RUNNING did not integrate, so its
+            # attribute values are still those of the previous point.  This
+            # went completely unreported before: the ZI/ZI2 Start() command
+            # silently no-ops when the device is not ON ("Thread is already
+            # running"), so a lock-in that dropped its MFLI connection kept
+            # answering reads with frozen values and the scan ran to the end.
+            for dp in not_yet_running:
+                st_now = None
+                try:    st_now = devp[dp].state()
+                except Exception: pass
+                if st_now is None or st_now in _unhealthy:
+                    lg(f"⚠ {dp} did not start integrating (state "
+                       f"{st_now if st_now is not None else 'unreadable'}) — "
+                       f"reads would be stale; failing point")
+                    bad_devs.add(dp)
+                else:
+                    # Still ON: either it completed inside the 2 ms poll gap
+                    # (possible for very short integration times) or the
+                    # trigger was dropped.  Warn, but do not fail the point.
+                    lg(f"⚠ {dp} never reported RUNNING within "
+                       f"{TRIGGER_START_GUARD_MS} ms (state {st_now})")
+
             # Phase B — wait for every triggered device to leave RUNNING
-            remaining = set(triggered)
+            remaining = set(triggered) - bad_devs
             t_wait = time.time()
             timeout = cfg["move_timeout"]
             _phase_b_fails = {dp: 0 for dp in remaining}
@@ -1603,7 +1646,15 @@ class ScanRunner:
                     try:
                         ds = devp[dp].state()
                         _phase_b_fails[dp] = 0
-                        if ds not in _RUNNING: done.add(dp)
+                        if ds not in _RUNNING:
+                            done.add(dp)
+                            # Ended in an error state: the acquisition failed
+                            # and the output registers hold the previous
+                            # point's values.
+                            if ds in _unhealthy:
+                                lg(f"⚠ {dp} finished in state {ds} — "
+                                   f"acquisition failed; failing point")
+                                bad_devs.add(dp)
                     except Exception as e:
                         _phase_b_fails[dp] += 1
                         streak = _phase_b_fails[dp]
@@ -1618,8 +1669,15 @@ class ScanRunner:
                             time.sleep(0.05)
                 remaining -= done
                 if remaining: time.sleep(0.01)
-            if remaining:
-                lg(f"⚠ Timeout waiting for: " + ", ".join(remaining))
+            if remaining and not self._abort:
+                # Never left RUNNING inside move_timeout — the integration did
+                # not complete, so whatever the device returns now is not this
+                # point's value.
+                lg(f"⚠ Timeout ({timeout:.0f} s) waiting for: "
+                   + ", ".join(sorted(remaining))
+                   + " — integration did not finish; failing point "
+                     "(raise 'Timeout' if the device is simply slow)")
+                bad_devs |= remaining
         else:
             time.sleep(int_time)
 
@@ -1671,17 +1729,20 @@ class ScanRunner:
         # Record which devices are implicated, so the auto-pause message can
         # name them: the recovery path is to open exactly that device in Jive,
         # and "fix the issue" is not actionable without the path.
-        if ok:
-            self._last_bad_devs = []
-        else:
-            _implicated = set(bad_devs)
-            for dev_path, _sens in dev_sensors.items():
-                for s in _sens:
-                    v = vals.get(s["label"])
-                    if v is None or not np.isfinite(v):
-                        _implicated.add(dev_path)
-                        break
-            self._last_bad_devs = sorted(_implicated)
+        #
+        # A non-finite value also fails the point even when the read itself
+        # succeeded — a device that reports NaN (e.g. a lock-in whose poll
+        # returned no samples) has not measured anything, and recording it as
+        # a good point would leave the hole silently in the file.
+        _implicated = set(bad_devs)
+        for dev_path, _sens in dev_sensors.items():
+            for s in _sens:
+                v = vals.get(s["label"])
+                if v is None or not np.isfinite(v):
+                    _implicated.add(dev_path)
+                    ok = False
+                    break
+        self._last_bad_devs = sorted(_implicated) if _implicated else []
 
         return vals, t_trigger, ok
 
