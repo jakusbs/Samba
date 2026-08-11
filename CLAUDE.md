@@ -3990,7 +3990,7 @@ too few plateaus) or were recorded with lock-in channels instead of DC (97).
 
 ## 67. Recent Changes (August 2026) — BD Fit Centring, Stale-Lock-in Auto-Pause, Keithley Range Readback
 
-Branch `claude/bd-centring-lockin-fault-keithley-range` (147 tests), with the
+Branch `claude/bd-centring-lockin-fault-keithley-range` (152 tests), with the
 device-server half on TANGO_Devices `claude/zi-start-raises-on-fault`.
 App version → **v13.12**.
 Three user-reported items.
@@ -4104,6 +4104,16 @@ via a shared-by-convention `_apply_range_readback`. It runs on the startup
 mirroring propagates it to the other tab. All four attribute names now come
 from the setup keys (`keithley_range_attr` / Cryo `keithley_attr_range`, …)
 instead of being hardcoded.
+
+The read must use **`safe_read_str`**, not `safe_read`. `safe_read` is numeric
+and does `float(raw[0]) if hasattr(raw, "__len__")` — written for SmarAct
+position arrays, but a **`str` also has `__len__`**, so it indexed the string
+and returned its first character as a number: `"20mA"` → `2.0`, `"100mA"` →
+`1.0`, every sub-mA range → `0.0`. Plausible values that matched no combo
+entry, so the panel reported `range=2.0 (not selectable)` with the device
+plainly on 20mA. `safe_read` now converts a whole `str`/`bytes` or fails
+loudly rather than silently truncating, so the same trap elsewhere surfaces as
+an error instead of a number.
 
 Honest about what it does not know, rather than letting the combo imply a
 state: `range=unset` when the server returns `""` (never written since it

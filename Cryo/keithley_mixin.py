@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from hardware import fresh_proxy, is_sim_proxy, safe_read, safe_write
+from hardware import (fresh_proxy, is_sim_proxy, safe_read, safe_read_str,
+                      safe_write)
 from config import KEITHLEY_RANGES
 from panels import NoScrollComboBox
 
@@ -146,7 +147,7 @@ class KeithleyMixin:
             # The range is a memorized string attribute on the Keithley
             # server, so it survives a server restart and is the only
             # trustworthy source for the range the hardware is actually on.
-            rng, e5 = safe_read(p, rng_a)
+            rng, e5 = safe_read_str(p, rng_a)
             errs = [e for e in [e1, e2] if e]
             if errs:
                 self._ks_err.emit(errs[0][:60])

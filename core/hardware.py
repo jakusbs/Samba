@@ -240,6 +240,13 @@ def safe_read(proxy, attr: str,
     """
     def _do():
         raw = proxy.read_attribute(attr).value
+        # A str has __len__, so the array branch would index it and silently
+        # return its FIRST CHARACTER as a number: the Keithley's "20mA" range
+        # read back as 2.0, and "100mA" as 1.0 — plausible values that never
+        # matched anything.  Convert the whole string or fail loudly; use
+        # safe_read_str for genuinely textual attributes.
+        if isinstance(raw, (str, bytes)):
+            return float(raw)
         return float(raw[0]) if hasattr(raw, "__len__") else float(raw)
 
     if timeout is None:

@@ -13,7 +13,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QAbstractSpinBox
 
 from config import KEITHLEY_RANGES
-from hardware import fresh_proxy, is_sim_proxy, safe_write, safe_read, demagnetize_magnet
+from hardware import (fresh_proxy, is_sim_proxy, safe_write, safe_read,
+                      safe_read_str, demagnetize_magnet)
 from panels._widgets import NoScrollComboBox, NoScrollDoubleSpinBox
 
 
@@ -287,7 +288,7 @@ class HardwarePanel(QGroupBox):
             # The range is a memorized string attribute on the Keithley
             # server, so it survives a server restart and is the only
             # trustworthy source for what range the hardware is actually on.
-            rng, e5 = safe_read(p, a_rng)
+            rng, e5 = safe_read_str(p, a_rng)
             errs = [e for e in [e1, e2] if e]
             if errs:
                 self._ks_err.emit(errs[0][:60])
