@@ -227,10 +227,18 @@ class BDCalibrationPanel(QWidget):
         if result.ok:
             self.load_calibration(result.levels_mV)
             self.calibration_changed.emit(self.get_calibration())
+            # Say how the six were chosen when the trace offered more than one
+            # evenly spaced run — the operator knows how far the plate was
+            # actually stepped and is the one who can spot a wrong pick.
+            extra = ""
+            if result.n_candidates > 1:
+                extra = (f" {result.n_candidates} evenly spaced runs of 6 were "
+                         f"possible; took the one centred on zero "
+                         f"(centre {result.midpoint_mV:+.2f} mV).")
             self.set_status(
                 f"Fitted {os.path.basename(path)} — "
-                f"{len(result.all_plateaus)} plateau(s) found, 6 imported. "
-                f"Review, then Save calibration.")
+                f"{len(result.all_plateaus)} plateau(s) found, 6 imported."
+                f"{extra} Review, then Save calibration.")
             return
 
         # Failure: leave the boxes untouched, offer another file.

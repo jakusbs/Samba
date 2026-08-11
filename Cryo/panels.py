@@ -395,10 +395,14 @@ class HardwarePanel(QGroupBox):
         if conn_err:
             self._set_err(self.ks_status, conn_err); return
 
-        amp, e1 = safe_read(p, "amplitude")
-        frq, e2 = safe_read(p, "frequency")
-        cpl, e3 = safe_read(p, "compliance")
-        cur, e4 = safe_read(p, "current")
+        amp, e1 = safe_read(p, s.get("keithley_attr_amplitude")  or "amplitude")
+        frq, e2 = safe_read(p, s.get("keithley_attr_frequency")  or "frequency")
+        cpl, e3 = safe_read(p, s.get("keithley_attr_compliance") or "compliance")
+        cur, e4 = safe_read(p, s.get("keithley_attr_current")    or "current")
+        # The range is a memorized string attribute on the Keithley server, so
+        # it survives a server restart and is the only trustworthy source for
+        # the range the hardware is actually on.
+        rng, e5 = safe_read(p, s.get("keithley_attr_range")      or "range")
         errs = [e for e in [e1, e2] if e]
         if errs:
             self._set_err(self.ks_status, errs[0][:60]); return
@@ -410,11 +414,36 @@ class HardwarePanel(QGroupBox):
             self.current_rb.setText(f"{cur:.4g} mA")
         else:
             self.current_rb.setText("— mA")
+
+        rng_note = self._apply_range_readback(None if e5 else rng)
+
         parts = []
         if amp is not None: parts.append(f"amp={amp:.4g}")
         if frq is not None: parts.append(f"freq={frq:.4g}")
         if cpl is not None: parts.append(f"compl={cpl:.2f}V")
+        if rng_note:        parts.append(rng_note)
         self._set_ok(self.ks_status, "  ".join(parts))
+
+    def _apply_range_readback(self, rng) -> str:
+        """Select the device's reported range in the combo.
+
+        Returns a short note for the status line.  The combo offers only the
+        ranges Samba uses, so a device sitting on one of the Keithley's other
+        ranges is reported in the status line instead of being silently
+        misrepresented as the combo's current selection.
+        """
+        if rng is None:
+            return "range=?"
+        rng = str(rng).replace("\x00", "").strip()
+        if not rng:
+            # Never written since the server started — say so rather than
+            # letting the combo's default imply a hardware state.
+            return "range=unset"
+        idx = self.range_combo.findText(rng)
+        if idx >= 0:
+            self.range_combo.setCurrentIndex(idx)
+            return f"range={rng}"
+        return f"range={rng} (not selectable)"
 
     # ── Individual-attribute writes (called by Enter on each spinbox) ──────────
     def _write_range(self):

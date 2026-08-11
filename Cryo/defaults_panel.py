@@ -326,7 +326,18 @@ class SetupDefaultsPanel(QWidget):
     def __init__(self, registry: List[dict] = None, parent=None):
         super().__init__(parent)
         self._registry = registry or []
+        self._loading = False
         self._build_ui()
+
+    def _emit_changed(self, *_):
+        """Single funnel for defaults_changed, so load() can suppress it.
+
+        Every widget signal routes through here rather than being wired to
+        defaults_changed directly — a signal-to-signal connection cannot
+        consult the guard flag.
+        """
+        if not self._loading:
+            self.defaults_changed.emit()
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -390,7 +401,7 @@ class SetupDefaultsPanel(QWidget):
                     self.far_anc_act1, self.far_anc_act2, self.far_anc_actz,
                     self.voi_anm_act1, self.voi_anm_act2, self.voi_anm_actz,
                     self.voi_anc_act1, self.voi_anc_act2, self.voi_anc_actz):
-            row.changed.connect(self.defaults_changed)
+            row.changed.connect(self._emit_changed)
 
         act_outer.addWidget(far_grp)
         act_outer.addWidget(voi_grp)
@@ -403,21 +414,21 @@ class SetupDefaultsPanel(QWidget):
         zi_l   = QVBoxLayout(zi_grp); zi_l.setContentsMargins(8, 8, 8, 8)
         self.zi_hw = HardwareDeviceGroup(LOCKIN_ATTR_DEFS, filter_type="lockin",
                                          registry=self._registry)
-        self.zi_hw.changed.connect(self.defaults_changed)
+        self.zi_hw.changed.connect(self._emit_changed)
         zi_l.addWidget(self.zi_hw)
         hw_row.addWidget(zi_grp)
 
         ks_grp = QGroupBox("Keithley 6221")
         ks_l   = QVBoxLayout(ks_grp); ks_l.setContentsMargins(8, 8, 8, 8)
         self.ks_hw = HardwareDeviceGroup(KEITHLEY_ATTR_DEFS, registry=self._registry)
-        self.ks_hw.changed.connect(self.defaults_changed)
+        self.ks_hw.changed.connect(self._emit_changed)
         ks_l.addWidget(self.ks_hw)
         hw_row.addWidget(ks_grp)
 
         ad_grp = QGroupBox("AttoDRY Cryostat")
         ad_l   = QVBoxLayout(ad_grp); ad_l.setContentsMargins(8, 8, 8, 8)
         self.ad_hw = HardwareDeviceGroup(ATTODRY_ATTR_DEFS, registry=self._registry)
-        self.ad_hw.changed.connect(self.defaults_changed)
+        self.ad_hw.changed.connect(self._emit_changed)
         ad_l.addWidget(self.ad_hw)
         hw_row.addWidget(ad_grp)
 
@@ -440,7 +451,7 @@ class SetupDefaultsPanel(QWidget):
         cal_g.addWidget(self.fl_attr_combo, 0, 3)
 
         self.fl_dev_combo.currentIndexChanged.connect(self._on_fl_dev_changed)
-        self.fl_attr_combo.currentIndexChanged.connect(lambda _: self.defaults_changed.emit())
+        self.fl_attr_combo.currentIndexChanged.connect(self._emit_changed)
 
         # Trailing-point count for the live plots' "Recent" y-scale mode --
         # a per-setup preference, kept out of the plot toolbars which have no
@@ -456,7 +467,7 @@ class SetupDefaultsPanel(QWidget):
             "while nulling; larger is steadier. Applies to the 1D live plot\n"
             "and the calibration plot.")
         cal_g.addWidget(self.recent_window, 1, 1)
-        self.recent_window.valueChanged.connect(lambda _: self.defaults_changed.emit())
+        self.recent_window.valueChanged.connect(self._emit_changed)
 
         self._populate_fl_dev()
         root.addWidget(cal_grp)
@@ -491,7 +502,7 @@ class SetupDefaultsPanel(QWidget):
 
     def _on_fl_dev_changed(self, _=None):
         self._populate_fl_attr()
-        self.defaults_changed.emit()
+        self._emit_changed()
 
     # ── Public API ─────────────────────────────────────────────────────────────
     def set_registry(self, registry: List[dict]):
@@ -510,7 +521,24 @@ class SetupDefaultsPanel(QWidget):
         self._populate_fl_attr(initial_attr=cur_fa)
 
     def load(self, setup: dict):
-        """Restore all selections from a setup dict."""
+        """Restore all selections from a setup dict.
+
+        Guarded by ``_loading``: a widget set here must not echo
+        ``defaults_changed`` back at the main window, which responds by merging
+        ``get_values()`` into the setup and saving it.  Mid-load that captures a
+        HALF-restored panel — every widget after the one that emitted still
+        holds the previous setup's state, or the combo's construction default.
+        The observed damage was ``keithley_device`` being overwritten with the
+        first entry of the device registry (a lock-in), because the Keithley
+        combo is restored further down this method than the spinbox that fired.
+        """
+        self._loading = True
+        try:
+            self._load(setup)
+        finally:
+            self._loading = False
+
+    def _load(self, setup: dict):
         try:
             self.recent_window.setValue(int(setup.get("recent_window", 10)))
         except (TypeError, ValueError):
