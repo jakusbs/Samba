@@ -283,6 +283,36 @@ def safe_read_str(proxy, attr: str,
         return None, str(e)
 
 
+def trigger_and_read(proxy, attr: str, wait_s: float = 2.0,
+                     guard_s: float = 0.05
+                     ) -> Tuple[Optional[float], Optional[str]]:
+    """Trigger one acquisition and read the averaged result.
+
+    The standard Samba sensor handshake: Start → wait for the device to leave
+    RUNNING → read (see the DoubleInBeckhoffAverage protocol in §15).  Devices
+    without a Start command or without state feedback degrade to a plain read
+    after the guard delay, so this is safe to call on anything.
+
+    Used by the autofocus sweep and by the thermal-settle monitor, which both
+    read the focus diode point by point.
+    """
+    try:
+        proxy.command_inout("Start")
+    except Exception:
+        pass                      # no Start command — plain read below
+    t0 = time.time()
+    time.sleep(guard_s)
+    while time.time() - t0 < wait_s:
+        try:
+            if str(proxy.state()) != "RUNNING":
+                break
+        except Exception:
+            break                 # no state feedback — don't spin
+        time.sleep(0.02)
+    time.sleep(guard_s)
+    return safe_read(proxy, attr)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Device reconnection (for socket-based instruments like Keithley)
 # ─────────────────────────────────────────────────────────────────────────────
