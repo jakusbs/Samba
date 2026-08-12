@@ -2623,5 +2623,201 @@ class TestRecentWindowSetting(unittest.TestCase):
         self.assertGreater(hi50, 100.0)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 22. Current sweep — current list, range selection, plateau detection, config
+# ─────────────────────────────────────────────────────────────────────────────
+
+import current_sweep as _cs_mod                          # noqa: E402
+
+
+class TestCurrentSweepList(unittest.TestCase):
+    """The list of excitation currents the sweep steps through."""
+
+    def test_linear_inclusive(self):
+        self.assertEqual(_cs_mod.build_current_list(5, 15, 3), [5.0, 10.0, 15.0])
+
+    def test_descending_when_start_above_stop(self):
+        # "from / to" is taken literally — high→low is a legitimate order.
+        self.assertEqual(_cs_mod.build_current_list(15, 5, 3), [15.0, 10.0, 5.0])
+
+    def test_single_point(self):
+        self.assertEqual(_cs_mod.build_current_list(7.25, 99, 1), [7.25])
+
+    def test_rounded_to_four_decimals(self):
+        # The {I}mA filename token must be stable, so no 8.333333333333.
+        vals = _cs_mod.build_current_list(5, 15, 4)
+        self.assertEqual(vals, [5.0, 8.3333, 11.6667, 15.0])
+
+    def test_format_elides_long_lists(self):
+        s = _cs_mod.format_current_list(list(range(1, 20)))
+        self.assertIn("…", s)
+        self.assertTrue(s.endswith("mA"))
+
+
+class TestKeithleyRangePick(unittest.TestCase):
+    """The source clips to its range, so a sweep crossing 2 → 20 mA has to
+    move the range with it."""
+
+    RANGES = ["2mA", "20mA", "100mA"]
+
+    def test_smallest_fitting_range(self):
+        self.assertEqual(_cs_mod.pick_keithley_range(1.5, self.RANGES), "2mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(5, self.RANGES), "20mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(20, self.RANGES), "20mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(21, self.RANGES), "100mA")
+
+    def test_negative_uses_magnitude(self):
+        self.assertEqual(_cs_mod.pick_keithley_range(-5, self.RANGES), "20mA")
+
+    def test_none_when_nothing_fits(self):
+        self.assertIsNone(_cs_mod.pick_keithley_range(150, self.RANGES))
+
+    def test_parse_variants(self):
+        self.assertEqual(_cs_mod.parse_range_mA("20mA"), 20.0)
+        self.assertEqual(_cs_mod.parse_range_mA("100 mA"), 100.0)
+        self.assertEqual(_cs_mod.parse_range_mA("1A"), 1000.0)
+        self.assertIsNone(_cs_mod.parse_range_mA("nonsense"))
+
+
+class TestSweepValidation(unittest.TestCase):
+    """A sweep that cannot run must be refused before the setup lock is taken."""
+
+    RANGES = ["2mA", "20mA", "100mA"]
+
+    def test_ok(self):
+        self.assertIsNone(_cs_mod.validate_sweep([5, 10, 15], self.RANGES))
+
+    def test_empty_refused(self):
+        self.assertIsNotNone(_cs_mod.validate_sweep([], self.RANGES))
+
+    def test_over_hardware_range_refused(self):
+        err = _cs_mod.validate_sweep([5, 150], self.RANGES)
+        self.assertIsNotNone(err)
+        self.assertIn("150", err)
+
+    def test_fixed_range_refuses_currents_above_it(self):
+        err = _cs_mod.validate_sweep([1, 5], self.RANGES,
+                                     auto_range=False, fixed_range="2mA")
+        self.assertIsNotNone(err)
+        self.assertIn("2mA", err)
+
+    def test_too_many_currents_refused(self):
+        err = _cs_mod.validate_sweep(list(range(1, 200)), self.RANGES)
+        self.assertIsNotNone(err)
+        self.assertIn(str(_cs_mod.MAX_CURRENTS), err)
+
+
+class TestPlateauDetector(unittest.TestCase):
+    """Deciding the sample has thermalised from the focus-diode trace."""
+
+    @staticmethod
+    def _exp_decay(det, t_end, tau=60.0, step=5.0):
+        """Feed a settling exponential; return when it was first called settled."""
+        import math
+        t = 0.0
+        while t <= t_end:
+            det.add(t, 10.0 - 2.0 * (1 - math.exp(-t / tau)))
+            st = det.state(t)
+            if st["settled"]:
+                return t, st
+            t += step
+        return None, det.state(t_end)
+
+    def test_minimum_wait_blocks_an_early_plateau(self):
+        """The bound is not cosmetic: right after a refocus the FL signal sits
+        on its maximum, where dFL/dz ~ 0, so a flat start is expected."""
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=300, max_wait_s=1200)
+        for i in range(40):
+            det.add(i * 5.0, 10.0)          # perfectly flat
+        st = det.state(195.0)
+        self.assertFalse(st["settled"])
+        self.assertEqual(st["reason"], "minimum wait")
+
+    def test_plateau_detected_after_settling(self):
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=100, max_wait_s=1200)
+        t, st = self._exp_decay(det, 900.0)
+        self.assertIsNotNone(t)
+        self.assertEqual(st["reason"], "plateau")
+        self.assertGreaterEqual(t, 100.0)
+
+    def test_gives_up_at_max_wait(self):
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=100, max_wait_s=300)
+        t = 0.0
+        while t <= 400:
+            det.add(t, 10.0 - 0.01 * t)     # never stops drifting
+            st = det.state(t)
+            if st["settled"]:
+                break
+            t += 5.0
+        self.assertTrue(st["settled"])
+        self.assertEqual(st["reason"], "timeout")
+        self.assertGreaterEqual(t, 300.0)
+
+    def test_non_finite_samples_dropped(self):
+        det = _cs_mod.PlateauDetector()
+        self.assertFalse(det.add(0.0, float("nan")))
+        self.assertFalse(det.add(0.0, None))
+        self.assertTrue(det.add(0.0, 1.0))
+
+    def test_no_data_is_not_settled(self):
+        st = _cs_mod.PlateauDetector().state(0.0)
+        self.assertFalse(st["settled"])
+        self.assertIsNone(st["rate"])
+
+    def test_rate_is_percent_of_signal_per_minute(self):
+        det = _cs_mod.PlateauDetector(window_s=60)
+        for i in range(13):                 # 60 s at 5 s spacing
+            det.add(i * 5.0, 100.0 - i * 5.0 * 0.1)   # −0.1 units/s of ~100
+        rate = det.rate_pct_per_min(60.0)
+        self.assertLess(rate, 0.0)
+        self.assertAlmostEqual(abs(rate), 6.0, delta=1.5)
+
+
+class TestCurrentSweepConfig(unittest.TestCase):
+    """Config defaults and the schema migration that adds them."""
+
+    def _load(self, app_dir, name):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               app_dir, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_disabled_by_default_in_both_apps(self):
+        for app_dir, name in (("Samba_main", "sm_cfg"), ("Cryo", "cryo_cfg")):
+            cfg = self._load(app_dir, name).make_default_config()
+            self.assertFalse(cfg["cursweep_enabled"], app_dir)
+            self.assertEqual(cfg["cursweep_settle_mode"], _cs_mod.SETTLE_FIXED)
+
+    def test_v8_to_v9_backfills(self):
+        mod = self._load("Samba_main", "sm_cfg_mig")
+        self.assertEqual(mod.SCHEMA_VERSION, 9)
+        old = {"_schema_version": 8, "name": "x"}
+        mod._migrate_config(old)
+        self.assertEqual(old["_schema_version"], 9)
+        self.assertFalse(old["cursweep_enabled"])
+        self.assertEqual(old["cursweep_fixed_min"], 10.0)
+
+    def test_migration_preserves_an_existing_choice(self):
+        mod = self._load("Samba_main", "sm_cfg_keep")
+        cfg = {"_schema_version": 8, "cursweep_enabled": True,
+               "cursweep_npts": 7}
+        mod._migrate_config(cfg)
+        self.assertTrue(cfg["cursweep_enabled"])
+        self.assertEqual(cfg["cursweep_npts"], 7)
+
+    def test_cryo_migration_backfills(self):
+        mod = self._load("Cryo", "cryo_cfg_mig")
+        cfg = {"name": "x"}
+        mod._migrate_config(cfg)
+        self.assertFalse(cfg["cursweep_enabled"])
+        self.assertTrue(cfg["cursweep_refocus"])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

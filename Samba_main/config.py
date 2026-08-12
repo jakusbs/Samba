@@ -6,16 +6,22 @@ import copy, json, logging, os, shutil
 from pathlib import Path
 from typing import Dict, List, TypedDict, Optional
 
+# Imported through the package path rather than the usual bare-name shim:
+# core.current_sweep is dependency-free (math/re only), and this module is
+# also loaded by file path in the test suite, where Samba_main/ is not on
+# sys.path but the repo root is.
+from core.current_sweep import CURRENT_SWEEP_DEFAULTS
+
 log = logging.getLogger(__name__)
 
 # Application version, shown in the main window title as "Samba vX.YZ".
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.12"
+APP_VERSION = "13.16"
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -223,6 +229,9 @@ def make_default_config(name: str = "scan_x") -> dict:
         # relay_sign × sign(field), so with neither enabled every scan in a
         # list is measured at one polarity.
         "relay_flip": False, "field_flip": False,
+        # Current sweep — repeat the whole scanlist at several excitation
+        # currents, refocusing between them (see core/current_sweep.py).
+        **CURRENT_SWEEP_DEFAULTS,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
@@ -415,6 +424,13 @@ def _migrate_v7_to_v8(cfg: dict):
     cfg.setdefault("field_flip", False)
 
 
+def _migrate_v8_to_v9(cfg: dict):
+    """v8→v9: Add the scanlist current sweep.  cursweep_enabled defaults to
+    False, so an existing config still runs exactly one scanlist."""
+    for key, val in CURRENT_SWEEP_DEFAULTS.items():
+        cfg.setdefault(key, val)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -424,6 +440,7 @@ _MIGRATIONS = [
     (6, _migrate_v5_to_v6),
     (7, _migrate_v6_to_v7),
     (8, _migrate_v7_to_v8),
+    (9, _migrate_v8_to_v9),
 ]
 
 

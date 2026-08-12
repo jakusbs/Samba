@@ -43,7 +43,10 @@ except ImportError:
     TANGO_AVAILABLE = False
 
 from config  import (SETUP_NAMES, X_NATURAL, X_TIME, DEFAULT_SENSORS, load_setup, save_setup,
-                    make_default_config, APP_VERSION)
+                    make_default_config, APP_VERSION, KEITHLEY_RANGES)
+from current_sweep import (SETTLE_PLATEAU, fmt_hms, format_current_list,
+                           pick_keithley_range, validate_sweep)
+from current_sweep_ui import ThermalSettleWorker
 from hardware import get_proxy, fresh_proxy, safe_read, safe_write, evict_proxy
 from applog  import setup_logging
 from validation import validate_scan_config
@@ -271,6 +274,21 @@ class MainWindow(QMainWindow):
         self._timing_syncing:    bool                     = False
         self._last_sample_id:    str                      = ""
         self._autopause_notified: bool                    = False
+
+        # ── Current sweep — one scanlist per excitation current ─────────────
+        # _cs_active stays True through the settle and refocus phases, when no
+        # worker exists, so the app still counts as "running" and Abort/Pause
+        # have something to talk to.
+        self._cs_active:   bool  = False
+        self._cs_abort:    bool  = False
+        self._cs_paused:   bool  = False   # held between phases, not in a worker
+        self._cs_currents: list  = []
+        self._cs_idx:      int   = 0
+        self._cs_base_cfg: dict  = {}
+        self._cs_settle:   Optional[ThermalSettleWorker] = None
+        self._cs_fl_t:     list  = []      # focus trace during the settle
+        self._cs_fl_v:     list  = []
+        self._cs_fl_label: str   = ""
 
         # ── Bottom status-bar state (live scan progress) ────────────────────
         self._run_start_time:     float = 0.0   # set once per run, NOT reset per direction
@@ -712,6 +730,7 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("color:#45475a;font-size:12px;")
             return lbl
 
+        self._sb_cur     = _mk_field()
         self._sb_scan    = _mk_field()
         self._sb_start   = _mk_field()
         self._sb_elapsed = _mk_field()
@@ -720,6 +739,8 @@ class MainWindow(QMainWindow):
         self._sb_dead    = _mk_field()
         self._sb_done    = _mk_field()
         fields = [
+            # "Current" only moves during a sweep; "—" the rest of the time.
+            ("Current: ",   self._sb_cur),
             ("Scan: ",      self._sb_scan),
             ("Start: ",     self._sb_start),
             ("Elapsed: ",   self._sb_elapsed),
@@ -802,6 +823,8 @@ class MainWindow(QMainWindow):
         from datetime import datetime as _dt
         self._sb_start.setText(_dt.fromtimestamp(self._run_start_time).strftime("%H:%M:%S"))
         self._sb_scan.setText(f"1/{self._run_scans_total}")
+        if not self._cs_active:
+            self._sb_cur.setText("—")
         for lbl in (self._sb_elapsed, self._sb_runleft, self._sb_scanleft):
             lbl.setText("0s")
         self._sb_dead.setText("0%"); self._sb_done.setText("0%")
@@ -882,9 +905,11 @@ class MainWindow(QMainWindow):
         self.sl_panel.settle.valueChanged.connect(self._sync_sl_timing_to_traj)
         self.sl_panel.timeout.valueChanged.connect(self._sync_sl_timing_to_traj)
 
-        # ── Polarity control → persist into the active config ────────────────
-        # Only user toggles reach this; load_config() sets the buttons silently.
+        # ── Polarity control / current sweep → persist into the active config ─
+        # Only user edits reach these; load_config() sets both silently.
         self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
+        self.sl_panel.cur_sweep.changed.connect(self._on_polarity_changed)
+        self.sl_panel.cur_sweep.changed.connect(self._update_estimate)
 
         # ── BD Calibration panel callbacks ────────────────────────────────────
         self.bd_cal_panel.set_callbacks(
@@ -1221,8 +1246,23 @@ class MainWindow(QMainWindow):
             if zi_settle > 0: parts.append(f"{zi_settle:.3g}s ZI")
             parts.append(f"{int_t:.3g}s integ")
             total = n_pts * (settle + zi_settle + int_t)
-            self.status_lbl.setText(
-                f"≈ {_fmt(total)}  ({pts} pts × [{' + '.join(parts)}]{move_note})")
+            txt = (f"≈ {_fmt(total)}  ({pts} pts × "
+                   f"[{' + '.join(parts)}]{move_note})")
+            # Current sweep: the whole scanlist runs once per current, with a
+            # thermal settle and a refocus in between.  Quoting the per-scan
+            # number alone would understate a multi-hour run by an order of
+            # magnitude, so say what the sweep adds and that the refocus time
+            # is not in it.
+            sweep = self.sl_panel.cur_sweep
+            if sweep.isChecked():
+                n_cur   = len(sweep.currents())
+                n_scans = int(self.sl_panel.n_spin.value())
+                settle_each = sweep.settle_estimate_s()
+                grand = n_cur * (n_scans * total + settle_each)
+                txt += (f"   ·   sweep: {n_cur} currents × {n_scans} cycles + "
+                        f"{fmt_hms(settle_each)} settle each "
+                        f"≈ {_fmt(grand)} total (+ refocus)")
+            self.status_lbl.setText(txt)
 
         # Show immediately without ZI settling (no I/O)
         _show(0.0)
@@ -1491,8 +1531,13 @@ class MainWindow(QMainWindow):
             self._start_scan()
 
     def _unified_abort(self):
-        """Abort whichever is running — single scan or scanlist."""
-        if self._sl_worker:
+        """Abort whichever is running — single scan, scanlist or current sweep.
+
+        The sweep is checked first: between currents it owns the run while no
+        worker exists at all, so routing on _sl_worker alone would send the
+        abort to the single-scan path and do nothing.
+        """
+        if self._cs_active or self._sl_worker:
             self._abort_scanlist()
         else:
             self._abort_scan()
@@ -2007,7 +2052,7 @@ class MainWindow(QMainWindow):
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
         # Detect auto-pause from ScanRunner (single scan or scanlist) and update button
-        _active_worker = self._worker or self._sl_worker
+        _active_worker = self._worker or self._sl_worker or self._cs_settle
         if _active_worker and _active_worker.is_paused():
             self.pause_btn.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
@@ -2080,16 +2125,25 @@ class MainWindow(QMainWindow):
 
     def _toggle_pause(self):
         if not self._scan_running: return
-        worker = self._worker or self._sl_worker
-        if not worker: return
+        # Between currents a sweep runs a thermal-settle worker, or no worker
+        # at all (refocus, phase transitions) — _cs_paused covers those, and is
+        # honoured at every phase boundary by _cs_hold().
+        worker = self._worker or self._sl_worker or self._cs_settle
+        if worker is not None:
+            was_paused = worker.is_paused()
+            (worker.resume if was_paused else worker.pause)()
+        elif self._cs_active:
+            was_paused = self._cs_paused
+        else:
+            return
+        if self._cs_active:
+            self._cs_paused = not was_paused
         _style = self.style()
-        if worker.is_paused():
-            worker.resume()
+        if was_paused:
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.pause_btn.setText("Pause")
             self._tint_status_bar("running")
         else:
-            worker.pause()
             self.pause_btn.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
             self.pause_btn.setText("Resume")
             self._tint_status_bar("paused")
@@ -2132,6 +2186,26 @@ class MainWindow(QMainWindow):
                     "Scanlist not started — no polarity control selected")
                 return
 
+        # ── Current sweep — refuse impossible current lists before locking ───
+        sweep = self.sl_panel.cur_sweep
+        currents = sweep.currents() if sweep.isChecked() else []
+        if currents:
+            err = validate_sweep(currents, KEITHLEY_RANGES,
+                                 auto_range=sweep.auto_range_cb.isChecked(),
+                                 fixed_range=self.sl_panel.hw.range_combo.currentText())
+            if err:
+                QMessageBox.warning(self, "Current sweep", err)
+                self.status_lbl.setText("Scanlist not started — " + err)
+                return
+            if sweep.mode() == SETTLE_PLATEAU and not \
+                    setup.get("focus_averagein", "").strip():
+                QMessageBox.warning(
+                    self, "Current sweep",
+                    "The settle mode is 'Watch focus signal', but no focus "
+                    "sensor is configured for this setup.\n\nSet one in Setup "
+                    "Defaults, or switch the sweep to a fixed wait.")
+                return
+
         # ── Setup lock ────────────────────────────────────────────────────────
         if not self._acquire_setup_lock():
             return
@@ -2142,8 +2216,28 @@ class MainWindow(QMainWindow):
         cfg["relay_flip"] = sl["relay_flip"]
         cfg["field_flip"] = sl["field_flip"]
 
-        self._current_scan_cfg = cfg
         self._arm_zero_after_scan(cfg)
+
+        if currents:
+            self._cs_begin(cfg, currents)
+        else:
+            self._launch_scanlist(cfg, reset_status_bar=True)
+
+    def _launch_scanlist(self, base_cfg: dict, reset_status_bar: bool = True):
+        """Start one ScanlistWorker on a copy of `base_cfg`.
+
+        Called once for a plain scanlist, and once per current during a sweep
+        — so every current gets its own hardware snapshot (the amplitude has
+        just changed), its own auto-name with the right {I}mA token, and its
+        own scanlist .txt.
+        """
+        setup  = self._active_setup()
+        cfg    = copy.deepcopy(base_cfg)
+        sl     = self.sl_panel.get_settings()      # re-read: the name follows amp
+        active = ([s for s in cfg["sensors"] if s["enabled"]]
+                  if cfg.get("scan_type") != "DC_HYST" else self._hyst_active(cfg))
+
+        self._current_scan_cfg = cfg
         self._setup_live_display(cfg, active); self._alloc_scan_data(cfg, active)
 
         # BD calibration is injected in _build_full_config() (shared path).
@@ -2170,11 +2264,309 @@ class MainWindow(QMainWindow):
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
-        # Status bar: one scan-file per (cycle × direction).
-        self._status_bar_run_start(cfg, sl["n_scans"] * len(self._sl_worker.cfg_list))
+        # Status bar: one scan-file per (cycle × direction).  During a current
+        # sweep the whole sweep is one run, started once in _cs_begin, so the
+        # per-scanlist reset would wipe the elapsed time on every current.
+        if reset_status_bar:
+            self._status_bar_run_start(cfg, sl["n_scans"] * len(self._sl_worker.cfg_list))
+            self.log_text.clear()
         self._sl_scan_t0 = _time.time()
-        self._scan_running = True; self._set_running(True); self.log_text.clear()
+        self._scan_running = True; self._set_running(True)
         self._sl_worker.start()
+
+    # ── Current sweep ─────────────────────────────────────────────────────────
+    def _cs_begin(self, cfg: dict, currents: list):
+        """Start a current sweep: one scanlist per current, refocusing between.
+
+        The setup lock is already held and is kept for the whole sweep — it is
+        released in _cs_finish, not per scanlist.
+        """
+        sweep = self.sl_panel.cur_sweep
+        self._cs_active   = True
+        self._cs_abort    = False
+        self._cs_currents = list(currents)
+        self._cs_idx      = 0
+        self._cs_base_cfg = cfg
+
+        sl = self.sl_panel.get_settings()
+        # One HDF5 file per cycle per current (Samba_main runs a single
+        # direction per cycle — ScanlistWorker.cfg_list has one entry).
+        self._status_bar_run_start(cfg, len(currents) * sl["n_scans"])
+        self._scan_running = True; self._set_running(True)
+        self.log_text.clear()
+        self._log_append(
+            f"▶ Current sweep — {format_current_list(currents)} "
+            f"({len(currents)} scanlists × {sl['n_scans']} cycles)", level="info")
+        self._cs_step()
+
+    def _cs_step(self):
+        """Run the next current: apply it, settle, refocus, then the scanlist."""
+        if self._cs_abort or self._cs_idx >= len(self._cs_currents):
+            self._cs_finish(aborted=self._cs_abort)
+            return
+
+        def _go():
+            mA = self._cs_currents[self._cs_idx]
+            self._sb_cur.setText(f"{self._cs_idx + 1}/{len(self._cs_currents)}"
+                                 f"  ({mA:.4g} mA)")
+            self._log_append(
+                f"── Current {self._cs_idx + 1}/{len(self._cs_currents)}: "
+                f"{mA:.4g} mA ──", level="info")
+            self._cs_apply_current(mA, self._cs_after_current)
+        self._cs_hold(_go)
+
+    def _cs_apply_current(self, mA: float, then):
+        """Write range + amplitude to the Keithley, then call then(ok, mA, rng).
+
+        Runs off the GUI thread: two TANGO writes to an unresponsive source
+        would otherwise freeze the window for up to 20 s.
+        """
+        setup   = self._active_setup()
+        dev     = setup.get("keithley_device", "")
+        a_amp   = setup.get("keithley_amplitude_attr") or "amplitude"
+        a_range = setup.get("keithley_range_attr") or "range"
+        rng     = (pick_keithley_range(mA, KEITHLEY_RANGES)
+                   if self.sl_panel.cur_sweep.auto_range_cb.isChecked() else "")
+        cur_rng = self.sl_panel.hw.range_combo.currentText()
+
+        def _finish(ok, msgs):
+            def _apply():
+                for m, lv in msgs:
+                    self._log_append(m, level=lv)
+                then(ok, mA, rng)
+            self._post_to_main.emit(_apply)
+
+        def _work():
+            msgs = []
+            proxy, cerr = fresh_proxy(dev)
+            if cerr and TANGO_AVAILABLE:
+                _finish(False, [(f"⚠ Keithley '{dev}' unreachable ({cerr})",
+                                 "warning")])
+                return
+            ok = True
+            if rng and rng != cur_rng:
+                rerr = safe_write(proxy, a_range, rng)
+                ok = ok and not rerr
+                msgs.append((f"⚠ Keithley range → {rng} failed: {rerr}", "warning")
+                            if rerr else (f"Keithley range → {rng}", "info"))
+            # Zero amplitude means "output off" on this source (see
+            # HardwarePanel._write_amplitude), so mirror that behaviour.
+            if abs(mA) < 1e-9:
+                try:
+                    proxy.command_inout("Off")
+                    msgs.append(("Keithley output OFF (amplitude = 0)", "info"))
+                except Exception:
+                    werr = safe_write(proxy, a_amp, 0.0)
+                    ok = ok and not werr
+                    msgs.append((f"⚠ Keithley off failed: {werr}", "warning")
+                                if werr else ("Keithley amplitude → 0 mA", "info"))
+            else:
+                try:
+                    proxy.command_inout("On")
+                except Exception:
+                    pass          # already on, or no On command
+                werr = safe_write(proxy, a_amp, float(mA))
+                ok = ok and not werr
+                msgs.append((f"⚠ Keithley amplitude → {mA:.4g} mA failed: {werr}",
+                             "warning") if werr else
+                            (f"Keithley amplitude → {mA:.4g} mA", "info"))
+            _finish(ok, msgs)
+
+        threading.Thread(target=_work, daemon=True, name="cs_apply_current").start()
+
+    def _cs_after_current(self, ok: bool, mA: float, rng: str):
+        """Current is set — show it in the panels, then wait for thermalisation."""
+        if self._cs_abort:
+            self._cs_finish(aborted=True); return
+        if not ok:
+            # Measuring on regardless would write files whose {I}mA name and
+            # whose hardware are different currents — worse than stopping.
+            self._cs_auto_pause(
+                f"⚠ AUTO-PAUSED — could not set the current source to "
+                f"{mA:.4g} mA. Fix the Keithley, then press Resume to retry "
+                f"this current.",
+                lambda: self._cs_apply_current(mA, self._cs_after_current))
+            return
+        # Display only: setValue never writes to hardware (Enter does), and the
+        # panel mirroring (§50) carries it to the Trajectory tab.  This is also
+        # what re-stamps the scanlist auto-name with the new {I}mA token.
+        self.sl_panel.hw.amp_spin.setValue(float(mA))
+        if rng:
+            idx = self.sl_panel.hw.range_combo.findText(rng)
+            if idx >= 0:
+                self.sl_panel.hw.range_combo.setCurrentIndex(idx)
+
+        sweep = self.sl_panel.cur_sweep
+        setup = self._active_setup()
+        self._cs_settle = ThermalSettleWorker(
+            mode=sweep.mode(),
+            fixed_min=sweep.fixed_spin.value(),
+            fl_dev=setup.get("focus_averagein", "").strip(),
+            fl_attr=(setup.get("focus_attr", "") or "Value").strip() or "Value",
+            detector=sweep.make_detector(),
+            label=f"({self._cs_idx + 1}/{len(self._cs_currents)}, {mA:.4g} mA)")
+        self._cs_settle.status_msg.connect(self.status_lbl.setText)
+        self._cs_settle.log_msg.connect(self._log_append)
+        self._cs_settle.done_.connect(self._cs_settle_done)
+        # Live focus trace on the 1D plot so the settling is visible while it
+        # happens (fixed mode emits nothing, so the plot is simply left alone).
+        self._cs_fl_t, self._cs_fl_v = [], []
+        self._cs_fl_label = f"{self._cs_idx + 1}/{len(self._cs_currents)}, {mA:.4g} mA"
+        self._cs_settle.sample.connect(self._cs_on_fl_sample)
+        self._cs_settle.start()
+
+    def _cs_on_fl_sample(self, elapsed_s: float, fl: float):
+        """Draw the focus signal against time while the sample thermalises.
+
+        show_static drops the scan buffers, which is safe here: the plot is
+        re-initialised by _setup_live_display when the scanlist starts.
+        """
+        self._cs_fl_t.append(float(elapsed_s))
+        self._cs_fl_v.append(float(fl))
+        if len(self._cs_fl_t) < 2:
+            return                       # a single point has nothing to show
+        try:
+            self.plot1d.show_static(
+                self._cs_fl_t, self._cs_fl_v,
+                xlabel="Time since current change (s)",
+                ylabel="Focus signal",
+                title=f"Thermal settle — {self._cs_fl_label}")
+        except Exception:
+            log.debug("Focus-settle plot update failed", exc_info=True)
+
+    def _cs_settle_done(self, reason: str):
+        # done_ is emitted from inside run(), so the QThread may not have
+        # finished when this handler runs on the GUI thread.  Dropping the last
+        # reference there would destroy a still-running QThread; wait() first,
+        # which returns immediately because run() has already returned.
+        worker, self._cs_settle = self._cs_settle, None
+        if worker is not None:
+            worker.wait(2000)
+        if self._cs_abort or reason == "abort":
+            self._cs_finish(aborted=True); return
+
+        def _go():
+            if not self.sl_panel.cur_sweep.refocus_cb.isChecked():
+                self._launch_scanlist(self._cs_base_cfg, reset_status_bar=False)
+                return
+            # Refocus at the focus position of the scan axis (0 = middle of the
+            # device); the second axis is parked too when the scan is a 2D map.
+            also_y = bool(self._cs_base_cfg.get("scan_y"))
+            self._log_append("Refocusing…", level="info")
+            # focus_pos=0: the middle of the device on the swept axis.
+            if not self.calib_panel.run_autofocus_async(
+                    self._cs_focus_done, also_y=also_y, focus_pos=0.0):
+                self._log_append(
+                    "⚠ Autofocus could not start (no FL sensor configured?) — "
+                    "running the scanlist at the current focus", level="warning")
+                self._launch_scanlist(self._cs_base_cfg, reset_status_bar=False)
+        self._cs_hold(_go)
+
+    def _cs_focus_done(self, res: dict):
+        if self._cs_abort:
+            self._cs_finish(aborted=True); return
+        if not res.get("ok"):
+            self._log_append(f"⚠ Refocus failed: {res.get('msg', '')}",
+                             level="warning")
+        elif not res.get("reliable"):
+            self._log_append(f"⚠ Refocus unreliable: {res.get('msg', '')}",
+                             level="warning")
+        else:
+            self._log_append(
+                f"✓ Refocused at Z = {res['z']:.3f} (FL = {res['fl']:.4g})",
+                level="info")
+
+        run_it = lambda: self._launch_scanlist(self._cs_base_cfg,
+                                               reset_status_bar=False)
+        bad = not (res.get("ok") and res.get("reliable"))
+        if bad and self.sl_panel.cur_sweep.pause_bad_cb.isChecked():
+            self._cs_auto_pause(
+                "⚠ AUTO-PAUSED — the refocus did not find a reliable focus. "
+                "Focus by hand on the Calibration tab, then press Resume.",
+                run_it)
+            return
+        self._cs_hold(run_it)
+
+    def _cs_auto_pause(self, msg: str, retry):
+        """Hold the sweep and tell the operator why, the same way the scan
+        engine's auto-pause does — Resume retries `retry`, Abort ends the run."""
+        self._log_append(msg, level="warning")
+        self.status_lbl.setText(msg)
+        self._cs_paused = True
+        self.pause_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.pause_btn.setText("Resume")
+        self._tint_status_bar("paused")
+        if not self._autopause_notified:
+            self._autopause_notified = True
+            QMessageBox.warning(self, "Current sweep paused", msg)
+        self._cs_hold(retry)
+
+    def _cs_hold(self, then):
+        """Run `then` once the sweep is neither paused nor aborted.
+
+        Every phase transition goes through this, so a Pause pressed during a
+        refocus (which has no worker of its own) still takes effect — at the
+        next boundary rather than mid-motion.
+        """
+        if self._cs_abort:
+            self._cs_finish(aborted=True); return
+        if not self._cs_paused:
+            self._autopause_notified = False
+            then(); return
+        QTimer.singleShot(200, lambda: self._cs_hold(then))
+
+    def _cs_finish(self, aborted: bool):
+        """End the sweep: restore the source, zero the stage, release the lock."""
+        self._cs_active = False
+        self._cs_paused = False
+        sweep = self.sl_panel.cur_sweep
+        if sweep.off_at_end_cb.isChecked():
+            self._cs_set_output_off()
+        else:
+            last = (self._cs_currents[min(self._cs_idx, len(self._cs_currents) - 1)]
+                    if self._cs_currents else 0.0)
+            self._log_append(
+                f"⚠ Current source left ON at {last:.4g} mA "
+                f"('Output off at end' is unchecked)", level="warning")
+        if not aborted:
+            self._status_bar_run_finish()
+        self._sb_cur.setText("—")
+        self._run_zero_after_scan()
+        release_lock(self._active_setup_name)
+        self._scan_running = False
+        self._set_running(False)
+        self._sl_worker = None
+        self._log_append(
+            "■ Current sweep aborted" if aborted else
+            f"✓ Current sweep complete — {len(self._cs_currents)} currents",
+            level="warning" if aborted else "info")
+
+    def _cs_set_output_off(self):
+        """Turn the current source off at the end of a sweep (background)."""
+        setup = self._active_setup()
+        dev   = setup.get("keithley_device", "")
+        a_amp = setup.get("keithley_amplitude_attr") or "amplitude"
+
+        def _work():
+            proxy, cerr = fresh_proxy(dev)
+            if cerr and TANGO_AVAILABLE:
+                msg = (f"⚠ Could not turn the current source off — "
+                       f"'{dev}' unreachable ({cerr})", "warning")
+            else:
+                try:
+                    proxy.command_inout("Off")
+                    msg = ("Current source output OFF (sweep finished)", "info")
+                except Exception:
+                    werr = safe_write(proxy, a_amp, 0.0)
+                    msg = ((f"⚠ Current source off failed: {werr}", "warning")
+                           if werr else
+                           ("Current source amplitude → 0 mA (sweep finished)",
+                            "info"))
+            self._post_to_main.emit(lambda: (self._log_append(msg[0], level=msg[1]),
+                                             self.sl_panel.hw.amp_spin.setValue(0.0)))
+
+        threading.Thread(target=_work, daemon=True, name="cs_output_off").start()
 
     def _on_sl_scan_done(self, idx: int, fn: str):
         """Per-file callback from ScanlistWorker — updates status bar and
@@ -2204,8 +2596,12 @@ class MainWindow(QMainWindow):
             log.debug("Lab notebook append failed for scanlist file", exc_info=True)
 
     def _on_scanlist_done(self, txt_path: str):
-        self._status_bar_run_finish()
-        self._run_zero_after_scan()
+        # During a current sweep this is one scanlist of several: the run is
+        # not over, and the stage must not go back to 0 until the last one
+        # (the refocus before the next current needs it where it is).
+        if not self._cs_active:
+            self._status_bar_run_finish()
+            self._run_zero_after_scan()
         try: self.data_browser.refresh()
         except Exception:
             log.debug("Data browser refresh failed after scanlist", exc_info=True)
@@ -2255,14 +2651,38 @@ class MainWindow(QMainWindow):
         self._alloc_scan_data(cfg, active); self._setup_live_display(cfg, active)
 
     def _on_sl_worker_finished(self):
+        self._sl_worker = None
+        if self._cs_active:
+            # One current of a sweep is done — the lock stays held and the run
+            # keeps going.  _cs_step() ends the sweep if this was the last
+            # current or if Abort was pressed.
+            self._cs_idx += 1
+            self._cs_step()
+            return
         release_lock(self._active_setup_name)
         self._set_running(False)
         self._scan_running = False
-        self._sl_worker = None
 
     def _abort_scanlist(self):
         if not self._scan_running: return
         self._zero_armed = False   # Abort must never start new stage motion
+        if self._cs_active:
+            # Stop the whole sweep, not just the scanlist in progress.  The
+            # phase that is actually running picks this up: a settle worker
+            # via abort(), a refocus via _stop_autofocus, a hold via _cs_hold.
+            self._cs_abort  = True
+            self._cs_paused = False
+            if self._cs_settle:
+                self._cs_settle.abort()
+            try:
+                self.calib_panel._stop_autofocus()
+            except Exception:
+                log.debug("Autofocus abort failed", exc_info=True)
+            if not self._sl_worker and not self._cs_settle:
+                # Nothing running to notice the flag (mid-refocus or between
+                # phases) — _cs_hold/_cs_focus_done will finish the sweep.
+                self.status_lbl.setText("Aborting current sweep…")
+                return
         if self._sl_worker: self._sl_worker.abort()
         self.status_lbl.setText("Aborting scanlist…")
 
@@ -2473,10 +2893,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if r == QMessageBox.StandardButton.No: ev.ignore(); return
             self._zero_armed = False   # quitting must never start new stage motion
+            self._cs_active = False    # no further currents after this
+            self._cs_abort  = True
             # 10 s, not 2 s: one point can legitimately take longer than 2 s
             # (lock-in settling + integration), and abandoning the thread
             # mid-HDF5-write is how a file gets truncated.
-            for w in [self._worker, self._sl_worker]:
+            for w in [self._worker, self._sl_worker, self._cs_settle]:
                 if w: w.abort(); w.wait(10000)
             # _on_worker_finished may never run once the event loop is tearing
             # down, so release the setup lock here or the rig stays "busy" to

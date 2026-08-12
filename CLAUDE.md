@@ -4185,3 +4185,300 @@ device paths were unaffected; the two monitor keys were restored by hand.
 Cryo already honoured `SAMBA_CONFIG_DIR`; **`Samba_main/config.py` was given the
 same override in this batch** (it previously hardcoded the path), so both apps
 can now be pointed at a throwaway copy for any diagnostic run.
+
+---
+
+## 68. Recent Changes (August 2026) — Scanlist Current Sweep & Layout Unification
+
+Branch `claude/scanlist-current-sweep` (176 tests). App version → **v13.13**.
+Both apps. Two user requests in one batch: repeat a whole scanlist at a series
+of excitation currents, and give the Scanlist tab the same layout as Trajectory.
+
+### Scanlist tab layout now matches Trajectory (both apps)
+The Scanlist tab had Timing / Metadata at the top, the Hardware panel across
+the middle, and Polarity control + Scanlist at the bottom — the reverse of the
+Trajectory tab, where Timing / Metadata / Hardware form one bottom row.
+
+Now identical in both apps:
+
+```
+[Active config | Polarity control | Scanlist ......................]
+[Current sweep ....................................................]
+[Timing        |      Metadata      |        Hardware             ]
+```
+
+The three shared groups remain **separate instances** from the Trajectory
+tab's, kept in sync by the existing `_meta_syncing` / `_timing_syncing` /
+`_link_hw_panels` machinery — this was a layout change, not a
+single-instance refactor, so none of that code moved. The reorganisation
+*reduced* the panel's height (Samba_main 460 → 415 px, Cryo → 407 px), and
+the Trajectory tab (430 / 451 px) still sets the tab area's minimum.
+
+**No dead band when the tab is enlarged.** The first attempt left the whole
+slack between the top row and the bottom row, which reads as broken. The rule
+that works, and matches how the Trajectory tab's X/Y boxes behave:
+
+- Polarity control and Scanlist **expand** with the tab (so no gap opens
+  between the rows) but pin their *contents* to the top — `pl.setAlignment(
+  AlignTop)` and a trailing `nl.setRowStretch(2, 1)` — otherwise the two flip
+  buttons float in the middle of an over-tall box.
+- The **Current sweep** box takes the vertical stretch (`root.addWidget(...,
+  stretch=1)`) because it is the one with enough content to absorb it, and
+  parks its own slack *below* the summary line (`g.setRowStretch(6, 1)`)
+  rather than spreading the form apart.
+- The Scanlist group gets the horizontal stretch and `nl.setColumnStretch(1, 1)`
+  so the auto-generated name is fully readable instead of truncated.
+
+Checked by rendering both panels at 1380×460 (nothing clips at the minimum
+width) and 1900×600.
+
+### Current sweep — one scanlist per current
+A checkable **"Current sweep"** group on its own row. Unchecked (the default)
+the Start button runs exactly one scanlist, as before. Checked, the whole list
+is repeated at each current in a Start/Stop/N series:
+
+```
+set current → wait for thermalisation → refocus → run the scanlist
+```
+
+**One `ScanlistWorker` per current** — not one worker taught about currents.
+That granularity is what the analysis expects (`import_analyze_both()` takes
+one scanlist and one current, and writes `<sample>/<current>mA <date>/`), and
+it means each current automatically gets its own scanlist `.txt`, its own
+`{I}mA` filename token (the auto-name follows `hw.amp_spin`), its own
+`_read_hw_snapshot` — so `hw_keithley_amplitude_mA` in the HDF5 is the current
+that was actually applied — and its own lab-notebook rows. No new HDF5
+metadata keys: the amplitude already identifies the file.
+
+`_start_scanlist` was split into validation/lock plus **`_launch_scanlist`**,
+which builds one worker from a deepcopy of the base config; the sweep calls it
+once per current with `reset_status_bar=False`.
+
+### Thermal settle (`ThermalSettleWorker`)
+After a current change the sample takes 5–10 min to reach equilibrium. Two
+modes, chosen in the group:
+
+- **Wait a fixed time** — a set number of minutes.
+- **Watch focus signal** — poll the focus diode at the current focus position
+  and continue when it stops drifting (least-squares slope over a trailing
+  60 s window, in %/min), bounded by a minimum and a maximum wait.
+
+**The minimum wait is not cosmetic.** Right after a refocus the FL signal sits
+on its maximum, where `dFL/dz ≈ 0`, so the first minutes of drift barely move
+it — an unbounded plateau test reports "settled" while the stage is still
+running. `PlateauDetector` therefore refuses to settle before `min_wait_s`, and
+gives up at `max_wait_s` (reason `"timeout"`) so a noisy or dead FL signal
+costs a bounded wait instead of a stalled run. The worker enforces the maximum
+independently of the detector, because a first read that never succeeds would
+leave the detector empty and its own timeout unreachable.
+
+**Pause does not stop the settle clock** — the sample warms whether or not the
+operator is watching, so pausing mid-settle would make the recorded wait a lie.
+The worker holds at the *end* of the settle instead, so the refocus and the
+scanlist do not start.
+
+**The poll interval must stay a small fraction of the window** (the worker
+clamps it to `window_s / 6`, floored at 0.5 s so a short window cannot turn
+into hammering the focus device). The detector will not judge a window holding
+fewer than `min_samples`, so a poll comparable to the window makes it report
+`"collecting"` forever and every settle runs to its maximum wait — found by the
+thread-level harness, which had set a 1 s window against the 0.5 s poll floor.
+
+### Refocus
+Reuses the Calibration tab's autofocus (its dz / max range / max points /
+focus position), driven headlessly through the new
+`CalibrationPanel.run_autofocus_async(on_done, also_y)`. The plot, status line
+and button states behave exactly as for a manual ▶ run; `on_done` receives
+`{ok, reliable, z, fl, msg}`, where `reliable` comes from the §60 quality
+assessment (`focus_found` only fires on success, so its absence *is* the
+failure signal).
+
+`AutofocusWorker` gained an optional **second in-plane axis** (`scan_attr2` /
+`focus_pos2`), parked at the focus position and restored afterwards, used when
+the scan is a 2D map — a map ends at the last raster point, so focusing with
+only X re-centred would measure at the edge of the map in Y. Offered only when
+that axis lives on the same device as Z (true for SmarAct x/y/z and the
+Attocube scanner); the manual button is unchanged (single axis).
+
+`AutofocusWorker._measure_fl` now delegates to the new
+`hardware.trigger_and_read()` (Start → wait for not-RUNNING → read), shared
+with the settle monitor.
+
+### Refusing rather than guessing
+- Current lists whose values exceed the largest Keithley range (or the fixed
+  range when auto-range is off) are **refused before the setup lock is taken**,
+  as is a plateau-mode sweep with no focus sensor configured. `MAX_CURRENTS`
+  (64) guards against a mistyped N turning into a week-long run.
+- **A current that could not be applied auto-pauses the sweep** rather than
+  measuring on: the file's `{I}mA` name and the hardware would otherwise be
+  different currents, which is worse than stopping. Resume retries the same
+  current, exactly like the scan engine's per-point auto-pause (§42).
+- An **unreliable refocus** logs a warning and continues by default; "Pause if
+  focus unreliable" holds the sweep instead.
+- **Auto range** picks the smallest range that can source each current (a
+  5 → 50 mA sweep crosses 20mA → 100mA) and logs the change.
+
+### Run-level behaviour
+- The **setup lock is held across the whole sweep** — taken once, released in
+  `_cs_finish`, not per scanlist. `_on_sl_worker_finished` advances to the next
+  current instead of tearing the run down.
+- **One status-bar run** for the whole sweep, with a new **`Current i/N (x mA)`**
+  field (first in the bar, `—` when not sweeping). The pre-scan estimate gains
+  a sweep clause; plateau mode is quoted as a midpoint with `≈`, and the
+  refocus time is excluded and said to be.
+- **Zero-after-scan** (§56, Samba_main only) and the **output-off** run at the
+  very end, never between currents — the refocus needs the stage where it is.
+  Leaving the source energised is possible but logged as a warning.
+- **Abort ends the whole sweep**, whichever phase is running: a settle worker
+  via `abort()`, a refocus via `_stop_autofocus`, a phase boundary via the
+  `_cs_hold` flag. `_unified_abort` checks the sweep first — between currents
+  there is no worker at all, so routing on `_sl_worker` alone did nothing.
+- Every phase transition goes through **`_cs_hold`**, so a Pause pressed during
+  a refocus takes effect at the next boundary rather than mid-motion.
+
+### Structure
+- **`core/current_sweep.py`** — Qt-free (math/re only, like `core/bd_fit.py`):
+  `build_current_list`, `pick_keithley_range`, `validate_sweep`,
+  `PlateauDetector`, `CURRENT_SWEEP_DEFAULTS`.
+- **`core/current_sweep_ui.py`** — `CurrentSweepGroup`, `ThermalSettleWorker`.
+- Both get the usual re-export shims in `Samba_main/` and `Cryo/`. Both
+  `config.py` files import `CURRENT_SWEEP_DEFAULTS` via the **package path**
+  (`from core.current_sweep import …`) rather than the bare-name shim, because
+  the test suite loads `config.py` by file path with only the repo root on
+  `sys.path`.
+- The `_cs_*` sequencer is **duplicated** in the two main windows, following
+  §14 (they are deliberately independent implementations). The only real
+  divergences are the Keithley setup-key names (`keithley_amplitude_attr` vs
+  Cryo's `keithley_attr_amplitude`) and that Cryo has no zero-after-scan —
+  keep the two in step when editing either.
+- New config keys `cursweep_*`; Samba_main schema **v8 → v9**
+  (`_migrate_v8_to_v9`), Cryo's `_migrate_config` backfills inline. Disabled by
+  default, so every existing config still runs one plain scanlist. The keys are
+  not in the HDF5 or lab-notebook allowlists, so they never reach a file.
+- `CurrentSweepGroup` follows §67: one `_emit_changed()` funnel and a
+  `_loading` guard, so `load_values()` cannot echo back and save.
+- **The enable switch is the group's own checkbox**, which also disables every
+  child for free — but Qt's default 14 px indicator reads as decoration and
+  operators did not find it. The group carries its state in its title
+  (`Current sweep — ON / — OFF`) and restyles itself green when armed, via an
+  objectName-scoped stylesheet so nothing cascades to other group boxes (§16).
+  `_apply_enabled_style` is driven by `toggled`, so a config load moves it too.
+
+### Not done
+Thermal drift also moves the device **laterally**, so after a large current
+step `x = 0` may no longer be the device centre. The analysis' edge fit absorbs
+a small offset, so no lateral re-centring was built — but a long sweep can walk
+off the device.
+
+### Tests / verification
+- `test_runner.py` 152 → 176: current list (order, rounding, single point),
+  range selection and parsing, sweep validation (over-range, fixed range,
+  too many currents), `PlateauDetector` (minimum wait blocks an early plateau,
+  plateau found on a settling exponential, timeout on a never-settling drift,
+  non-finite samples dropped, rate units), and the config defaults + migration
+  for both apps.
+- The sequencer was driven against the **real shipped `_cs_*` methods** with a
+  stub host and fake hardware (30 checks Samba_main, 18 Cryo — not committed,
+  they need Qt): full sweeps, amplitude and range written per current, refocus
+  per current including the 2D second axis, lock released exactly once,
+  Keithley-failure and bad-focus auto-pause with retry-on-Resume, abort during
+  settle, pause at a phase boundary, output-off at the end.
+- The plain (no-sweep) scanlist path was re-verified after the
+  `_launch_scanlist` refactor, and both apps were smoke-tested end to end
+  against a throwaway `SAMBA_CONFIG_DIR`.
+
+### Follow-up fixes from the first lab look (v13.14)
+
+**A stray Space switched the sweep off mid-typing.** A checkable `QGroupBox`
+defaults to `StrongFocus` *and* toggles its own check on Space — and a key a
+child does not consume propagates to the parent. So a Space typed in one of the
+spinboxes unchecked the group, which disabled every field, leaving the operator
+unable to type. Two things were needed, and the obvious one alone is not enough:
+
+- `setFocusPolicy(NoFocus)` — a container should not take the keyboard focus
+  that clicking its background otherwise hands it.
+- Swallow Space / Select / Return / Enter in **`event()`**, not
+  `keyPressEvent()`: QGroupBox handles the toggle in `event()`, so an override
+  of `keyPressEvent` never runs (verified — the box still toggled with the
+  override in place). Propagation does not need focus, so `NoFocus` alone
+  leaves the hole open.
+
+Clicking the indicator or the title still toggles it, and the checkboxes
+*inside* the group still respond to Space normally.
+
+**Rows now spread evenly when the tab is enlarged.** `setRowStretch` on the
+content rows does nothing here: `QDoubleSpinBox` is fixed-height, so a row
+holding one cannot grow and all the slack piles into whichever row happens to
+be flexible. The controls therefore sit on the **even** grid rows with empty
+stretchable **odd** rows between them. Measured at 1500 px wide: gaps
+`[32,32,34,30,27]` at the natural height and `[80,80,81,78,75]` when enlarged —
+even in both cases.
+
+**The focus signal is plotted live during the settle.** `ThermalSettleWorker`
+already emitted `sample(elapsed, fl)` and nothing consumed it; both main windows
+now feed it to the 1D plot through `_cs_on_fl_sample`, so the thermal settling
+curve is visible as it happens (and the drift threshold can be tuned from real
+data). `show_static` drops the scan buffers, which is safe here because
+`_setup_live_display` re-initialises the plot when the scanlist starts. Fixed
+wait mode emits no samples, so the plot is simply left alone.
+
+### Refocus really parks the swept axis at 0 (v13.15)
+
+Reported from the lab: the refocus did not move to 0 on the swept axis. Three
+separate holes, all now closed — and the third makes any remaining case
+visible instead of silent:
+
+- **A failed position read was treated as "at 0."** `pos_scan, e =
+  safe_read(...); if e: pos_scan = 0.0` made the code believe the axis was
+  already at the focus position, so it skipped the move — and then the
+  `finally` block "restored" the axis *to* 0 after the sweep. Exactly
+  inverted. `None` now means unknown: park anyway, and do not drive the axis
+  to an invented position afterwards.
+- **The sweep depended on the Calibration tab's focus-position spinbox.**
+  "The middle of the device" is what the sweep means, so it now passes
+  `focus_pos=0.0` explicitly through `run_autofocus_async(...)`; the manual ▶
+  button still uses the spinbox. A value left on another tab can no longer
+  decide where a sweep refocuses.
+- **A refused move was swallowed.** `safe_write`'s return was ignored, so a
+  wrong attribute or a busy axis produced a focus measured at the edge of the
+  device with nothing in the log. Parking is now `_park()`, which reports both
+  the move and any failure to the status line.
+
+`focus_pos_spin`'s unit suffix also showed the **Z** unit while holding a
+coordinate on the **scan** axis; it now shows the X unit.
+
+### Scanlist top row: two matching two-row boxes (v13.16)
+
+The standalone "Active config: —" label to the left of the row is gone; it now
+lives inside the Scanlist group as `Config:`, sharing row 0 with `N scans` in a
+left-packed `QHBoxLayout` — left to the grid, `N scans` was stranded against
+the far edge of a box over 1700 px wide. The polarity flips stack vertically,
+so both boxes are two rows and exactly the same height (98 px).
+
+**Watch the tab's minimum height when adding rows here.** The bottom tab area
+cannot shrink below the tallest tab, and the Scanlist tab is now the tallest:
+`main` needed 460 px, this batch 523 px after the two-row rework. The Current
+sweep box was folded from six content rows to five — all four option
+checkboxes on one row beside Drift, since the box is over 1500 px wide — which
+brought it back to **492 px**. Trajectory needs 430 px for comparison. Any
+further row added to the sweep box costs ~30 px of screen the bottom half
+cannot spare; spend width instead.
+
+### Calibration tab: axis device line removed
+
+The "X: dev/attr Y: … Z: …" line at the top of Stage positioning is gone —
+it cost a row on a tab that is short of height, and the same information is on
+Setup Defaults. It survives as the group's tooltip, still refreshed by
+`configure_stage()`. Stage positioning is the tallest column, so this takes
+18 px off the whole tab's minimum height (391 → 373 px), which is what the
+bottom half gets back.
+
+### Found while testing (pre-existing, not fixed here)
+On a machine with **no `device_registry.json`**, the first `_save_active_config()`
+rewrites Samba_main's `keithley_device` and `relay_device` to the built-in
+registry's first entry (a lock-in). `setup_defaults._entries()` falls back to
+the whole registry when its type filter matches nothing, the setup's real path
+is not in it, so the combo stays on index 0 and `get_defaults()` returns that.
+Same class as §67, different trigger; reproduced identically on `main`, so it
+predates this batch. Matters for the §47 "copied the config to a new machine"
+case.
