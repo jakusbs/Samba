@@ -7,6 +7,11 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List
 
+# Package path rather than the bare-name shim — core.current_sweep is
+# dependency-free, and this keeps the defaults, the migration and the widget
+# from drifting apart.  See Samba_main/config.py for the same import.
+from core.current_sweep import CURRENT_SWEEP_DEFAULTS
+
 
 def _sanitize(obj):
     """Convert *obj* to a JSON-safe structure using an iterative approach.
@@ -320,6 +325,9 @@ def make_default_config(name: str = "scan_x") -> dict:
         # Scanlist polarity control (persisted; was session-only UI state)
         "relay_flip": False,
         "field_flip": False,
+        # Current sweep — repeat the whole scanlist at several excitation
+        # currents, refocusing between them (see core/current_sweep.py).
+        **CURRENT_SWEEP_DEFAULTS,
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
@@ -436,6 +444,9 @@ def _migrate_config(cfg: dict):
     # Polarity control — old configs keep the historic "starts OFF" behaviour
     cfg.setdefault("relay_flip", False)
     cfg.setdefault("field_flip", False)
+    # Current sweep — disabled on old configs, so one plain scanlist runs
+    for _k, _v in CURRENT_SWEEP_DEFAULTS.items():
+        cfg.setdefault(_k, _v)
 
 def load_setup(name: str) -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

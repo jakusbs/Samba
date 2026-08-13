@@ -11,6 +11,8 @@ import time, traceback, threading
 import numpy as np
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -33,9 +35,9 @@ from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            RECENT_WINDOW)
 from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
-from hardware import fresh_proxy, is_sim_proxy, get_proxy, safe_read, safe_write
+from hardware import (fresh_proxy, is_sim_proxy, get_proxy, safe_read,
+                      safe_write, trigger_and_read)
 
-log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,7 +461,8 @@ class AutofocusWorker(QThread):
     def __init__(self, positioner_dev: str, fl_dev: str,
                  focus_attr: str, scan_attr: str,
                  focus_pos: float, dz: float, d_zmax: float, maxtries: int,
-                 fl_attr: str = "Value", z_limits=None, z_unit: str = "µm"):
+                 fl_attr: str = "Value", z_limits=None, z_unit: str = "µm",
+                 scan_attr2: str = "", focus_pos2: float = 0.0):
         super().__init__()
         self._pos_dev    = positioner_dev
         self._fl_dev     = fl_dev
@@ -469,6 +472,12 @@ class AutofocusWorker(QThread):
         self._focus_attr = focus_attr
         self._scan_attr  = scan_attr
         self._focus_pos  = focus_pos
+        # Optional second in-plane axis, parked at focus_pos2 for the duration
+        # and restored afterwards.  A 2D map ends at the last raster point, so
+        # focusing with only X re-centred would measure at the edge of the map
+        # in Y.  Empty = single-axis behaviour (what the ▶ button uses).
+        self._scan_attr2 = (scan_attr2 or "").strip()
+        self._focus_pos2 = focus_pos2
         self._dz         = dz
         self._d_zmax     = d_zmax
         self._maxtries   = maxtries
@@ -501,8 +510,21 @@ class AutofocusWorker(QThread):
         pos0_z, e = safe_read(p, self._focus_attr)
         if e or pos0_z is None:
             self.error_msg.emit(f"Cannot read Z: {e}"); return
+        # A failed read must NOT fall back to 0.0: that made the code believe
+        # the axis was already at the focus position, skip the move, and then
+        # "restore" the axis to 0 after the sweep — the exact opposite of what
+        # is wanted.  None means "unknown": park it anyway, and leave it there
+        # rather than driving it to an invented position.
         pos_scan, e = safe_read(p, self._scan_attr)
-        if e: pos_scan = 0.0
+        if e or pos_scan is None:
+            pos_scan = None
+            self.status_msg.emit(
+                f"⚠ Cannot read {self._scan_attr} ({e}) — parking it at the "
+                f"focus position anyway and leaving it there")
+        pos_scan2 = None
+        if self._scan_attr2:
+            pos_scan2, e2 = safe_read(p, self._scan_attr2)
+            if e2: pos_scan2 = None
 
         # Sweep bounds must stay inside the configured travel, when the setup
         # defines any.  (Replaces a hardcoded `abs(z) > 100` test that assumed
@@ -518,12 +540,14 @@ class AutofocusWorker(QThread):
                     "reduce Max range or move closer to focus first")
                 return
 
-        self.status_msg.emit(f"Focusing… Z₀={pos0_z:.3f}  scan={pos_scan:.3f}")
+        _scan_now = "?" if pos_scan is None else f"{pos_scan:.3f}"
+        self.status_msg.emit(f"Focusing… Z₀={pos0_z:.3f}  scan={_scan_now}")
 
-        # Move scan axis to focus position
-        if abs(self._focus_pos - (pos_scan or 0)) > 0.01:
-            safe_write(p, self._scan_attr, self._focus_pos)
-            self.status_msg.emit(f"Moved {self._scan_attr} → {self._focus_pos:.3f}")
+        # Park the scan axis (and the optional second in-plane axis) at the
+        # focus position, so the sweep measures the middle of the device.
+        moved = (self._park(p, self._scan_attr, self._focus_pos, pos_scan) |
+                 self._park(p, self._scan_attr2, self._focus_pos2, pos_scan2))
+        if moved:
             time.sleep(1)
 
         # Sweep-based autofocus: coarse sweep over the full ±range, fine
@@ -535,9 +559,12 @@ class AutofocusWorker(QThread):
         try:
             best = self._sweep_focus(p, fl_p, pos0_z)
         finally:
-            # Always restore the scan axis, even on error/abort
+            # Always restore the scan axes, even on error/abort
             if pos_scan is not None:
                 safe_write(p, self._scan_attr, pos_scan)
+            if self._scan_attr2 and pos_scan2 is not None:
+                safe_write(p, self._scan_attr2, pos_scan2)
+            if pos_scan is not None or pos_scan2 is not None:
                 time.sleep(0.5)
 
         if best is None:
@@ -573,29 +600,41 @@ class AutofocusWorker(QThread):
         else:
             self.status_msg.emit(base)
 
+    _POS_TOL = 0.01        # "already there" tolerance, in the axis' own unit
+
+    def _park(self, p, attr: str, target: float, current) -> bool:
+        """Move one in-plane axis to `target`.  True if a move was sent.
+
+        `current` is None when the position could not be read — park anyway
+        rather than assuming the axis is already in place.  A failed write is
+        reported instead of being swallowed: silently skipping the move is how
+        a refocus ends up measuring the edge of the device instead of its
+        middle, with nothing in the log to say so.
+        """
+        if not attr:
+            return False
+        if current is not None and abs(target - current) <= self._POS_TOL:
+            return False
+        werr = safe_write(p, attr, float(target))
+        if werr:
+            self.status_msg.emit(
+                f"⚠ Could not move {attr} → {target:.3f}: {werr}")
+            return False
+        self.status_msg.emit(f"{attr} → {target:.3f} for focus")
+        return True
+
     _MOVE_SETTLE_S = 0.5   # settle after each Z step
     _FL_TIMEOUT_S  = 2.0   # max wait for the FL device to finish averaging
 
     def _measure_fl(self, fl_p):
         """Trigger one FL acquisition and read the averaged Value.
 
-        Waits for the device to leave RUNNING (BeckhoffAverage handshake)
-        instead of a fixed sleep; falls back gracefully for devices without
-        a Start command or state feedback.  Returns (value, err).
+        The handshake itself lives in hardware.trigger_and_read (shared with
+        the thermal-settle monitor); this wrapper only keeps the ok/fail
+        counters that the reliability report quotes.  Returns (value, err).
         """
-        try: fl_p.command_inout("Start")
-        except Exception: pass
-        t0 = time.time()
-        time.sleep(0.05)
-        while time.time() - t0 < self._FL_TIMEOUT_S:
-            try:
-                if str(fl_p.state()) != "RUNNING":
-                    break
-            except Exception:
-                break
-            time.sleep(0.02)
-        time.sleep(0.05)
-        val, err = safe_read(fl_p, self._fl_attr)
+        val, err = trigger_and_read(fl_p, self._fl_attr,
+                                    wait_s=self._FL_TIMEOUT_S)
         if err or val is None:
             self._fl_fail += 1
         else:
@@ -746,6 +785,9 @@ class CalibrationPanel(QWidget):
         self._setup_getter  = setup_getter
         self._config_getter = config_getter
         self._af_worker = None
+        self._af_result: Optional[dict] = None   # last focus_found payload
+        self._af_on_done = None                  # run_autofocus_async callback
+        self._af_last_msg = ""
         self._stage_cfg: dict = {}   # populated by configure_stage()
         self._sensor_row_factory = sensor_row_factory
         self._ts_sensor_rows: list = []
@@ -769,10 +811,11 @@ class CalibrationPanel(QWidget):
         ctrl_l = QVBoxLayout(ctrl_grp); ctrl_l.setSpacing(4)
         ctrl_l.setContentsMargins(8, 8, 8, 8)
 
-        self._dev_lbl = QLabel("Device: —")
-        self._dev_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
-        self._dev_lbl.setWordWrap(True)
-        ctrl_l.addWidget(self._dev_lbl)
+        # The per-axis device/attribute line used to sit here.  It cost a row
+        # of height on a tab that is short of it, and the same information is
+        # on the Setup Defaults tab; it survives as the group's tooltip.
+        self._stage_grp = ctrl_grp
+        ctrl_grp.setToolTip("Axis devices are set on the Setup Defaults tab")
 
         # Runaway guard — see _guard_trip.  Armed once configure_stage()
         # has told us which axes exist.
@@ -1084,8 +1127,7 @@ class CalibrationPanel(QWidget):
         y_attr = cfg.get("act2_attr", "y")
         z_dev  = s.get("z_device", x_dev)
         z_attr = s.get("z_attr", cfg.get("z_attr", "position0"))
-        self._dev_lbl.setText(
-            f"X: {x_dev}/{x_attr}   Y: {y_dev}/{y_attr}   Z: {z_dev}/{z_attr}")
+        self._set_axis_tooltip(x_dev, x_attr, y_dev, y_attr, z_dev, z_attr)
         return {"x": (x_dev, x_attr), "y": (y_dev, y_attr), "z": (z_dev, z_attr)}
 
     def configure_stage(self, x_dev: str, x_attr: str,
@@ -1121,11 +1163,19 @@ class CalibrationPanel(QWidget):
                 self._guard_start()
         except Exception:
             log.debug("stage guard not started", exc_info=True)
-        self._dev_lbl.setText(
-            f"X: {x_dev or '—'}/{x_attr}   "
-            f"Y: {y_dev or '—'}/{y_attr}   "
-            f"Z: {z_dev or '—'}/{z_attr}")
+        self._set_axis_tooltip(x_dev, x_attr, y_dev, y_attr, z_dev, z_attr)
         self._probe_home_support(x_dev)
+
+    def _set_axis_tooltip(self, x_dev, x_attr, y_dev, y_attr, z_dev, z_attr):
+        """Axis devices live in the group tooltip — the visible line was
+        dropped to give the tab back a row of height."""
+        grp = getattr(self, "_stage_grp", None)
+        if grp is None:
+            return
+        grp.setToolTip(f"X: {x_dev or '—'}/{x_attr}\n"
+                       f"Y: {y_dev or '—'}/{y_attr}\n"
+                       f"Z: {z_dev or '—'}/{z_attr}\n"
+                       "(set on the Setup Defaults tab)")
 
     _DEFAULT_UNIT = "µm"
 
@@ -1148,8 +1198,14 @@ class CalibrationPanel(QWidget):
                 except Exception:
                     pass
         zu = self._axis_unit("z")
-        for spin in (getattr(self, "focus_pos_spin", None),
-                     getattr(self, "dz_spin", None),
+        # focus_pos_spin is a position on the SCAN axis, not on Z.
+        fp = getattr(self, "focus_pos_spin", None)
+        if fp is not None:
+            try:
+                fp.setSuffix(f" {self._axis_unit('x')}")
+            except Exception:
+                pass
+        for spin in (getattr(self, "dz_spin", None),
                      getattr(self, "dzmax_spin", None)):
             if spin is not None:
                 try:
@@ -1533,18 +1589,56 @@ class CalibrationPanel(QWidget):
 
     # ── Autofocus ─────────────────────────────────────────────────────────────
     def _start_autofocus(self):
+        """▶ button handler.  Single-axis, no completion callback."""
+        self._launch_autofocus()
+
+    def run_autofocus_async(self, on_done, also_y: bool = False,
+                            focus_pos: Optional[float] = None) -> bool:
+        """Run the ▶ autofocus programmatically and report the outcome.
+
+        Used by the current sweep to refocus between currents; the plot, the
+        status line and the button states behave exactly as for a manual run.
+        `focus_pos` overrides the tab's focus-position spinbox — the sweep
+        passes 0 explicitly, because "the middle of the device" is what it
+        means to focus there, and it must not depend on a spinbox on another
+        tab that the operator may have left somewhere else.
+        `on_done` receives a dict:
+
+            {"ok": bool,        # a focus was found at all
+             "reliable": bool,  # the peak passed the quality assessment
+             "z", "fl": float | None,
+             "msg": str}
+
+        Returns False — without ever calling on_done — if it could not start,
+        so the caller can decide what to do about a missing FL sensor.
+        """
+        return self._launch_autofocus(also_y=also_y, on_done=on_done,
+                                      focus_pos=focus_pos)
+
+    def _launch_autofocus(self, also_y: bool = False, on_done=None,
+                          focus_pos: Optional[float] = None) -> bool:
         if self._af_worker and self._af_worker.isRunning():
-            return
+            return False
         info = self._get_axis_info()
-        if not info: self._set_af_err("No config"); return
+        if not info: self._set_af_err("No config"); return False
 
         x_dev,  scan_attr = info.get("x", ("", "x"))
+        y_dev,  y_attr    = info.get("y", ("", ""))
         z_dev,  z_attr    = info.get("z", (x_dev, "position0"))
         if not z_dev: z_dev = x_dev   # fall back to X device if Z not separately configured
 
         fl_dev = self._setup_getter().get("focus_averagein", "").strip()
-        if not fl_dev: self._set_af_err("No FL sensor set — configure in Setup Defaults tab"); return
+        if not fl_dev:
+            self._set_af_err("No FL sensor set — configure in Setup Defaults tab")
+            return False
 
+        # The worker drives every in-plane axis through the positioner proxy it
+        # opens for Z, so a second axis is only offered when it lives on that
+        # same device (true for SmarAct x/y/z and for the Attocube scanner).
+        scan_attr2 = y_attr if (also_y and y_attr and y_dev == z_dev) else ""
+
+        self._af_result   = None
+        self._af_on_done  = on_done
         self.focus_plot.clear()
         self._af_status.setText("")
         self.af_start_btn.setEnabled(False); self.af_stop_btn.setEnabled(True)
@@ -1568,32 +1662,60 @@ class CalibrationPanel(QWidget):
         self._af_worker = AutofocusWorker(
             positioner_dev=z_dev, fl_dev=fl_dev,
             focus_attr=z_attr, scan_attr=scan_attr,
-            focus_pos=self.focus_pos_spin.value(),
+            focus_pos=(self.focus_pos_spin.value() if focus_pos is None
+                       else float(focus_pos)),
             dz=self.dz_spin.value(),
             d_zmax=self.dzmax_spin.value(),
             maxtries=self.tries_spin.value(),
             fl_attr=fl_attr, z_limits=z_lim,
-            z_unit=self._axis_unit("z"))
+            z_unit=self._axis_unit("z"),
+            scan_attr2=scan_attr2,
+            focus_pos2=(self.focus_pos_spin.value() if focus_pos is None
+                        else float(focus_pos)))
         self._af_worker.point_measured.connect(self.focus_plot.add_point)
-        self._af_worker.status_msg.connect(
-            lambda m: self._af_status.setText(m))
+        self._af_worker.status_msg.connect(self._on_af_status)
         self._af_worker.focus_found.connect(self._on_focus_found)
         self._af_worker.error_msg.connect(self._set_af_err)
         self._af_worker.finished_.connect(self._on_af_finished)
         # Autofocus drives Z itself; its sweep would otherwise read as a fault.
         self.set_stage_guard_suspended(True)
         self._af_worker.start()
+        return True
 
     def _stop_autofocus(self):
         if self._af_worker: self._af_worker.abort()
 
+    def _on_af_status(self, m: str):
+        self._af_status.setText(m)
+        self._af_last_msg = m
+
     def _on_focus_found(self, z, fl):
         self.focus_plot.mark_best(z, fl)
         self.jog_z.set_value(z); self.jog_z.update_readback(z)
+        self._af_result = {"z": float(z), "fl": float(fl)}
 
     def _on_af_finished(self):
         self.af_start_btn.setEnabled(True); self.af_stop_btn.setEnabled(False)
+        # Re-arm first: the completion-callback path below returns early
+        # when no callback is registered, which would skip this.
         self.set_stage_guard_suspended(False)
+        cb, self._af_on_done = getattr(self, "_af_on_done", None), None
+        if cb is None:
+            return
+        res = getattr(self, "_af_result", None)
+        # focus_found only fires on success, so its absence IS the failure
+        # signal; the quality dict distinguishes a real peak from an endpoint
+        # or a noise excursion (see AutofocusWorker._assess).
+        quality = getattr(self._af_worker, "_quality", None) or {}
+        out = {"ok": res is not None,
+               "reliable": bool(res is not None and quality.get("ok", True)),
+               "z":  res["z"]  if res else None,
+               "fl": res["fl"] if res else None,
+               "msg": getattr(self, "_af_last_msg", "") or ""}
+        try:
+            cb(out)
+        except Exception:
+            log.debug("Autofocus completion callback failed", exc_info=True)
 
     # ── Status helpers ────────────────────────────────────────────────────────
     def _set_pos_ok(self, m):

@@ -339,6 +339,105 @@ class TestTriggerRecovery(unittest.TestCase):
                          "Counter must reset to 0 after successful recovery")
 
 
+class TestUnhealthyDeviceFailsPoint(unittest.TestCase):
+    """
+    A lock-in that has lost its instrument connection stays reachable over
+    TANGO: ZI/ZI2 Start() silently no-ops when the device is not ON (it only
+    warn_streams "Thread is already running"), the state never becomes
+    RUNNING, and attribute reads keep answering with the CACHED values of the
+    last successful integration.  Every individual call succeeds, so the scan
+    used to record a full file of frozen, plausible-looking data.
+    """
+
+    def _faulted(self, read_val=7.77):
+        class Faulted(InstantProxy):
+            """Reachable, answers reads, but permanently in FAULT."""
+            def command_inout_asynch(self, cmd, *a):
+                pass                      # no exception, and no integration
+            def command_inout(self, cmd, *a):
+                pass
+            def state(self):
+                return 'FAULT'
+        return Faulted(read_val=read_val)
+
+    def test_faulted_device_fails_point_with_nan(self):
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        devp         = {dev: self._faulted()}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 5.0}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+
+        self.assertFalse(ok, "A device in FAULT must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']),
+                        "Stale cached value must be replaced by NaN, "
+                        "never recorded as a measurement")
+        self.assertIn(dev, r._last_bad_devs,
+                      "Auto-pause message must name the faulted device")
+
+    def test_faulted_device_stays_in_trigger_devs(self):
+        """It must keep being triggered so a Reconnect in Jive recovers it."""
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        trigger_devs = {dev: 'Start'}
+        _acquire(r, {dev: self._faulted()},
+                 {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]},
+                 trigger_devs, {'move_timeout': 5.0})
+        self.assertIn(dev, trigger_devs)
+
+    def test_healthy_device_unaffected(self):
+        """The guard must not fire on a normal acquisition."""
+        r = _make_runner()
+        devp, dev_sensors, trigger_devs, cfg = _std_args(read_val=2.5)
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(vals['ZI x1'], 2.5)
+        self.assertEqual(r._last_bad_devs, [])
+
+    def test_stuck_running_times_out_and_fails_point(self):
+        """
+        A device whose acquisition thread died without resetting the state
+        stays RUNNING forever.  Phase B used to log the timeout and read
+        anyway — an unfinished integration is not this point's value.
+        """
+        r   = _make_runner()
+        dev = 'dev://zi1'
+
+        class StuckRunning(InstantProxy):
+            def state(self):
+                return 'RUNNING'
+
+        devp         = {dev: StuckRunning(read_val=1.0)}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+        cfg          = {'move_timeout': 0.05}     # keep the test fast
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+
+        self.assertFalse(ok, "Phase-B timeout must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']))
+        self.assertIn(dev, r._last_bad_devs)
+
+    def test_nan_from_successful_read_fails_point(self):
+        """
+        A device that reports NaN (lock-in poll returned no samples) has not
+        measured anything, even though the read call succeeded.
+        """
+        r   = _make_runner()
+        dev = 'dev://zi1'
+        devp         = {dev: InstantProxy(read_val=float('nan'))}
+        dev_sensors  = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+        trigger_devs = {dev: 'Start'}
+
+        vals, _t, ok = _acquire(r, devp, dev_sensors, trigger_devs,
+                                {'move_timeout': 5.0})
+
+        self.assertFalse(ok, "A NaN reading must not count as a good point")
+        self.assertIn(dev, r._last_bad_devs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Per-point retry loop (the logic in run() that calls _do_acquire)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2030,6 +2129,218 @@ class TestBDStepFit(unittest.TestCase):
         self.assertIsNone(_bd.latest_h5(os.path.join(d, "nope")))
 
 
+class TestBDSymmetryTieBreak(unittest.TestCase):
+    """Choosing WHICH six of a longer uniform staircase are the tick positions.
+
+    The operator often steps past the six ticks, leaving several overlapping
+    runs of six that are all evenly spaced.  Step uniformity then cannot tell
+    them apart — on the real file 20260811/124802 the two candidates scored
+    1.8 % and 1.9 %, and the 1.8 % winner was the wrong six.  The λ/2 sweep is
+    taken about the balance point, where the balanced diode reads zero, so the
+    tick levels straddle zero; that is the tie-breaker.
+    """
+
+    def test_centred_run_wins_over_marginally_more_uniform_one(self):
+        """Reproduces 124802: 8 uniform holds, the centred six must win."""
+        levels = np.array([95.59, 59.14, 22.36, -14.06, -52.39,
+                           -89.90, -127.33, -163.61]) * 1e-3
+        t, dc = _staircase(levels, hold=250, ramp=80, noise=2e-5, seed=7)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, levels[:6], atol=5e-5)
+        self.assertLess(abs(r.midpoint_mV), 10.0,
+                        f"chosen span must straddle zero, got "
+                        f"{r.midpoint_mV:+.2f} mV")
+        self.assertGreater(r.n_candidates, 1,
+                           "the ambiguity must be reported to the operator")
+
+    def test_offcentre_sweep_still_fits(self):
+        """A sweep genuinely not centred on zero must not be distorted.
+
+        Only one run is evenly spaced here (the parking holds break the
+        spacing), so symmetry must not be allowed to pull the selection away
+        from it — this is the 102928 case that killed the old
+        'six values closest to zero' rule.
+        """
+        ticks = np.array([43.0, 21.6, 0.9, -20.0, -41.8, -63.6]) * 1e-3
+        levels = np.concatenate(([37.0e-3], ticks, [-5.0e-3]))
+        t, dc = _staircase(levels, hold=250, ramp=60, noise=2e-5, seed=3)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, ticks, atol=5e-5)
+
+    def test_uniformity_still_dominates_a_badly_uneven_run(self):
+        """A perfectly centred but unevenly spaced run must not win.
+
+        Symmetry only breaks ties between comparably uniform runs; it can
+        never promote a run that is not a staircase.
+        """
+        # A clean staircase far from zero, then a wildly uneven set of holds
+        # that happens to be centred on zero.  The uneven group must not
+        # continue the 10 mV spacing, or it would extend the staircase and
+        # legitimately offer a more centred uniform run.
+        good = np.array([100.0, 90.0, 80.0, 70.0, 60.0, 50.0]) * 1e-3
+        uneven = np.array([-39.0, 35.0, -36.0, 2.0, -40.0, 38.0]) * 1e-3
+        t, dc = _staircase(np.concatenate((good, uneven)),
+                           hold=250, ramp=60, noise=2e-5, seed=11)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        np.testing.assert_allclose(r.levels_V, good, atol=5e-5)
+
+    def test_single_candidate_reports_no_ambiguity(self):
+        t, dc = _staircase(TestBDStepFit.LEVELS)
+        r = _bd.fit_calibration(t, dc)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.n_candidates, 1)
+
+    def test_tie_tolerance_never_exceeds_the_uniformity_bar(self):
+        """A run admitted only by the tie tolerance must still pass
+        MAX_SPACING_CV, so the tie-break can never turn a good fit into a
+        refusal."""
+        self.assertLessEqual(
+            max(min(_bd.MAX_SPACING_CV * _bd.CV_TIE_FRAC, _bd.CV_TIE_ABS),
+                _bd.MAX_SPACING_CV),
+            _bd.MAX_SPACING_CV)
+
+
+class TestSafeReadStringAttr(unittest.TestCase):
+    """safe_read must never turn a string attribute into its first character.
+
+    `float(raw[0]) if hasattr(raw, "__len__")` was written for SmarAct
+    position arrays, but a str also has __len__ — so the Keithley's string
+    `range` attribute read back as float(("20mA")[0]) == 2.0, and "100mA" as
+    1.0.  Plausible numbers that matched no range in the combo, which is what
+    made the panel report `range=2.0 (not selectable)` while the device was
+    plainly on 20mA.  String attributes must go through safe_read_str.
+    """
+
+    @staticmethod
+    def _hardware():
+        """Import the real core/hardware.py (the suite stubs `hardware`)."""
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "core", "hardware.py")
+        spec = importlib.util.spec_from_file_location("_hw_real", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    class _P:
+        def __init__(self, val): self.val = val
+        def read_attribute(self, attr):
+            r = MagicMock(); r.value = self.val; return r
+        def set_timeout_millis(self, ms): pass
+
+    def test_range_strings_are_not_truncated_to_a_number(self):
+        hw = self._hardware()
+        for s in ("0.0002mA", "0.002mA", "0.02mA", "0.2mA",
+                  "2mA", "20mA", "100mA"):
+            val, err = hw.safe_read(self._P(s), "range", timeout=None)
+            self.assertIsNone(
+                val, f"safe_read({s!r}) must not yield a number, got {val!r}")
+            self.assertIsNotNone(err, f"safe_read({s!r}) must report an error")
+
+    def test_safe_read_str_returns_the_whole_string(self):
+        hw = self._hardware()
+        val, err = hw.safe_read_str(self._P("20mA"), "range", timeout=None)
+        self.assertIsNone(err)
+        self.assertEqual(val, "20mA")
+
+    def test_numeric_string_still_converts(self):
+        """A device that reports a number as text must keep working."""
+        hw = self._hardware()
+        val, err = hw.safe_read(self._P("1.5"), "x", timeout=None)
+        self.assertIsNone(err)
+        self.assertAlmostEqual(val, 1.5)
+
+    def test_arrays_and_scalars_unaffected(self):
+        hw = self._hardware()
+        self.assertAlmostEqual(
+            hw.safe_read(self._P([3.5, 9.9]), "x", timeout=None)[0], 3.5)
+        self.assertAlmostEqual(
+            hw.safe_read(self._P(np.array([2.25])), "x", timeout=None)[0], 2.25)
+        self.assertAlmostEqual(
+            hw.safe_read(self._P(7.0), "x", timeout=None)[0], 7.0)
+
+    def test_panels_read_the_range_as_a_string(self):
+        """All three Keithley panel copies must use safe_read_str for range."""
+        root = os.path.dirname(os.path.abspath(__file__))
+        for rel in ("Samba_main/panels/hardware_panel.py",
+                    "Cryo/keithley_mixin.py",
+                    "Cryo/panels.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn("rng, e5 = safe_read_str(", src,
+                          f"{rel}: the range read must use safe_read_str")
+
+
+class TestDefaultsPanelLoadGuard(unittest.TestCase):
+    """Setup Defaults must not echo `defaults_changed` while load() runs.
+
+    The main windows respond to that signal by merging get_values() into the
+    setup dict and SAVING it.  Fired mid-load it captures a half-restored
+    panel: every widget after the one that emitted still holds the previous
+    setup's state or its construction default.  Observed damage was Cryo's
+    `keithley_device` being overwritten with the first device-registry entry
+    (a lock-in) and persisted to disk, because the Keithley combo is restored
+    further down load() than the spinbox that fired.
+
+    Checked at source level: the failure mode is someone wiring a NEW widget
+    straight to `defaults_changed`, which no behavioural test of today's
+    widgets would notice.  Qt is stubbed in this suite, so the panels
+    themselves cannot be instantiated here.
+    """
+
+    PANELS = [
+        ("Cryo/defaults_panel.py", "_emit_changed"),
+        ("Samba_main/panels/setup_defaults.py", "_on_changed"),
+    ]
+
+    def _src(self, rel):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_load_sets_the_loading_guard(self):
+        for rel, _funnel in self.PANELS:
+            src = self._src(rel)
+            self.assertIn("self._loading = True", src,
+                          f"{rel}: load() must set the _loading guard")
+            self.assertIn("self._loading = False", src,
+                          f"{rel}: the guard must be cleared again")
+
+    def test_funnel_consults_the_guard(self):
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            i = src.index(f"def {funnel}(")
+            body = src[i:i + 600]
+            self.assertIn("if not self._loading:", body,
+                          f"{rel}: {funnel}() must check _loading before emitting")
+
+    def test_no_widget_is_wired_straight_to_defaults_changed(self):
+        """Every emit must route through the funnel.
+
+        A signal-to-signal connection (`w.changed.connect(self.defaults_changed)`)
+        or a `lambda: self.defaults_changed.emit()` cannot consult the guard.
+        """
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            bad = [ln.strip() for n, ln in enumerate(src.splitlines(), 1)
+                   if ".connect(self.defaults_changed)" in ln
+                   or ("defaults_changed.emit()" in ln
+                       and "lambda" in ln)]
+            self.assertEqual(bad, [], f"{rel}: wire these through {funnel}(): {bad}")
+
+    def test_only_the_funnel_emits(self):
+        for rel, funnel in self.PANELS:
+            src = self._src(rel)
+            emits = [n for n, ln in enumerate(src.splitlines(), 1)
+                     if "self.defaults_changed.emit()" in ln]
+            self.assertEqual(
+                len(emits), 1,
+                f"{rel}: defaults_changed should be emitted only inside "
+                f"{funnel}(), found {len(emits)} emit(s) at lines {emits}")
+
 import stage_guard as _sg                                # noqa: E402
 
 
@@ -2464,6 +2775,202 @@ class TestRecentWindowSetting(unittest.TestCase):
         lo50, hi50 = mod.recent_symmetric_ylim([y], window=50)
         self.assertLess(hi10, 1.0)
         self.assertGreater(hi50, 100.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 22. Current sweep — current list, range selection, plateau detection, config
+# ─────────────────────────────────────────────────────────────────────────────
+
+import current_sweep as _cs_mod                          # noqa: E402
+
+
+class TestCurrentSweepList(unittest.TestCase):
+    """The list of excitation currents the sweep steps through."""
+
+    def test_linear_inclusive(self):
+        self.assertEqual(_cs_mod.build_current_list(5, 15, 3), [5.0, 10.0, 15.0])
+
+    def test_descending_when_start_above_stop(self):
+        # "from / to" is taken literally — high→low is a legitimate order.
+        self.assertEqual(_cs_mod.build_current_list(15, 5, 3), [15.0, 10.0, 5.0])
+
+    def test_single_point(self):
+        self.assertEqual(_cs_mod.build_current_list(7.25, 99, 1), [7.25])
+
+    def test_rounded_to_four_decimals(self):
+        # The {I}mA filename token must be stable, so no 8.333333333333.
+        vals = _cs_mod.build_current_list(5, 15, 4)
+        self.assertEqual(vals, [5.0, 8.3333, 11.6667, 15.0])
+
+    def test_format_elides_long_lists(self):
+        s = _cs_mod.format_current_list(list(range(1, 20)))
+        self.assertIn("…", s)
+        self.assertTrue(s.endswith("mA"))
+
+
+class TestKeithleyRangePick(unittest.TestCase):
+    """The source clips to its range, so a sweep crossing 2 → 20 mA has to
+    move the range with it."""
+
+    RANGES = ["2mA", "20mA", "100mA"]
+
+    def test_smallest_fitting_range(self):
+        self.assertEqual(_cs_mod.pick_keithley_range(1.5, self.RANGES), "2mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(5, self.RANGES), "20mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(20, self.RANGES), "20mA")
+        self.assertEqual(_cs_mod.pick_keithley_range(21, self.RANGES), "100mA")
+
+    def test_negative_uses_magnitude(self):
+        self.assertEqual(_cs_mod.pick_keithley_range(-5, self.RANGES), "20mA")
+
+    def test_none_when_nothing_fits(self):
+        self.assertIsNone(_cs_mod.pick_keithley_range(150, self.RANGES))
+
+    def test_parse_variants(self):
+        self.assertEqual(_cs_mod.parse_range_mA("20mA"), 20.0)
+        self.assertEqual(_cs_mod.parse_range_mA("100 mA"), 100.0)
+        self.assertEqual(_cs_mod.parse_range_mA("1A"), 1000.0)
+        self.assertIsNone(_cs_mod.parse_range_mA("nonsense"))
+
+
+class TestSweepValidation(unittest.TestCase):
+    """A sweep that cannot run must be refused before the setup lock is taken."""
+
+    RANGES = ["2mA", "20mA", "100mA"]
+
+    def test_ok(self):
+        self.assertIsNone(_cs_mod.validate_sweep([5, 10, 15], self.RANGES))
+
+    def test_empty_refused(self):
+        self.assertIsNotNone(_cs_mod.validate_sweep([], self.RANGES))
+
+    def test_over_hardware_range_refused(self):
+        err = _cs_mod.validate_sweep([5, 150], self.RANGES)
+        self.assertIsNotNone(err)
+        self.assertIn("150", err)
+
+    def test_fixed_range_refuses_currents_above_it(self):
+        err = _cs_mod.validate_sweep([1, 5], self.RANGES,
+                                     auto_range=False, fixed_range="2mA")
+        self.assertIsNotNone(err)
+        self.assertIn("2mA", err)
+
+    def test_too_many_currents_refused(self):
+        err = _cs_mod.validate_sweep(list(range(1, 200)), self.RANGES)
+        self.assertIsNotNone(err)
+        self.assertIn(str(_cs_mod.MAX_CURRENTS), err)
+
+
+class TestPlateauDetector(unittest.TestCase):
+    """Deciding the sample has thermalised from the focus-diode trace."""
+
+    @staticmethod
+    def _exp_decay(det, t_end, tau=60.0, step=5.0):
+        """Feed a settling exponential; return when it was first called settled."""
+        import math
+        t = 0.0
+        while t <= t_end:
+            det.add(t, 10.0 - 2.0 * (1 - math.exp(-t / tau)))
+            st = det.state(t)
+            if st["settled"]:
+                return t, st
+            t += step
+        return None, det.state(t_end)
+
+    def test_minimum_wait_blocks_an_early_plateau(self):
+        """The bound is not cosmetic: right after a refocus the FL signal sits
+        on its maximum, where dFL/dz ~ 0, so a flat start is expected."""
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=300, max_wait_s=1200)
+        for i in range(40):
+            det.add(i * 5.0, 10.0)          # perfectly flat
+        st = det.state(195.0)
+        self.assertFalse(st["settled"])
+        self.assertEqual(st["reason"], "minimum wait")
+
+    def test_plateau_detected_after_settling(self):
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=100, max_wait_s=1200)
+        t, st = self._exp_decay(det, 900.0)
+        self.assertIsNotNone(t)
+        self.assertEqual(st["reason"], "plateau")
+        self.assertGreaterEqual(t, 100.0)
+
+    def test_gives_up_at_max_wait(self):
+        det = _cs_mod.PlateauDetector(window_s=60, tol_pct_per_min=0.5,
+                                      min_wait_s=100, max_wait_s=300)
+        t = 0.0
+        while t <= 400:
+            det.add(t, 10.0 - 0.01 * t)     # never stops drifting
+            st = det.state(t)
+            if st["settled"]:
+                break
+            t += 5.0
+        self.assertTrue(st["settled"])
+        self.assertEqual(st["reason"], "timeout")
+        self.assertGreaterEqual(t, 300.0)
+
+    def test_non_finite_samples_dropped(self):
+        det = _cs_mod.PlateauDetector()
+        self.assertFalse(det.add(0.0, float("nan")))
+        self.assertFalse(det.add(0.0, None))
+        self.assertTrue(det.add(0.0, 1.0))
+
+    def test_no_data_is_not_settled(self):
+        st = _cs_mod.PlateauDetector().state(0.0)
+        self.assertFalse(st["settled"])
+        self.assertIsNone(st["rate"])
+
+    def test_rate_is_percent_of_signal_per_minute(self):
+        det = _cs_mod.PlateauDetector(window_s=60)
+        for i in range(13):                 # 60 s at 5 s spacing
+            det.add(i * 5.0, 100.0 - i * 5.0 * 0.1)   # −0.1 units/s of ~100
+        rate = det.rate_pct_per_min(60.0)
+        self.assertLess(rate, 0.0)
+        self.assertAlmostEqual(abs(rate), 6.0, delta=1.5)
+
+
+class TestCurrentSweepConfig(unittest.TestCase):
+    """Config defaults and the schema migration that adds them."""
+
+    def _load(self, app_dir, name):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               app_dir, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_disabled_by_default_in_both_apps(self):
+        for app_dir, name in (("Samba_main", "sm_cfg"), ("Cryo", "cryo_cfg")):
+            cfg = self._load(app_dir, name).make_default_config()
+            self.assertFalse(cfg["cursweep_enabled"], app_dir)
+            self.assertEqual(cfg["cursweep_settle_mode"], _cs_mod.SETTLE_FIXED)
+
+    def test_v8_to_v9_backfills(self):
+        mod = self._load("Samba_main", "sm_cfg_mig")
+        self.assertEqual(mod.SCHEMA_VERSION, 9)
+        old = {"_schema_version": 8, "name": "x"}
+        mod._migrate_config(old)
+        self.assertEqual(old["_schema_version"], 9)
+        self.assertFalse(old["cursweep_enabled"])
+        self.assertEqual(old["cursweep_fixed_min"], 10.0)
+
+    def test_migration_preserves_an_existing_choice(self):
+        mod = self._load("Samba_main", "sm_cfg_keep")
+        cfg = {"_schema_version": 8, "cursweep_enabled": True,
+               "cursweep_npts": 7}
+        mod._migrate_config(cfg)
+        self.assertTrue(cfg["cursweep_enabled"])
+        self.assertEqual(cfg["cursweep_npts"], 7)
+
+    def test_cryo_migration_backfills(self):
+        mod = self._load("Cryo", "cryo_cfg_mig")
+        cfg = {"name": "x"}
+        mod._migrate_config(cfg)
+        self.assertFalse(cfg["cursweep_enabled"])
+        self.assertTrue(cfg["cursweep_refocus"])
 
 
 if __name__ == '__main__':

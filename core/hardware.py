@@ -240,6 +240,13 @@ def safe_read(proxy, attr: str,
     """
     def _do():
         raw = proxy.read_attribute(attr).value
+        # A str has __len__, so the array branch would index it and silently
+        # return its FIRST CHARACTER as a number: the Keithley's "20mA" range
+        # read back as 2.0, and "100mA" as 1.0 — plausible values that never
+        # matched anything.  Convert the whole string or fail loudly; use
+        # safe_read_str for genuinely textual attributes.
+        if isinstance(raw, (str, bytes)):
+            return float(raw)
         return float(raw[0]) if hasattr(raw, "__len__") else float(raw)
 
     if timeout is None:
@@ -274,6 +281,36 @@ def safe_read_str(proxy, attr: str,
         return None, f"timeout after {timeout}s reading '{attr}'"
     except Exception as e:
         return None, str(e)
+
+
+def trigger_and_read(proxy, attr: str, wait_s: float = 2.0,
+                     guard_s: float = 0.05
+                     ) -> Tuple[Optional[float], Optional[str]]:
+    """Trigger one acquisition and read the averaged result.
+
+    The standard Samba sensor handshake: Start → wait for the device to leave
+    RUNNING → read (see the DoubleInBeckhoffAverage protocol in §15).  Devices
+    without a Start command or without state feedback degrade to a plain read
+    after the guard delay, so this is safe to call on anything.
+
+    Used by the autofocus sweep and by the thermal-settle monitor, which both
+    read the focus diode point by point.
+    """
+    try:
+        proxy.command_inout("Start")
+    except Exception:
+        pass                      # no Start command — plain read below
+    t0 = time.time()
+    time.sleep(guard_s)
+    while time.time() - t0 < wait_s:
+        try:
+            if str(proxy.state()) != "RUNNING":
+                break
+        except Exception:
+            break                 # no state feedback — don't spin
+        time.sleep(0.02)
+    time.sleep(guard_s)
+    return safe_read(proxy, attr)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

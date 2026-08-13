@@ -35,6 +35,7 @@ from config import (
 from hardware import fresh_proxy, is_sim_proxy, safe_write, safe_read, safe_read_str
 from device_registry import load_registry
 from nstep import NStepPair
+from current_sweep_ui import CurrentSweepGroup
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -395,10 +396,14 @@ class HardwarePanel(QGroupBox):
         if conn_err:
             self._set_err(self.ks_status, conn_err); return
 
-        amp, e1 = safe_read(p, "amplitude")
-        frq, e2 = safe_read(p, "frequency")
-        cpl, e3 = safe_read(p, "compliance")
-        cur, e4 = safe_read(p, "current")
+        amp, e1 = safe_read(p, s.get("keithley_attr_amplitude")  or "amplitude")
+        frq, e2 = safe_read(p, s.get("keithley_attr_frequency")  or "frequency")
+        cpl, e3 = safe_read(p, s.get("keithley_attr_compliance") or "compliance")
+        cur, e4 = safe_read(p, s.get("keithley_attr_current")    or "current")
+        # The range is a memorized string attribute on the Keithley server, so
+        # it survives a server restart and is the only trustworthy source for
+        # the range the hardware is actually on.
+        rng, e5 = safe_read_str(p, s.get("keithley_attr_range")  or "range")
         errs = [e for e in [e1, e2] if e]
         if errs:
             self._set_err(self.ks_status, errs[0][:60]); return
@@ -410,11 +415,36 @@ class HardwarePanel(QGroupBox):
             self.current_rb.setText(f"{cur:.4g} mA")
         else:
             self.current_rb.setText("— mA")
+
+        rng_note = self._apply_range_readback(None if e5 else rng)
+
         parts = []
         if amp is not None: parts.append(f"amp={amp:.4g}")
         if frq is not None: parts.append(f"freq={frq:.4g}")
         if cpl is not None: parts.append(f"compl={cpl:.2f}V")
+        if rng_note:        parts.append(rng_note)
         self._set_ok(self.ks_status, "  ".join(parts))
+
+    def _apply_range_readback(self, rng) -> str:
+        """Select the device's reported range in the combo.
+
+        Returns a short note for the status line.  The combo offers only the
+        ranges Samba uses, so a device sitting on one of the Keithley's other
+        ranges is reported in the status line instead of being silently
+        misrepresented as the combo's current selection.
+        """
+        if rng is None:
+            return "range=?"
+        rng = str(rng).replace("\x00", "").strip()
+        if not rng:
+            # Never written since the server started — say so rather than
+            # letting the combo's default imply a hardware state.
+            return "range=unset"
+        idx = self.range_combo.findText(rng)
+        if idx >= 0:
+            self.range_combo.setCurrentIndex(idx)
+            return f"range={rng}"
+        return f"range={rng} (not selectable)"
 
     # ── Individual-attribute writes (called by Enter on each spinbox) ──────────
     def _write_range(self):
@@ -2431,38 +2461,13 @@ class ScanlistPanel(QWidget):
         self._hw_panel_class = hw_panel_class or HardwarePanel
         root = QVBoxLayout(self); root.setContentsMargins(8, 6, 8, 6); root.setSpacing(6)
 
-        # ── Top row: active config + timing + metadata side by side ─────────
+        # ── Top row: polarity + scanlist + current sweep ─────────────────────
+        # Both left-hand boxes are two rows tall so they line up: the polarity
+        # flips stack, and the active config shares row 0 with N scans.
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
-        info_w = QWidget(); info_l = QVBoxLayout(info_w)
-        info_l.setContentsMargins(0, 0, 0, 0); info_l.setSpacing(4)
-        hl0 = QHBoxLayout(); hl0.addWidget(QLabel("Active config:"))
-        self.active_lbl = QLabel("—"); self.active_lbl.setStyleSheet("color:#89b4fa;font-weight:bold;")
-        hl0.addWidget(self.active_lbl); hl0.addStretch()
-        info_l.addLayout(hl0)
-        info_l.addStretch()
-        top_row.addWidget(info_w)
-
-        # ── Timing group — kept in sync with Trajectory tab ──────────────────
-        tg = QGroupBox("Timing"); tl = QGridLayout(tg)
-        tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
-        def _dbl(lo, hi, dec, v):
-            w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
-        tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
-        tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
-        tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
-        top_row.addWidget(tg)
-
-        self.meta = MokeMetadataGroup("Metadata")
-        self.meta.changed.connect(self._update_auto_name)
-        top_row.addWidget(self.meta)
-        root.addLayout(top_row)
-
-        self.hw = self._hw_panel_class(self._setup_getter, "Hardware"); root.addWidget(self.hw)
-
-        sl_row = QHBoxLayout(); sl_row.setSpacing(10)
-        pg = QGroupBox("Polarity control"); pl = QHBoxLayout(pg)
-        pl.setSpacing(8); pl.setContentsMargins(8, 8, 8, 8)
+        pg = QGroupBox("Polarity control"); pl = QVBoxLayout(pg)
+        pl.setSpacing(6); pl.setContentsMargins(8, 8, 8, 8)
         self.relay_flip_btn = QPushButton("Relay flip: OFF"); self.relay_flip_btn.setCheckable(True)
         self.relay_flip_btn.toggled.connect(lambda c: self.relay_flip_btn.setText("Relay flip: ON" if c else "Relay flip: OFF"))
         self.field_flip_btn = QPushButton("Field flip: OFF"); self.field_flip_btn.setCheckable(True)
@@ -2470,22 +2475,70 @@ class ScanlistPanel(QWidget):
         pl.addWidget(self.relay_flip_btn); pl.addWidget(self.field_flip_btn)
         for _b in (self.relay_flip_btn, self.field_flip_btn):
             _b.toggled.connect(lambda _: self.polarity_changed.emit())
-        sl_row.addWidget(pg)
+        # Boxes expand with the tab (so no gap opens between the rows) but
+        # their contents stay pinned to the top instead of floating.
+        pl.setAlignment(Qt.AlignmentFlag.AlignTop)
+        top_row.addWidget(pg)
 
         ng = QGroupBox("Scanlist"); nl = QGridLayout(ng); nl.setSpacing(6); nl.setContentsMargins(8, 8, 8, 8)
-        nl.addWidget(QLabel("N scans:"), 0, 0)
+        # Row 0 is packed left so "Config: x   N scans: n" reads as one line;
+        # left to itself the grid strands N scans against the far edge of a
+        # box that is over 1700 px wide.
+        row0 = QHBoxLayout(); row0.setSpacing(6)
+        row0.addWidget(QLabel("Config:"))
+        self.active_lbl = QLabel("—")
+        self.active_lbl.setStyleSheet("color:#89b4fa;font-weight:bold;")
+        row0.addWidget(self.active_lbl)
+        row0.addSpacing(18)
+        row0.addWidget(QLabel("N scans:"))
         self.n_spin = NoScrollSpinBox(); self.n_spin.setRange(1,9999); self.n_spin.setValue(4)
-        nl.addWidget(self.n_spin, 0, 1)
+        self.n_spin.setMaximumWidth(90)
+        row0.addWidget(self.n_spin)
+        row0.addStretch()
+        nl.addLayout(row0, 0, 0, 1, 2)
         nl.addWidget(QLabel("Name:"), 1, 0)
         self.sl_name = QLineEdit(); self.sl_name.setReadOnly(True)
         self.sl_name.setStyleSheet(
             "background:#181825;color:#a6e3a1;border:1px solid #313244;"
             "border-radius:3px;padding:2px 4px;font-family:'Courier New',monospace;font-size:10px;")
+        nl.setColumnStretch(1, 1)          # the auto-name gets the spare width
         nl.addWidget(self.sl_name, 1, 1)
-        sl_row.addWidget(ng)
-        root.addLayout(sl_row)
+        nl.setRowStretch(2, 1)             # keep the two rows at the top
+        top_row.addWidget(ng, stretch=1)
 
-        # Auto-update name when HW spins change too
+        root.addLayout(top_row)
+
+        # Own row, full width — repeats the whole list at several excitation
+        # currents (core/current_sweep.py).  Unchecked = one plain scanlist.
+        # Given the row stretch so it absorbs spare height instead of leaving
+        # a gap above the bottom row when the tab is made taller.
+        self.cur_sweep = CurrentSweepGroup()
+        root.addWidget(self.cur_sweep, stretch=1)
+
+        # ── Bottom row: Timing + Metadata + Hardware (matches Trajectory) ────
+        bot = QHBoxLayout(); bot.setSpacing(4)
+
+        tg = QGroupBox("Timing"); tl = QGridLayout(tg)
+        tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)
+        def _dbl(lo, hi, dec, v):
+            w = NoScrollDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec); w.setValue(v); return w
+        tl.addWidget(QLabel("Int (s):"),    0, 0); self.int_time = _dbl(0.001, 3600, 3, 0.1); tl.addWidget(self.int_time, 0, 1)
+        tl.addWidget(QLabel("Settle (s):"), 1, 0); self.settle   = _dbl(0,     10,   3, 0.05); tl.addWidget(self.settle,   1, 1)
+        tl.addWidget(QLabel("T.out (s):"),  2, 0); self.timeout  = _dbl(0.1,   300,  1, 15.0); tl.addWidget(self.timeout,  2, 1)
+        bot.addWidget(tg)
+
+        self.meta = MokeMetadataGroup("Metadata")
+        self.meta.changed.connect(self._update_auto_name)
+        bot.addWidget(self.meta)
+
+        self.hw = self._hw_panel_class(self._setup_getter, "Hardware")
+        self.hw.setMaximumWidth(700)
+        bot.addWidget(self.hw)
+        root.addLayout(bot)
+
+        # Auto-update name when HW spins change too.  The current sweep drives
+        # amp_spin between currents, so each current's scanlist name picks up
+        # its own {I}mA token through this connection.
         self.hw.amp_spin.valueChanged.connect(lambda _: self._update_auto_name())
         self.hw.freq_spin.valueChanged.connect(lambda _: self._update_auto_name())
         # Initial name
@@ -2518,23 +2571,26 @@ class ScanlistPanel(QWidget):
         btn.setText(f"{label}: {'ON' if on else 'OFF'}")
 
     def load_config(self, cfg: dict):
-        """Restore the polarity toggles from a scan config (silently)."""
+        """Restore the polarity toggles and current sweep (silently)."""
         self._load_flip(self.relay_flip_btn, "Relay flip",
                         bool(cfg.get("relay_flip", False)))
         self._load_flip(self.field_flip_btn, "Field flip",
                         bool(cfg.get("field_flip", False)))
+        self.cur_sweep.load_values(cfg)
 
     def get_config_partial(self) -> dict:
-        """Polarity state for persistence into the active scan config.
+        """Polarity + current-sweep state for the active scan config.
 
         Without this the toggles were session-only UI state: they reset to OFF
         on every restart, and nothing in the saved data recorded whether
         flipping had been enabled.
         """
-        return {
+        d = {
             "relay_flip": self.relay_flip_btn.isChecked(),
             "field_flip": self.field_flip_btn.isChecked(),
         }
+        d.update(self.cur_sweep.get_values())
+        return d
 
     def get_settings(self) -> dict:
         # field_spin exists on HardwarePanel; CryoHardwarePanel has field_sp
