@@ -3985,3 +3985,105 @@ Run across all **294** calibration files under `Data_Samba_IR`: 7 fit (spread
 are refused, the great majority because they are short aborted scans (143 have
 too few plateaus) or were recorded with lock-in channels instead of DC (97).
 `102928` reproduces the expected `43.0, 21.6, 0.9, −20.0, −41.8, −63.6 mV`.
+
+---
+
+## 67. Recent Changes (August 2026) — Stage Runaway Guard (uncommanded Z motion)
+
+Branch `claude/stage-runaway-guard` (149 tests). App version → **v13.12**.
+
+### The incident
+On the IR setup, after the workflow *Reinitialise → Read all → set current
+position as zero*, the piezo twice began moving in Z on its own, travelling
+well over 100 µm. A +Z excursion of that size drives the sample into the
+objective.
+
+### Root cause — device side, not Samba
+In Samba every stage write requires an explicit action (jog/Enter, autofocus,
+a running scan, the zero-after-scan plan, the script console). Nothing writes
+a stage axis on a timer, so an idle Samba commands no motion.
+
+The defect is in `SmarActMCS2Motor::write_Position` (TANGO_Devices):
+
+```cpp
+switch(*attr_MoveMode_read) {
+    case SA_CTL_MOVE_MODE_STEP:
+    case SA_CTL_MOVE_MODE_SCAN_RELATIVE:
+        (*in)[1] = w_val -= *attr_Position_read;   // absolute → relative
+    break;
+    default:                                        // ← CL_RELATIVE lands here
+        (*in)[1] = w_val * *attr_Conversion_read;   // passed through unconverted
+}
+```
+
+`STEP` and `SCAN_RELATIVE` convert an absolute target into a relative one;
+**`CL_RELATIVE` does not** — it falls through to `default`, so `SA_CTL_Move`
+executes the absolute value as a *relative* move. Writing "go to 37 µm" moves
+the stage **+37 µm from wherever it is**, every time.
+
+How the axis reaches `CL_RELATIVE`: `SmarActMCS2Ctrl::set_offset` (the
+set-zero path) switches to `CL_RELATIVE`, performs a relative-0 re-peg to
+re-enable holding, then restores the previous mode — **with no exception
+safety**. `set_position` throws on any SA_CTL error, and the restore line is
+then never reached, leaving the axis in `CL_RELATIVE`.
+
+Compounding: `write_Position` branches on the Motor's **cached**
+`attr_MoveMode_read`, refreshed only when the `MoveMode` attribute is read.
+`set_offset` changes the mode on the *Ctrl*, behind the Motor's back, so the
+cache can disagree with the hardware and pick the wrong branch either way.
+
+This matches the symptom: begins right after the zero step, quiet until the
+first position write, only on the axis touched, magnitude ≈ the absolute
+coordinate, sign following the target.
+
+**Not proven** — the MoveMode at the time of the incident was not recorded.
+Note also that the checked-out TANGO_Devices branch's Stage server has no
+`SetZero` at all (only `Stop` and `Initialise`), so the deployed build
+differs from that checkout.
+
+### The guard (`core/stage_guard.py`, new)
+Decision logic only — no Qt, no TANGO — so it is unit-testable headless;
+`Samba_main/stage_guard.py` and `Cryo/stage_guard.py` are the usual shims.
+
+- Two rules: an **abrupt jump** between consecutive samples (default 20 µm),
+  and a **cumulative drift** since arming (2 × the jump threshold), because a
+  slow walk never exceeds the per-sample bound yet still reaches the objective.
+- **Units matter**: the IR axes report **nm**, so a 20 µm threshold is 20000
+  native counts. The threshold is converted using the unit from Setup Defaults
+  (`um_per_unit`); getting this backwards makes the guard either useless or
+  unusable, so it is tested explicitly.
+- **Commanded motion is not a fault.** `_move_axis` announces jogs; autofocus
+  and scans suspend the guard entirely (`set_stage_guard_suspended`, called
+  from `_set_running` in both apps and around the autofocus worker).
+- **The response is `Stop`, never a position write** — commanding a position
+  is what misfires, and in `CL_RELATIVE` it would add another jump.
+- **The trip latches.** Auto re-arming would let a runaway resume the moment
+  the stage paused, which is exactly when it looks calm. A "Re-arm" button
+  clears it.
+- A failed `Stop` is surfaced loudly (dialog tells the operator to cut power)
+  rather than swallowed.
+
+UI: a "Runaway guard" checkbox, a trip-threshold spinbox and a state label in
+the Calibration tab's Stage-positioning group. Polling is 250 ms in a daemon
+thread, so the GUI never blocks.
+
+### Honest limitation
+This is a **mitigation, not an interlock**. It polls over TANGO, so worst-case
+detection distance is *stage speed × poll interval* — at 1 mm/s and 250 ms
+that is 250 µm before the first Stop is sent. The real fixes are device-side:
+
+1. Add `case SA_CTL_MOVE_MODE_CL_RELATIVE` to the absolute→relative
+   conversion in `write_Position`.
+2. Make the move-mode restore in `set_offset` exception-safe (RAII/try-catch).
+3. Re-read `MoveMode` in `write_Position` instead of trusting the cache.
+4. Set `UnitLimitMin`/`UnitLimitMax` on the Z motor — the only true interlock,
+   enforced inside the device before any move is issued.
+
+### Tests
+`test_runner.py` +16 → 149: unit conversion, jump both directions, quiet below
+threshold, nm-axis false-trip resistance, slow-walk drift rule, latching,
+commanded-move allowance and its expiry, scan suspend/resume, disabled guard,
+dropped readings, per-axis independence, message content. The panel wiring was
+verified against the real shipped methods with Qt stubbed and the device faked
+(17 checks, not committed): Stop sent exactly once, no position ever written,
+latching, dialog shown, failed-Stop surfaced, scan suspension.

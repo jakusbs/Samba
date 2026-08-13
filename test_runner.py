@@ -2030,6 +2030,161 @@ class TestBDStepFit(unittest.TestCase):
         self.assertIsNone(_bd.latest_h5(os.path.join(d, "nope")))
 
 
+import stage_guard as _sg                                # noqa: E402
+
+
+class TestStageGuard(unittest.TestCase):
+    """core/stage_guard.py — watchdog against uncommanded stage motion.
+
+    Motivating incident: a SmarAct axis left in CL_RELATIVE executes an
+    absolute position write as a relative move of that magnitude, so the stage
+    walks away by its own coordinate on every write.  On the IR setup a +Z
+    excursion of ~100 µm drives the sample into the objective, so the two
+    properties that matter are: it must fire on uncommanded motion, and it
+    must not fire on commanded motion (or it will be switched off)."""
+
+    def test_unit_conversion(self):
+        """The IR axes report nm — a 20 µm threshold is 20000 native units.
+        Getting this backwards makes the guard either useless or unusable."""
+        self.assertAlmostEqual(_sg.um_per_unit("nm"), 1e-3)
+        self.assertAlmostEqual(_sg.um_per_unit("µm"), 1.0)
+        self.assertAlmostEqual(_sg.um_per_unit("um"), 1.0)
+        self.assertAlmostEqual(_sg.um_per_unit("mm"), 1e3)
+        self.assertAlmostEqual(_sg.um_per_unit(""), 1.0)      # unknown → µm
+
+    def _guard(self, unit="µm", **kw):
+        return _sg.StageGuard(units={"x": unit, "y": unit, "z": unit}, **kw)
+
+    def test_trips_on_abrupt_jump(self):
+        g = self._guard()
+        self.assertIsNone(g.update({"z": 0.0}, 0.0))
+        trip = g.update({"z": 25.0}, 0.1)
+        self.assertIsNotNone(trip)
+        self.assertEqual(trip.axis, "z")
+        self.assertEqual(trip.kind, "jump")
+        self.assertAlmostEqual(trip.delta_um, 25.0)
+
+    def test_trips_in_negative_direction_too(self):
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        trip = g.update({"z": -30.0}, 0.1)
+        self.assertIsNotNone(trip)
+        self.assertLess(trip.delta_um, 0)
+
+    def test_quiet_below_threshold(self):
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        for i in range(1, 10):
+            self.assertIsNone(g.update({"z": i * 0.05}, i * 0.1))
+
+    def test_nm_axis_does_not_false_trip(self):
+        """20 µm on an nm axis is 20000 counts; ordinary nm-scale jitter and
+        real sub-µm moves must stay quiet."""
+        g = self._guard(unit="nm")
+        g.update({"z": 0.0}, 0.0)
+        for i in range(1, 20):
+            self.assertIsNone(g.update({"z": i * 500.0}, i * 0.1),
+                              "0.5 µm steps should not trip")
+
+    def test_nm_axis_trips_on_real_runaway(self):
+        g = self._guard(unit="nm")
+        g.update({"z": 0.0}, 0.0)
+        trip = g.update({"z": 100_000.0}, 0.1)          # +100 µm
+        self.assertIsNotNone(trip)
+        self.assertAlmostEqual(trip.delta_um, 100.0)
+
+    def test_commanded_move_is_not_a_fault(self):
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        g.note_commanded_move("z", 500.0, now=0.0)
+        for i, pos in enumerate((100.0, 250.0, 400.0, 500.0), start=1):
+            self.assertIsNone(g.update({"z": pos}, i * 0.1),
+                              "commanded motion must not trip")
+
+    def test_guard_rearms_after_the_allowance_lapses(self):
+        g = self._guard(settle_s=1.0)
+        g.update({"z": 0.0}, 0.0)
+        g.note_commanded_move("z", 50.0, now=0.0)
+        g.update({"z": 50.0}, 0.5)                       # allowed
+        self.assertIsNone(g.tripped)
+        trip = g.update({"z": 120.0}, 2.0)               # allowance expired
+        self.assertIsNotNone(trip, "must re-arm once the move settles")
+
+    def test_slow_walk_is_caught_by_drift_rule(self):
+        """A creep that never exceeds the per-sample threshold still ends up
+        in the objective."""
+        g = self._guard(trip_um=20.0, drift_um=40.0)
+        g.update({"z": 0.0}, 0.0)
+        trip = None
+        for i in range(1, 20):
+            trip = g.update({"z": i * 5.0}, i * 0.1)     # 5 µm per sample
+            if trip:
+                break
+        self.assertIsNotNone(trip, "slow runaway was never caught")
+        self.assertEqual(trip.kind, "drift")
+
+    def test_trip_is_latched(self):
+        """Re-arming by itself would let a runaway resume the moment the
+        stage pauses — which is exactly when it looks calm."""
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        self.assertIsNotNone(g.update({"z": 50.0}, 0.1))
+        # Further samples report nothing new; the caller already acted.
+        self.assertIsNone(g.update({"z": 100.0}, 0.2))
+        self.assertIsNotNone(g.tripped)
+        g.reset()
+        self.assertIsNone(g.tripped)
+
+    def test_suspend_during_scan(self):
+        """A scan drives the stage by design."""
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        g.suspend(True)
+        for i in range(1, 6):
+            self.assertIsNone(g.update({"z": i * 1000.0}, i * 0.1))
+        g.suspend(False)
+        # First sample after resuming only re-anchors, never trips.
+        self.assertIsNone(g.update({"z": 5000.0}, 1.0))
+
+    def test_resume_after_scan_does_not_trip_on_the_gap(self):
+        """The stage legitimately ends a scan far from where it started."""
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        g.suspend(True)
+        g.update({"z": 900.0}, 1.0)
+        g.suspend(False)
+        self.assertIsNone(g.update({"z": 900.0}, 1.1))
+        self.assertIsNone(g.update({"z": 900.5}, 1.2))
+
+    def test_disabled_guard_never_trips(self):
+        g = self._guard()
+        g.enabled = False
+        g.update({"z": 0.0}, 0.0)
+        self.assertIsNone(g.update({"z": 9999.0}, 0.1))
+
+    def test_missing_readings_are_ignored(self):
+        """A failed read must not be mistaken for motion."""
+        g = self._guard()
+        g.update({"z": 0.0}, 0.0)
+        self.assertIsNone(g.update({"z": None}, 0.1))
+        self.assertIsNone(g.update({"z": 1.0}, 0.2))
+
+    def test_axes_are_independent(self):
+        g = self._guard()
+        g.update({"x": 0.0, "y": 0.0, "z": 0.0}, 0.0)
+        g.note_commanded_move("x", 500.0, now=0.0)
+        trip = g.update({"x": 400.0, "y": 0.1, "z": 60.0}, 0.1)
+        self.assertIsNotNone(trip)
+        self.assertEqual(trip.axis, "z", "commanded X must not mask Z")
+
+    def test_message_is_actionable(self):
+        g = self._guard(unit="nm")
+        g.update({"z": 0.0}, 0.0)
+        msg = g.update({"z": 50_000.0}, 0.1).message()
+        for token in ("Z axis", "50.0", "µm", "STOPPED"):
+            self.assertIn(token, msg)
+
+
 class TestAppVersion(unittest.TestCase):
     """Samba_main window title carries the vX.YZ application version."""
 
