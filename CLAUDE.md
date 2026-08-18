@@ -4483,13 +4483,129 @@ Same class as §67, different trigger; reproduced identically on `main`, so it
 predates this batch. Matters for the §47 "copied the config to a new machine"
 case.
 
+## 69. Recent Changes (August 2026) — Stage Runaway Guard (uncommanded Z motion)
+
+Branch `claude/stage-runaway-guard` (192 tests). App version → **v13.17**.
+
+### The incident
+On the IR setup, after the workflow *Reinitialise → Read all → set current
+position as zero*, the piezo twice began moving in Z on its own, travelling
+well over 100 µm. A +Z excursion of that size drives the sample into the
+objective.
+
+### Root cause — device side, not Samba
+In Samba every stage write requires an explicit action (jog/Enter, autofocus,
+a running scan, the zero-after-scan plan, the script console). Nothing writes
+a stage axis on a timer, so an idle Samba commands no motion.
+
+The defect is in `SmarActMCS2Motor::write_Position` (TANGO_Devices):
+
+```cpp
+switch(*attr_MoveMode_read) {
+    case SA_CTL_MOVE_MODE_STEP:
+    case SA_CTL_MOVE_MODE_SCAN_RELATIVE:
+        (*in)[1] = w_val -= *attr_Position_read;   // absolute → relative
+    break;
+    default:                                        // ← CL_RELATIVE lands here
+        (*in)[1] = w_val * *attr_Conversion_read;   // passed through unconverted
+}
+```
+
+`STEP` and `SCAN_RELATIVE` convert an absolute target into a relative one;
+**`CL_RELATIVE` does not** — it falls through to `default`, so `SA_CTL_Move`
+executes the absolute value as a *relative* move. Writing "go to 37 µm" moves
+the stage **+37 µm from wherever it is**, every time.
+
+How the axis reaches `CL_RELATIVE`: `SmarActMCS2Ctrl::set_offset` (the
+set-zero path) switches to `CL_RELATIVE`, performs a relative-0 re-peg to
+re-enable holding, then restores the previous mode — **with no exception
+safety**. `set_position` throws on any SA_CTL error, and the restore line is
+then never reached, leaving the axis in `CL_RELATIVE`.
+
+Compounding: `write_Position` branches on the Motor's **cached**
+`attr_MoveMode_read`, refreshed only when the `MoveMode` attribute is read.
+`set_offset` changes the mode on the *Ctrl*, behind the Motor's back, so the
+cache can disagree with the hardware and pick the wrong branch either way.
+
+This matches the symptom: begins right after the zero step, quiet until the
+first position write, only on the axis touched, magnitude ≈ the absolute
+coordinate, sign following the target.
+
+**Not proven** — the MoveMode at the time of the incident was not recorded.
+
+> **Correction (§70):** the "Stage server has no `SetZero`" note above was a
+> stale checkout — `SetZero` has been on the server since §52 and is what the
+> ⊘ Zero here button calls. The four device-side fixes listed below are all
+> implemented in §70's TANGO_Devices half, except (3): `write_Position` now
+> *pushes* the cached mode to the controller before every move rather than
+> re-reading it, which removes the divergence instead of detecting it.
+
+### The guard (`core/stage_guard.py`, new)
+Decision logic only — no Qt, no TANGO — so it is unit-testable headless;
+`Samba_main/stage_guard.py` and `Cryo/stage_guard.py` are the usual shims.
+
+- Two rules: an **abrupt jump** between consecutive samples (default 20 µm),
+  and a **cumulative drift** since arming (2 × the jump threshold), because a
+  slow walk never exceeds the per-sample bound yet still reaches the objective.
+- **Units matter**: the IR axes report **nm**, so a 20 µm threshold is 20000
+  native counts. The threshold is converted using the unit from Setup Defaults
+  (`um_per_unit`); getting this backwards makes the guard either useless or
+  unusable, so it is tested explicitly.
+- **Commanded motion is not a fault.** `_move_axis` announces jogs; autofocus
+  and scans suspend the guard entirely (`set_stage_guard_suspended`, called
+  from `_set_running` in both apps and around the autofocus worker).
+- **The response is `Stop`, never a position write** — commanding a position
+  is what misfires, and in `CL_RELATIVE` it would add another jump.
+- **The trip latches.** Auto re-arming would let a runaway resume the moment
+  the stage paused, which is exactly when it looks calm. A "Re-arm" button
+  clears it.
+- A failed `Stop` is surfaced loudly (dialog tells the operator to cut power)
+  rather than swallowed.
+
+UI: a "Runaway guard" checkbox, a trip-threshold spinbox and a state label in
+the Calibration tab's Stage-positioning group. Polling is 250 ms in a daemon
+thread, so the GUI never blocks.
+
+### Honest limitation
+This is a **mitigation, not an interlock**. It polls over TANGO, so worst-case
+detection distance is *stage speed × poll interval* — at 1 mm/s and 250 ms
+that is 250 µm before the first Stop is sent. The real fixes are device-side:
+
+1. Add `case SA_CTL_MOVE_MODE_CL_RELATIVE` to the absolute→relative
+   conversion in `write_Position`.
+2. Make the move-mode restore in `set_offset` exception-safe (RAII/try-catch).
+3. Re-read `MoveMode` in `write_Position` instead of trusting the cache.
+4. Set `UnitLimitMin`/`UnitLimitMax` on the Z motor — the only true interlock,
+   enforced inside the device before any move is issued.
+
+### Tests
+`test_runner.py` +16 → 192: unit conversion, jump both directions, quiet below
+threshold, nm-axis false-trip resistance, slow-walk drift rule, latching,
+commanded-move allowance and its expiry, scan suspend/resume, disabled guard,
+dropped readings, per-axis independence, message content. The panel wiring was
+verified against the real shipped methods with Qt stubbed and the device faked
+(17 checks, not committed): Stop sent exactly once, no position ever written,
+latching, dialog shown, failed-Stop surfaced, scan suspension.
+
 ---
 
-## 69. Recent Changes (August 2026) — IR Z-Axis Runaway: Stage Safety Hardening
+---
 
-Branch `claude/mcs2-z-runaway-safety` (SAMBA, 176 tests) + the same branch on
-TANGO_Devices. App version → **v13.17**. **Safety batch** — the IR piezo twice
-ran away in Z, which crashes the sample into the objective past ~+100 µm.
+## 70. Recent Changes (August 2026) — IR Z-Axis Runaway: Stage Safety Hardening
+
+Branch `claude/mcs2-z-runaway-safety`, merged with `claude/stage-runaway-guard`
+(§69) into one batch; same branch name on TANGO_Devices. 192 tests.
+App version → **v13.18**. **Safety batch** — the IR piezo twice ran away in Z,
+which crashes the sample into the objective past ~+100 µm.
+
+**Read §69 first** — it is the same incident, investigated independently, and
+it found a defect this section does not: `write_Position` does not convert
+absolute→relative for `CL_RELATIVE` (it falls through to `default`), and
+`set_offset`'s move-mode restore is not exception-safe, so a throwing
+`set_position` leaves the axis in `CL_RELATIVE`. Both are now fixed on the
+TANGO_Devices side of this batch. The two analyses converge on one structural
+defect — **the mode the client computes for versus the mode the controller
+executes in** — reached by two different paths (STEP here, CL_RELATIVE there).
 
 ### What actually happened
 The trigger was the standard hand-controller recovery workflow: ⟲ Reinitialise
@@ -4537,11 +4653,12 @@ The trigger was the standard hand-controller recovery workflow: ⟲ Reinitialise
   **refuses rather than clamps**: silently moving somewhere other than
   requested is how a "small" jog ends up against the objective with nothing in
   the log. Absent keys or min == max = unset, i.e. the historic behaviour.
-- **New ⏹ Stop button**, first in the button row, red, no confirmation
-  dialog — it is the recovery action for an axis that is *already* moving.
-  Dispatches the stage `Stop` on a background thread, then re-reads. Shown
-  whenever the stage device exposes a `Stop` command (`_probe_home_support`
-  now probes for it alongside the SetZero+Initialise pair).
+- A manual **⏹ Stop button** was added and then **removed at the user's
+  request** — §69's guard already dispatches `Stop` itself on a trip, and the
+  button was judged redundant. There is deliberately **no manual halt in the
+  UI**: the guard covers uncommanded motion (suspended during scans and
+  autofocus, and latched after a trip), and the stage's `Stop` command stays
+  reachable from Jive. Do not re-add it without asking.
 - **`_reinit_stage` moved off the GUI thread** with a 120 s client timeout.
   It used the default 3 s while the stage's `Initialise` re-inits three motors
   at up to 30 s each — so it reported a CORBA failure while the server carried
@@ -4567,8 +4684,24 @@ steps), so one shared pair of numbers would be wrong for the other piezo and
 actively misleading. Everything in `core/` — the unknown-position guard, the
 Stop button, the reinit invalidation — applies to Cryo automatically.
 
+### Merge integration with §69's guard
+The two batches touch the same file, so the seams matter:
+- **`_move_axis` order**: the unknown-position guard and the travel-limit check
+  run *first*; only a move that survives them calls
+  `_guard.note_commanded_move`. A refused jog must not be announced as
+  commanded motion, or the guard would stand down for a move that never
+  happened.
+- **Frame changes stand the guard down.** ⊘ Zero here makes every axis read 0
+  and ⟲ Reinitialise can change what the numbers mean — both are step changes
+  the guard would otherwise read as a runaway and latch on. New reference-counted
+  `_guard_suspend(reason, on)`; `set_stage_guard_suspended` (the main window's
+  scan hook) is now one reason and the stage operations another, so whichever
+  finishes first cannot re-arm the guard while the other is still driving.
+  `suspend()` forgets the anchor, so the guard re-baselines in the new frame —
+  and a latched trip is preserved, still needing a human re-arm.
+
 ### Verification
-- `python test_runner.py` — 176, unchanged.
+- `python test_runner.py` — 192 (the merged suite; §69 contributed 16).
 - Offscreen-Qt run of the real `CalibrationPanel` / `DigitJogWidget` /
   `SetupDefaultsPanel` with the hardware layer patched (52 checks, not
   committed — needs Qt): unknown-state gating, per-axis blanking on a failed
