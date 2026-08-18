@@ -22,10 +22,12 @@ from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QSplitter,
-    QSizePolicy, QDoubleSpinBox, QSpinBox, QMessageBox
+    QSizePolicy, QDoubleSpinBox, QSpinBox, QMessageBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
+import stage_guard
+from stage_guard import StageGuard
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
@@ -35,6 +37,17 @@ from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
 from hardware import (fresh_proxy, is_sim_proxy, get_proxy, safe_read,
                       safe_write, trigger_and_read)
+
+
+
+
+class _NoScrollDoubleSpinBox(QDoubleSpinBox):
+    """Spinbox that ignores the wheel — a stray scroll over the panel must not
+    change a safety threshold.  Module-local by the convention already used in
+    core/bd_calibration.py and core/current_sweep_ui.py (core/ cannot import
+    the apps' panels/_widgets)."""
+    def wheelEvent(self, e):
+        e.ignore()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +78,10 @@ class DigitJogWidget(QWidget):
         "color:#cdd6f4;font-family:'Courier New',monospace;font-size:13px;"
         "font-weight:bold;padding:3px 6px;}"
         "QLineEdit:focus{border:1px solid #89b4fa;}")
+    _EDIT_STYLE_UNKNOWN = (
+        "QLineEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+        "color:#6c7086;font-family:'Courier New',monospace;font-size:13px;"
+        "font-weight:bold;padding:3px 6px;}")
 
     def __init__(self, label: str = "X", unit: str = "µm",
                  n_int: int = 2, n_dec: int = 3, parent=None):
@@ -73,8 +90,13 @@ class DigitJogWidget(QWidget):
         self._n_int = n_int; self._n_dec = n_dec
         self._n_digits = n_int + n_dec
         self._value = 0.0; self._readback = None
+        # A jog sends an ABSOLUTE target, so the widget must never hold a
+        # number whose frame of reference it cannot vouch for.  Start
+        # unknown: nothing can be sent until a position has been read back.
+        self._known = False
         self._digit_labels = []; self._up_btns = []; self._down_btns = []
         self._build_ui()
+        self._apply_known()
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -150,13 +172,23 @@ class DigitJogWidget(QWidget):
         return self._unit
 
     def _nudge(self, delta):
+        if not self._known:
+            return
         self._value += delta; self._refresh_display(); self.move_requested.emit(self._value)
     def _on_enter(self):
+        if not self._known:
+            return
         try:
             self._value = float(self._edit.text().replace(",", ".").strip())
             self._refresh_display(); self.move_requested.emit(self._value)
         except ValueError: pass
     def _refresh_display(self):
+        if not self._known:
+            self._sign_lbl.setText("?")
+            for lbl in self._digit_labels: lbl.setText("-")
+            if not self._edit.hasFocus():
+                self._edit.setText("—")
+            return
         self._sign_lbl.setText("−" if self._value < 0 else "＋")
         fmt = f"{{:0{self._n_int + self._n_dec + 1}.{self._n_dec}f}}"
         digits = fmt.format(abs(self._value)).replace(".", "")
@@ -164,10 +196,43 @@ class DigitJogWidget(QWidget):
         for i, lbl in enumerate(self._digit_labels): lbl.setText(digits[i])
         if not self._edit.hasFocus():
             self._edit.setText(f"{self._value:.{self._n_dec}f}")
-    def set_value(self, v): self._value = v; self._refresh_display()
+
+    # ── Known / unknown position ─────────────────────────────────────────────
+    # The jog controls send an absolute target.  A box still showing the value
+    # from before a failed read — or from before a re-zero, which redefines
+    # the whole coordinate frame — would move the stage by that entire stale
+    # offset on the next arrow click.  Blanking the display is not enough:
+    # the widget refuses to emit anything until a real position is read back.
+    def is_known(self) -> bool:
+        return self._known
+
+    def set_unknown(self, reason: str = ""):
+        self._known = False
+        self._readback = None
+        self._rb_label.setText("—")
+        self._apply_known(reason)
+
+    def _apply_known(self, reason: str = ""):
+        for b in self._up_btns + self._down_btns:
+            b.setEnabled(self._known)
+        self._edit.setEnabled(self._known)
+        self._edit.setStyleSheet(
+            self._EDIT_STYLE if self._known else self._EDIT_STYLE_UNKNOWN)
+        if self._known:
+            self.setToolTip("")
+        else:
+            tip = (f"{self._label} position unknown — jogging is disabled.\n"
+                   "Press 🔄 Read all to re-read the stage.")
+            if reason:
+                tip += f"\n({reason})"
+            self.setToolTip(tip)
+        self._refresh_display()
+
+    def set_value(self, v):
+        self._value = float(v); self._known = True; self._apply_known()
     def update_readback(self, v):
         self._readback = v
-        self._rb_label.setText(f"{v:.3f} µm" if v is not None else "—")
+        self._rb_label.setText(f"{v:.3f} {self._unit}" if v is not None else "—")
     def get_value(self): return self._value
 
 
@@ -814,6 +879,13 @@ class CalibrationPanel(QWidget):
         self._stage_grp = ctrl_grp
         ctrl_grp.setToolTip("Axis devices are set on the Setup Defaults tab")
 
+        # Runaway guard — see _guard_trip.  Armed once configure_stage()
+        # has told us which axes exist.
+        self._guard = StageGuard()
+        self._guard_timer = None
+        self._guard_busy = False
+        self._guard_suspends: set = set()   # see _guard_suspend
+
         self.jog_x = DigitJogWidget("X", "µm", n_int=2, n_dec=3)
         self.jog_y = DigitJogWidget("Y", "µm", n_int=2, n_dec=3)
         self.jog_z = DigitJogWidget("Z", "µm", n_int=2, n_dec=3)
@@ -825,7 +897,10 @@ class CalibrationPanel(QWidget):
         self.jog_z.move_requested.connect(lambda v: self._move_axis("z", v))
 
         btn_row = QHBoxLayout(); btn_row.setSpacing(6)
-        read_btn = QPushButton("🔄 Read all"); read_btn.clicked.connect(self._read_all)
+        read_btn = QPushButton("🔄 Read all")
+        # Via a lambda, not directly: clicked(bool) would land in _read_all's
+        # `note` parameter.
+        read_btn.clicked.connect(lambda: self._read_all())
         btn_row.addWidget(read_btn)
         self.reinit_btn = QPushButton("⟲ Reinitialise")
         self.reinit_btn.setToolTip(
@@ -850,6 +925,47 @@ class CalibrationPanel(QWidget):
         btn_row.addWidget(self.home_btn)
         btn_row.addStretch()
         ctrl_l.addLayout(btn_row)
+
+        # ── Runaway guard ────────────────────────────────────────────────────
+        # A SmarAct axis left in CL_RELATIVE executes an absolute position
+        # write as a relative move of that magnitude, so the stage walks away
+        # by its own coordinate on every write.  On the IR setup a +Z
+        # excursion of ~100 µm drives the sample into the objective.  This
+        # watches the readback and sends Stop the moment motion appears that
+        # Samba did not command.
+        guard_row = QHBoxLayout(); guard_row.setSpacing(6)
+        self.guard_cb = QCheckBox("Runaway guard")
+        self.guard_cb.setChecked(True)
+        self.guard_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.guard_cb.setToolTip(
+            "Watch the stage readback and send Stop if it moves without a\n"
+            "command from Samba.  Leave this on: it is the only thing between\n"
+            "a controller-side runaway and the objective.\n\n"
+            "Note this is a software watchdog polling over TANGO — it cannot\n"
+            "outrun a fast runaway.  Hardware unit limits on the motor are the\n"
+            "only true interlock.")
+        self.guard_cb.setStyleSheet("color:#cdd6f4;font-size:11px;")
+        self.guard_cb.toggled.connect(self._on_guard_toggled)
+        guard_row.addWidget(self.guard_cb)
+        guard_row.addWidget(QLabel("trip at"))
+        self.guard_spin = _NoScrollDoubleSpinBox()
+        self.guard_spin.setRange(0.5, 500.0); self.guard_spin.setDecimals(1)
+        self.guard_spin.setValue(stage_guard.DEFAULT_TRIP_UM)
+        self.guard_spin.setSuffix(" µm"); self.guard_spin.setFixedWidth(84)
+        self.guard_spin.valueChanged.connect(self._on_guard_threshold)
+        guard_row.addWidget(self.guard_spin)
+        self.guard_lbl = QLabel("armed")
+        self.guard_lbl.setStyleSheet("color:#a6e3a1;font-size:11px;font-weight:bold;")
+        guard_row.addWidget(self.guard_lbl)
+        self.guard_reset_btn = QPushButton("Re-arm")
+        self.guard_reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.guard_reset_btn.setToolTip(
+            "Clear a tripped guard.  Check why the stage moved before re-arming.")
+        self.guard_reset_btn.clicked.connect(self._guard_rearm)
+        self.guard_reset_btn.setVisible(False)
+        guard_row.addWidget(self.guard_reset_btn)
+        guard_row.addStretch()
+        ctrl_l.addLayout(guard_row)
 
         # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
         # is configured for the setup (set via set_lights_device()).  The On/Off
@@ -1104,6 +1220,15 @@ class CalibrationPanel(QWidget):
             "z": (z_unit or "").strip() or self._DEFAULT_UNIT,
         }
         self._apply_axis_units()
+        # Give the guard the axis units — the IR axes report nm, so a 20 µm
+        # threshold is 20000 native counts.  Then start polling.
+        try:
+            self._guard.set_units(dict(self._stage_units))
+            self._guard.reset()
+            if any((x_dev, y_dev, z_dev)):
+                self._guard_start()
+        except Exception:
+            log.debug("stage guard not started", exc_info=True)
         self._set_axis_tooltip(x_dev, x_attr, y_dev, y_attr, z_dev, z_attr)
         self._probe_home_support(x_dev)
 
@@ -1119,6 +1244,11 @@ class CalibrationPanel(QWidget):
                        "(set on the Setup Defaults tab)")
 
     _DEFAULT_UNIT = "µm"
+
+    # Guard poll period.  Faster narrows the worst-case detection distance
+    # (stage speed x interval) but adds TANGO traffic; 250 ms is a
+    # compromise, and this is a mitigation rather than an interlock.
+    _GUARD_POLL_MS = 250
 
     def _axis_unit(self, axis_key: str) -> str:
         return getattr(self, "_stage_units", {}).get(axis_key, self._DEFAULT_UNIT)
@@ -1149,48 +1279,297 @@ class CalibrationPanel(QWidget):
                 except Exception:
                     pass
 
+    # Setup-key prefix carrying each axis' optional soft travel limits
+    # (act1_min/act1_max, act2_min/act2_max, z_min/z_max) — the same keys
+    # core/validation.py already checks before a scan.  Applying them here
+    # too closes the gap that let the jog buttons drive past a limit the
+    # scan engine would have refused.
+    _LIMIT_PREFIX = {"x": "act1", "y": "act2", "z": "z"}
+
+    def _axis_limits(self, axis_key: str):
+        """(min, max) soft travel limits for an axis, or None when unset."""
+        pfx = self._LIMIT_PREFIX.get(axis_key)
+        if not pfx:
+            return None
+        try:
+            s = self._setup_getter() or {}
+        except Exception:
+            return None
+        lo, hi = s.get(f"{pfx}_min"), s.get(f"{pfx}_max")
+        if lo is None or hi is None:
+            return None
+        try:
+            lo, hi = float(lo), float(hi)
+        except (TypeError, ValueError):
+            return None
+        return (lo, hi) if hi > lo else None
+    # ── Runaway guard ─────────────────────────────────────────────────────────
+    def _guard_start(self):
+        """Begin polling the stage readback (idempotent)."""
+        if getattr(self, "_guard_timer", None) is None:
+            self._guard_timer = QTimer(self)
+            self._guard_timer.setInterval(self._GUARD_POLL_MS)
+            self._guard_timer.timeout.connect(self._guard_poll)
+        if not self._guard_timer.isActive():
+            self._guard_timer.start()
+
+    def _on_guard_toggled(self, on: bool):
+        self._guard.enabled = bool(on)
+        if on:
+            self._guard.reset()
+            self.guard_lbl.setText("armed")
+            self.guard_lbl.setStyleSheet(
+                "color:#a6e3a1;font-size:11px;font-weight:bold;")
+            self.guard_reset_btn.setVisible(False)
+        else:
+            self.guard_lbl.setText("OFF")
+            self.guard_lbl.setStyleSheet(
+                "color:#f38ba8;font-size:11px;font-weight:bold;")
+
+    def _on_guard_threshold(self, v: float):
+        self._guard.trip_um = float(v)
+        # The drift bound tracks the jump threshold: a creep worth catching is
+        # one that accumulates past a couple of trip-sized steps.
+        self._guard.drift_um = float(v) * 2.0
+
+    def _guard_rearm(self):
+        self._guard.reset()
+        self.guard_reset_btn.setVisible(False)
+        self.guard_lbl.setText("armed")
+        self.guard_lbl.setStyleSheet(
+            "color:#a6e3a1;font-size:11px;font-weight:bold;")
+        self._set_pos_ok("Runaway guard re-armed")
+
+    def _guard_suspend(self, reason: str, on: bool):
+        """Reference-counted suspend, keyed by reason.
+
+        Two independent things stand the guard down — a running scan (via the
+        main window) and the stage operations below that legitimately change
+        the reported position.  A plain boolean would let whichever finished
+        first re-arm the guard while the other was still driving the stage.
+        `suspend()` also forgets the anchor, so the guard re-baselines in the
+        new coordinate frame instead of measuring against the old one; a
+        latched trip is deliberately preserved and still needs a human re-arm.
+        """
+        try:
+            if on:
+                self._guard_suspends.add(reason)
+            else:
+                self._guard_suspends.discard(reason)
+            self._guard.suspend(bool(self._guard_suspends))
+        except Exception:
+            pass
+
+    def set_stage_guard_suspended(self, suspended: bool):
+        """Stand the guard down while something else drives the stage
+        (a scan, a scanlist).  Called by the main window."""
+        self._guard_suspend("scan", suspended)
+
+    def _guard_poll(self):
+        """Sample the axes in a worker thread; never blocks the GUI."""
+        if self._guard_busy or not self._guard.enabled or self._guard.tripped:
+            return
+        info = self._get_axis_info()
+        if not info:
+            return
+        self._guard_busy = True
+
+        def _do():
+            positions = {}
+            for key in ("x", "y", "z"):
+                dev, attr = info.get(key, ("", ""))
+                if not dev:
+                    continue
+                try:
+                    p = get_proxy(dev)
+                    if is_sim_proxy(p):
+                        continue
+                    v, e = safe_read(p, attr, timeout=1.0)
+                    positions[key] = None if e else v
+                except Exception:
+                    positions[key] = None
+            self._gui_apply.emit(lambda pos=positions: self._guard_apply(pos))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _guard_apply(self, positions: dict):
+        self._guard_busy = False
+        try:
+            trip = self._guard.update(positions, time.time())
+        except Exception:
+            return
+        if trip is not None:
+            self._guard_trip(trip)
+
+    def _guard_trip(self, trip):
+        """Stop the stage.  Never writes a position — commanding a position is
+        what misfires, and in CL_RELATIVE it would add another jump."""
+        self.guard_lbl.setText("TRIPPED")
+        self.guard_lbl.setStyleSheet(
+            "color:#f38ba8;font-size:11px;font-weight:bold;")
+        self.guard_reset_btn.setVisible(True)
+        self._set_pos_err(trip.message())
+        log.error("STAGE RUNAWAY GUARD: %s", trip.message())
+
+        dev = self._get_axis_info().get("x", ("", ""))[0]
+
+        def _do():
+            sent, errs = [], []
+            for cmd in ("Stop", "StopAll", "Abort"):
+                try:
+                    p, err = fresh_proxy(dev)
+                    if err or is_sim_proxy(p):
+                        errs.append(err or "simulation"); break
+                    p.command_inout(cmd)
+                    sent.append(cmd)
+                    break                    # first accepted command wins
+                except Exception as e:
+                    errs.append(f"{cmd}: {e}")
+            def _report():
+                if sent:
+                    self._set_pos_err(f"{trip.message()}  [{sent[0]} sent]")
+                else:
+                    self._set_pos_err(
+                        f"{trip.message()}  [STOP FAILED: {'; '.join(errs)[:80]}]")
+                QMessageBox.critical(
+                    self, "Stage runaway — stopped",
+                    f"{trip.message()}\n\n"
+                    + ("A Stop command was sent to the stage.\n\n"
+                       if sent else
+                       "The Stop command could NOT be sent:\n"
+                       f"{'; '.join(errs)[:200]}\n\n"
+                       "Cut power to the controller if the stage is still "
+                       "moving.\n\n")
+                    + "Samba did not command this move.  A SmarAct axis left "
+                      "in CL_RELATIVE move mode executes an absolute position "
+                      "write as a relative move, which walks the stage away by "
+                      "its own coordinate.\n\n"
+                      "Check the axis MoveMode before moving again. The guard "
+                      "stays tripped until you press Re-arm.")
+            self._gui_apply.emit(_report)
+
+        threading.Thread(target=_do, daemon=True).start()
+
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
         if axis_key not in info:
             self._set_pos_err(f"No config for '{axis_key}'"); return
         dev, attr = info[axis_key]
         if not dev: self._set_pos_err("No device configured"); return
+        unit = self._axis_unit(axis_key)
+
+        # Never send an absolute target derived from a position we could not
+        # read.  The jog widgets already refuse to emit in that state; this is
+        # the choke point every programmatic caller passes through too.
+        jog = {"x": getattr(self, "jog_x", None),
+               "y": getattr(self, "jog_y", None),
+               "z": getattr(self, "jog_z", None)}.get(axis_key)
+        if jog is not None and not jog.is_known():
+            self._set_pos_err(
+                f"{axis_key.upper()} position unknown — press 🔄 Read all "
+                "before moving")
+            return
+
+        # Refuse, don't clamp: silently moving somewhere other than the
+        # requested position is how a "small" jog ends up against the
+        # objective with nothing in the log to say so.
+        lim = self._axis_limits(axis_key)
+        if lim is not None and not (lim[0] <= value_um <= lim[1]):
+            self._set_pos_err(
+                f"Move refused — {axis_key.upper()} target {value_um:.3f} {unit} "
+                f"is outside the travel limits [{lim[0]:g}, {lim[1]:g}] {unit} "
+                "(Setup Defaults → Stage Actuators)")
+            return
+
         p, err = fresh_proxy(dev)
         if err: self._set_pos_err(err); return
         if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
+        # Announce the move so the guard doesn't read our own motion as a fault.
+        try:
+            self._guard.note_commanded_move(axis_key, value_um, time.time())
+        except Exception:
+            pass
         err = safe_write(p, attr, value_um)
         if err: self._set_pos_err(f"{attr}: {err[:60]}")
-        else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} "
-                                 f"{self._axis_unit(axis_key)}")
+        else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} {unit}")
 
     def _reinit_stage(self):
         """Re-initialise the stage motors (fixes wedged IR SmarAct axes).
+
         Calls the stage device's Initialise command; falls back to the
-        standard TANGO Init if the server doesn't expose Initialise yet."""
+        standard TANGO Init if the server doesn't expose Initialise yet.
+
+        Runs in a background thread with a long client timeout: Initialise
+        re-inits three motors at up to 30 s each, which the default 3 s TANGO
+        client timeout would abandon half way — reporting a failure while the
+        server carried on, and freezing the GUI until it gave up.
+
+        Afterwards every axis is marked *unknown* and re-read.  An Init can
+        change what the position numbers mean (the motor server resets its
+        unit conversion in init_device), so any target still displayed from
+        before the reinit is not a position in the same frame any more.
+        """
         info = self._get_axis_info()
         dev = info.get("x", ("", ""))[0]
         if not dev:
             self._set_pos_err("No stage device configured"); return
-        p, err = fresh_proxy(dev)
-        if err: self._set_pos_err(err); return
-        if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
-        for cmd in ("Initialise", "Init"):
+        for jog in (self.jog_x, self.jog_y, self.jog_z):
+            jog.set_unknown("stage re-initialised")
+        # An Init can change what the position numbers mean, so the guard's
+        # anchor is meaningless across it — stand it down and let it
+        # re-baseline from the re-read afterwards.
+        self._guard_suspend("stage_op", True)
+        self.reinit_btn.setEnabled(False)
+        self._set_pos_ok("Re-initialising stage…")
+
+        def _do():
+            last = ""
+            used = ""
             try:
-                p.command_inout(cmd)
-                self._set_pos_ok(f"Stage {cmd} sent to {dev}")
-                return
+                p, err = fresh_proxy(dev)
+                if err:
+                    raise RuntimeError(err)
+                if is_sim_proxy(p):
+                    raise RuntimeError("Simulation mode")
+                p.set_timeout_millis(120000)      # 3 axes × 30 s + slack
+                for cmd in ("Initialise", "Init"):
+                    try:
+                        p.command_inout(cmd)
+                        used = cmd
+                        break
+                    except Exception as e:
+                        last = str(e)
             except Exception as e:
                 last = str(e)
-        self._set_pos_err(f"Reinitialise failed: {last[:80]}")
+
+            def _done():
+                self.reinit_btn.setEnabled(True)
+                self._guard_suspend("stage_op", False)
+                if not used:
+                    self._set_pos_err(f"Reinitialise failed: {last[:100]}")
+                    self._read_all()
+                elif used == "Init":
+                    # The plain Init path does not restore the motors' unit
+                    # conversion or travel limits — say so rather than let it
+                    # look like a clean recovery.
+                    self._read_all(
+                        f"⚠ Stage Init sent to {dev} — this server predates the "
+                        "Initialise command, so unit conversion and travel "
+                        "limits were NOT restored. Update the stage server.",
+                        note_is_error=True)
+                else:
+                    self._read_all(f"Stage {used} sent to {dev}")
+            self._gui_apply.emit(_done)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _probe_home_support(self, dev: str):
         """Show the ⊘ Zero-here button only for the MCS2 stage server.
 
-        The SmarActMCS2Stage device exposes both SetZero and Initialise —
-        that pair is its signature.  Probed in a background thread so an
-        unreachable device can't freeze the GUI; anything else (old Green
-        Smaract server, Cryo Attocube stages, sim mode) keeps the button
-        hidden.
+        It needs both SetZero and Initialise — that pair is the stage
+        server's signature.  Probed in a background thread so an unreachable
+        device can't freeze the GUI; anything else (old Green Smaract
+        server, Cryo Attocube stages, sim mode) keeps the button hidden.
         """
         self.home_btn.setVisible(False)
         if not dev:
@@ -1233,6 +1612,15 @@ class CalibrationPanel(QWidget):
         if ans != QMessageBox.StandardButton.Yes:
             return
         self.home_btn.setEnabled(False)
+        # The zero redefines the coordinate frame, so every displayed target
+        # becomes meaningless the instant the command is sent — including if
+        # the follow-up read fails.  Blank them first, restore from the read.
+        for jog in (self.jog_x, self.jog_y, self.jog_z):
+            jog.set_unknown("coordinate frame re-zeroed")
+        # Re-zeroing makes every axis' reading jump to 0 — a step the guard
+        # would otherwise read as a runaway and latch on.  It is exactly the
+        # kind of legitimate frame change the suspend is for.
+        self._guard_suspend("stage_op", True)
         self._set_pos_ok("Setting current position as zero…")
 
         def _do():
@@ -1246,6 +1634,7 @@ class CalibrationPanel(QWidget):
                 p.command_inout("SetZero")
                 def _ok():
                     self.home_btn.setEnabled(True)
+                    self._guard_suspend("stage_op", False)
                     self._set_pos_ok("Current position defined as 0 (no movement)")
                     self._read_all()
                 self._gui_apply.emit(_ok)
@@ -1253,7 +1642,12 @@ class CalibrationPanel(QWidget):
                 msg = str(e)
                 def _err():
                     self.home_btn.setEnabled(True)
+                    self._guard_suspend("stage_op", False)
                     self._set_pos_err(f"Set-zero failed: {msg[:120]}")
+                    # SetZero attempts all three axes and collects errors, so a
+                    # failure can still mean some axes were re-zeroed.  Re-read
+                    # rather than leave the frame ambiguous.
+                    self._read_all()
                 self._gui_apply.emit(_err)
 
         threading.Thread(target=_do, daemon=True).start()
@@ -1343,25 +1737,44 @@ class CalibrationPanel(QWidget):
         except Exception as e:
             self._set_pos_err(f"{cmd} failed: {str(e)[:70]}")
 
-    def _read_all(self):
+    def _read_all(self, note: str = "", note_is_error: bool = False):
+        """Re-read all three axis positions.
+
+        `note` is carried through to the final status line.  Callers that
+        re-read straight after another operation (stop, reinit, re-zero) have
+        something to say that matters more than the positions — without this
+        the read's own "Read: x=… y=… z=…" would overwrite it a moment later.
+        """
         self._refresh_led_state()
         info = self._get_axis_info()
         if not info: self._set_pos_err("No config available"); return
-        self._set_pos_ok("Reading…")
+        self._set_pos_ok(note or "Reading…")
 
         jog_map = {"x": self.jog_x, "y": self.jog_y, "z": self.jog_z}
 
         def _do():
             results = []
             updates = {}   # axis → value (for GUI jog widgets)
+            failed  = {}   # axis → why the position could not be read
             for key, jog in jog_map.items():
                 dev, attr = info.get(key, ("", ""))
-                if not dev: results.append(f"{key}: no device"); continue
+                if not dev:
+                    results.append(f"{key}: no device")
+                    failed[key] = "no device configured"
+                    continue
                 p, err = fresh_proxy(dev)
-                if err: results.append(f"{key}: {err[:20]}"); continue
+                if err:
+                    results.append(f"{key}: {err[:20]}")
+                    failed[key] = err
+                    continue
                 v, e = safe_read(p, attr)
-                if e: results.append(f"{key}({attr}): {e[:20]}")
-                elif v is not None:
+                if e:
+                    results.append(f"{key}({attr}): {e[:20]}")
+                    failed[key] = e
+                elif v is None:
+                    results.append(f"{key}({attr}): no value")
+                    failed[key] = "device returned no value"
+                else:
                     updates[key] = v
                     results.append(f"{key}={v:.3f}")
 
@@ -1369,7 +1782,22 @@ class CalibrationPanel(QWidget):
                 for axis, val in updates.items():
                     w = jog_map[axis]
                     w.set_value(val); w.update_readback(val)
-                self._set_pos_ok("Read: " + "  ".join(results))
+                # An axis whose position could not be read must NOT keep the
+                # value it was showing: that number belongs to a frame we can
+                # no longer vouch for, and one arrow click would send it back
+                # as an absolute target.  Blank it and block jogging instead.
+                for axis, why in failed.items():
+                    jog_map[axis].set_unknown(str(why)[:120])
+                msg = "Read: " + "  ".join(results)
+                if failed:
+                    msg += ("  —  jogging disabled for "
+                            + ", ".join(sorted(a.upper() for a in failed)))
+                if note:
+                    msg = f"{note}  —  {msg}"
+                if failed or note_is_error:
+                    self._set_pos_err(msg)
+                else:
+                    self._set_pos_ok(msg)
 
             self._gui_apply.emit(_apply)
 
@@ -1478,6 +1906,8 @@ class CalibrationPanel(QWidget):
         self._af_worker.focus_found.connect(self._on_focus_found)
         self._af_worker.error_msg.connect(self._set_af_err)
         self._af_worker.finished_.connect(self._on_af_finished)
+        # Autofocus drives Z itself; its sweep would otherwise read as a fault.
+        self.set_stage_guard_suspended(True)
         self._af_worker.start()
         return True
 
@@ -1495,6 +1925,9 @@ class CalibrationPanel(QWidget):
 
     def _on_af_finished(self):
         self.af_start_btn.setEnabled(True); self.af_stop_btn.setEnabled(False)
+        # Re-arm first: the completion-callback path below returns early
+        # when no callback is registered, which would skip this.
+        self.set_stage_guard_suspended(False)
         cb, self._af_on_done = getattr(self, "_af_on_done", None), None
         if cb is None:
             return

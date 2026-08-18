@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.16"
+APP_VERSION = "13.18"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 9
@@ -74,6 +74,12 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_attr":                "position0",
         "z_label":               "Z",
         "z_unit":                "nm",
+        # Soft travel limits (axis' own unit).  min == max = unset, which
+        # is the historic no-limit behaviour; set at least z_min/z_max on
+        # any rig where the focus axis can reach the objective.
+        "act1_min": 0.0, "act1_max": 0.0,
+        "act2_min": 0.0, "act2_max": 0.0,
+        "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_Green",
@@ -116,6 +122,12 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_attr":                "z",
         "z_label":               "Z",
         "z_unit":                "nm",
+        # Soft travel limits (axis' own unit).  min == max = unset, which
+        # is the historic no-limit behaviour; set at least z_min/z_max on
+        # any rig where the focus axis can reach the objective.
+        "act1_min": 0.0, "act1_max": 0.0,
+        "act2_min": 0.0, "act2_max": 0.0,
+        "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_IR",
@@ -157,6 +169,12 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_attr":                "z",
         "z_label":               "Z",
         "z_unit":                "nm",
+        # Soft travel limits (axis' own unit).  min == max = unset, which
+        # is the historic no-limit behaviour; set at least z_min/z_max on
+        # any rig where the focus axis can reach the objective.
+        "act1_min": 0.0, "act1_max": 0.0,
+        "act2_min": 0.0, "act2_max": 0.0,
+        "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
         "save_dir":              "~/moke_data/Data_Samba_Cryo",
