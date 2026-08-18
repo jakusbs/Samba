@@ -4482,3 +4482,98 @@ is not in it, so the combo stays on index 0 and `get_defaults()` returns that.
 Same class as §67, different trigger; reproduced identically on `main`, so it
 predates this batch. Matters for the §47 "copied the config to a new machine"
 case.
+
+---
+
+## 69. Recent Changes (August 2026) — IR Z-Axis Runaway: Stage Safety Hardening
+
+Branch `claude/mcs2-z-runaway-safety` (SAMBA, 176 tests) + the same branch on
+TANGO_Devices. App version → **v13.17**. **Safety batch** — the IR piezo twice
+ran away in Z, which crashes the sample into the objective past ~+100 µm.
+
+### What actually happened
+The trigger was the standard hand-controller recovery workflow: ⟲ Reinitialise
+→ 🔄 Read all → ⊘ Zero here. Three defects compound into a runaway:
+
+1. **`SmarActMCS2Motor::init_device` wipes two safety settings on every
+   `Init`** — `Conversion` → 1 (so `Position` silently reverts to raw
+   picometres, changing what every number means by ~10⁶) and
+   `UnitLimitMin/Max` → 0/0, which `write_Position` reads as *"limits
+   ignored"*. Both are declared memorized, but the memorized value is only
+   replayed at server **start-up**, not on the `Init` command — the same
+   reason `Initialise` already had to push `MoveMode` explicitly (§52).
+2. **The controller's move mode can disagree with the motor's cache.**
+   `write_Position` computes its value from the *cached* mode but the
+   controller executes it in the mode the *hardware* holds. The Ctrl's
+   `SetOffset` (i.e. `SetZero`) restored whatever mode it found — including a
+   STEP mode left by the hand controller — right after `Initialise` had
+   corrected it.
+3. So a small closed-loop position write is executed as an **open-loop step
+   move**: no position feedback, no limit check, direction from the sign.
+   Previously this failed loudly ("invalid parameter", §52) because
+   `w_val × Conversion` was ~10⁷ — out of the valid step range. With
+   `Conversion` reset to 1 by the reinit *and* positions reset to ~0 by the
+   re-zero, the same bug produces a small, **valid** step count. The loud
+   failure became silent motion, which is why it presented as "worked for a
+   few seconds, then Z rushed".
+
+### SAMBA — `core/calibration.py`
+- **A jog box will not send a target it cannot vouch for.** `DigitJogWidget`
+  gains a known/unknown state (`is_known` / `set_unknown`); while unknown the
+  ▲/▼ buttons and the text field are disabled, the display shows dashes and
+  neither `_nudge` nor Enter emits. It **starts** unknown — the tab's
+  auto-read on open (§20) clears it.
+- **A failed read blanks that axis** instead of leaving the value from before.
+  `_read_all` now tracks per-axis failures and calls `set_unknown(reason)`;
+  the status line names the axes whose jogging is disabled. This was the
+  live hazard: `⊘ Zero here` re-reads afterwards, and if that read failed
+  (the FAULT state you are recovering from) the box kept its **pre-zero**
+  value — one arrow click then sent the whole stale offset as an absolute
+  target in the new frame.
+- **Re-zero and reinit invalidate every displayed target up front**, before
+  the command is dispatched, so a failure mid-way cannot leave a stale one.
+- **`_move_axis` enforces soft travel limits** (`act1_min/max`, `act2_min/max`,
+  `z_min/max` — the keys `core/validation.py` already checked for scans) and
+  **refuses rather than clamps**: silently moving somewhere other than
+  requested is how a "small" jog ends up against the objective with nothing in
+  the log. Absent keys or min == max = unset, i.e. the historic behaviour.
+- **New ⏹ Stop button**, first in the button row, red, no confirmation
+  dialog — it is the recovery action for an axis that is *already* moving.
+  Dispatches the stage `Stop` on a background thread, then re-reads. Shown
+  whenever the stage device exposes a `Stop` command (`_probe_home_support`
+  now probes for it alongside the SetZero+Initialise pair).
+- **`_reinit_stage` moved off the GUI thread** with a 120 s client timeout.
+  It used the default 3 s while the stage's `Initialise` re-inits three motors
+  at up to 30 s each — so it reported a CORBA failure while the server carried
+  on, and froze the window meanwhile. Falling back to plain `Init` is now
+  reported as an **incomplete** recovery (that path restores neither the unit
+  conversion nor the limits) instead of looking like success.
+- `_read_all(note=, note_is_error=)` carries the caller's message into the
+  final status line — the re-read used to overwrite exactly the warnings that
+  mattered. The Read-all button connects through a lambda so `clicked(bool)`
+  cannot land in `note`.
+- `update_readback` shows the axis' own unit instead of a hardcoded µm.
+
+### SAMBA — travel limits are now reachable (`panels/setup_defaults.py`, `config.py`)
+Min/Max columns in **Setup Defaults → Stage Actuators**, one pair per axis, in
+the axis' own unit, wired through `load` / `get_defaults` with the `_loading`
+guard. Keys added to `SETUP_HW_DEFAULTS` for all three setups (0.0 = unset).
+This reverses the §62 "no UI, the lab does not want the feature" decision —
+the feature is what stops a mistyped Z target.
+
+**Cryo deliberately does not get the limit UI.** Its axes live in the nested
+`stage_faraday/voigt` × `anm200/anc300` blocks whose units differ (nm vs
+steps), so one shared pair of numbers would be wrong for the other piezo and
+actively misleading. Everything in `core/` — the unknown-position guard, the
+Stop button, the reinit invalidation — applies to Cryo automatically.
+
+### Verification
+- `python test_runner.py` — 176, unchanged.
+- Offscreen-Qt run of the real `CalibrationPanel` / `DigitJogWidget` /
+  `SetupDefaultsPanel` with the hardware layer patched (52 checks, not
+  committed — needs Qt): unknown-state gating, per-axis blanking on a failed
+  read, limits refused in both directions and unset when min == max or absent,
+  re-zero/reinit invalidation, the 120 s timeout, the Init-fallback warning
+  surviving the re-read, Stop dispatch, button gating, defaults round-trip.
+- Both apps constructed, shown and closed offscreen against a throwaway
+  `SAMBA_CONFIG_DIR` (never the live one — §67).

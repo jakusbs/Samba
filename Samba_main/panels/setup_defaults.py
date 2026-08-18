@@ -9,7 +9,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal
 
-from panels._widgets import NoScrollComboBox, NoScrollSpinBox
+from panels._widgets import (NoScrollComboBox, NoScrollSpinBox,
+                             NoScrollDoubleSpinBox)
 
 
 # ── Known attribute-name lists (fall-back when registry has no channels) ──────
@@ -68,36 +69,57 @@ class SetupDefaultsPanel(QWidget):
         _hdr("Attr",    0, 2)
         _hdr("Label",   0, 3)
         _hdr("Unit",    0, 4)
+        _hdr("Min",     0, 5)
+        _hdr("Max",     0, 6)
 
         sg.addWidget(QLabel("Act 1 (X):"), 1, 0)
         self.act1_dev  = _combo()
         self.act1_attr = _combo()
         self.act1_lbl  = _ro_field("X",  48)
         self.act1_unit = _ro_field("nm", 42)
+        self.act1_min, self.act1_max = _limit_spins("X")
         sg.addWidget(self.act1_dev,  1, 1)
         sg.addWidget(self.act1_attr, 1, 2)
         sg.addWidget(self.act1_lbl,  1, 3)
         sg.addWidget(self.act1_unit, 1, 4)
+        sg.addWidget(self.act1_min,  1, 5)
+        sg.addWidget(self.act1_max,  1, 6)
 
         sg.addWidget(QLabel("Act 2 (Y):"), 2, 0)
         self.act2_dev  = _combo()
         self.act2_attr = _combo()
         self.act2_lbl  = _ro_field("Y",  48)
         self.act2_unit = _ro_field("nm", 42)
+        self.act2_min, self.act2_max = _limit_spins("Y")
         sg.addWidget(self.act2_dev,  2, 1)
         sg.addWidget(self.act2_attr, 2, 2)
         sg.addWidget(self.act2_lbl,  2, 3)
         sg.addWidget(self.act2_unit, 2, 4)
+        sg.addWidget(self.act2_min,  2, 5)
+        sg.addWidget(self.act2_max,  2, 6)
 
         sg.addWidget(QLabel("Z (focus):"), 3, 0)
         self.z_dev  = _combo()
         self.z_attr = _combo()
         self.z_lbl  = _ro_field("Z",  48)
         self.z_unit = _ro_field("nm", 42)
+        self.z_min, self.z_max = _limit_spins("Z")
         sg.addWidget(self.z_dev,  3, 1)
         sg.addWidget(self.z_attr, 3, 2)
         sg.addWidget(self.z_lbl,  3, 3)
         sg.addWidget(self.z_unit, 3, 4)
+        sg.addWidget(self.z_min,  3, 5)
+        sg.addWidget(self.z_max,  3, 6)
+
+        lim_note = QLabel(
+            "Min/Max = soft travel limits in the axis' own unit. Equal values "
+            "(both 0) disable the check. Enforced on the Calibration tab's jog "
+            "controls, the autofocus sweep and before every scan — a target "
+            "outside them is refused, not clamped. Z is the axis that can hit "
+            "the objective: set it.")
+        lim_note.setWordWrap(True)
+        lim_note.setStyleSheet("color:#6c7086;font-size:10px;")
+        sg.addWidget(lim_note, 4, 0, 1, 7)
 
         cl.addWidget(stage_grp)
 
@@ -312,6 +334,15 @@ class SetupDefaultsPanel(QWidget):
             w.currentTextChanged.connect(self._on_changed)
         self.lights_dev.editingFinished.connect(self._on_changed)
 
+        # Travel limits — safety values, so they must persist the moment they
+        # are set.  _on_changed honours the _loading guard, so this cannot
+        # echo a half-restored panel back into the setup (§67).
+        for w in (self.act1_min, self.act1_max,
+                  self.act2_min, self.act2_max,
+                  self.z_min, self.z_max):
+            w.valueChanged.connect(self._on_changed)
+        self.recent_window.valueChanged.connect(self._on_changed)
+
     # ── Registry ──────────────────────────────────────────────────────────────
     def set_registry(self, registry: list):
         self._registry = registry
@@ -441,6 +472,11 @@ class SetupDefaultsPanel(QWidget):
             self.z_lbl.setText(           setup_data.get("z_label",              "Z"))
             self.z_unit.setText(          setup_data.get("z_unit",               "nm"))
 
+            for spin, key in ((self.act1_min, "act1_min"), (self.act1_max, "act1_max"),
+                              (self.act2_min, "act2_min"), (self.act2_max, "act2_max"),
+                              (self.z_min,    "z_min"),    (self.z_max,    "z_max")):
+                _set_limit(spin, setup_data.get(key))
+
             _set_by_path(self.keithley_dev, setup_data.get("keithley_device",   ""))
             _set(self.keithley_amplitude_attr,
                  setup_data.get("keithley_amplitude_attr",  "amplitude"))
@@ -499,6 +535,15 @@ class SetupDefaultsPanel(QWidget):
             "z_attr":                   self.z_attr.currentText(),
             "z_label":                  self.z_lbl.text(),
             "z_unit":                   self.z_unit.text(),
+            # Soft travel limits.  min == max means "unset" for every consumer
+            # (core/validation.py, the jog controls, the autofocus sweep), so
+            # an untouched panel keeps the previous no-limit behaviour.
+            "act1_min":                 self.act1_min.value(),
+            "act1_max":                 self.act1_max.value(),
+            "act2_min":                 self.act2_min.value(),
+            "act2_max":                 self.act2_max.value(),
+            "z_min":                    self.z_min.value(),
+            "z_max":                    self.z_max.value(),
             "keithley_device":          _get_path(self.keithley_dev),
             "keithley_amplitude_attr":  self.keithley_amplitude_attr.currentText(),
             "keithley_frequency_attr":  self.keithley_frequency_attr.currentText(),
@@ -535,6 +580,41 @@ def _combo() -> NoScrollComboBox:
     c.setEditable(True)
     c.setMinimumWidth(120)
     return c
+
+
+def _limit_spins(axis: str):
+    """(min, max) soft-travel-limit spinboxes for one stage axis.
+
+    Range is deliberately wide (±1e9) because the axis unit is per-setup —
+    nm, µm or steps — so no fixed bound would be right for all of them.
+    Keyboard tracking is off so a half-typed number never reaches the config
+    (the §50 OverflowError lesson).
+    """
+    out = []
+    for kind, tip in (("min", "lowest"), ("max", "highest")):
+        s = NoScrollDoubleSpinBox()
+        s.setRange(-1e9, 1e9)
+        s.setDecimals(3)
+        s.setValue(0.0)
+        s.setKeyboardTracking(False)
+        s.setMinimumWidth(96)
+        s.setToolTip(
+            f"{tip.capitalize()} {axis} position the software will command, "
+            f"in the {axis} axis' own unit.\n"
+            "Leave Min = Max (e.g. both 0) to disable the check.\n"
+            "This is a SOFTWARE limit — it cannot stop a runaway inside the "
+            "controller.\nFor that, also set the controller's own range limit "
+            "(StepLimitMin/StepLimitMax on the motor device, in picometres).")
+        out.append(s)
+    return out
+
+
+def _set_limit(spin, value):
+    """Restore one travel-limit spinbox; a missing/bad value means 0 (unset)."""
+    try:
+        spin.setValue(float(value))
+    except (TypeError, ValueError):
+        spin.setValue(0.0)
 
 
 def _attr_combo(items: list) -> NoScrollComboBox:
