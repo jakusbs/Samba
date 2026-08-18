@@ -4540,52 +4540,40 @@ coordinate, sign following the target.
 > *pushes* the cached mode to the controller before every move rather than
 > re-reading it, which removes the divergence instead of detecting it.
 
-### The guard (`core/stage_guard.py`, new)
-Decision logic only — no Qt, no TANGO — so it is unit-testable headless;
-`Samba_main/stage_guard.py` and `Cryo/stage_guard.py` are the usual shims.
+### The guard — implemented, then REMOVED (§71)
+A polling watchdog (`core/stage_guard.py` + the two shims, a "Runaway guard"
+checkbox / trip-threshold / state label in the Calibration tab, 16 unit tests)
+was built here and **removed again at the user's request** — see §71. The
+analysis above is what mattered and it stands; the mitigation did not survive.
 
-- Two rules: an **abrupt jump** between consecutive samples (default 20 µm),
-  and a **cumulative drift** since arming (2 × the jump threshold), because a
-  slow walk never exceeds the per-sample bound yet still reaches the objective.
-- **Units matter**: the IR axes report **nm**, so a 20 µm threshold is 20000
-  native counts. The threshold is converted using the unit from Setup Defaults
-  (`um_per_unit`); getting this backwards makes the guard either useless or
-  unusable, so it is tested explicitly.
-- **Commanded motion is not a fault.** `_move_axis` announces jogs; autofocus
-  and scans suspend the guard entirely (`set_stage_guard_suspended`, called
-  from `_set_running` in both apps and around the autofocus worker).
-- **The response is `Stop`, never a position write** — commanding a position
-  is what misfires, and in `CL_RELATIVE` it would add another jump.
-- **The trip latches.** Auto re-arming would let a runaway resume the moment
-  the stage paused, which is exactly when it looks calm. A "Re-arm" button
-  clears it.
-- A failed `Stop` is surfaced loudly (dialog tells the operator to cut power)
-  rather than swallowed.
+Why it was reasonable to drop it, recorded so it is not rebuilt by reflex:
 
-UI: a "Runaway guard" checkbox, a trip-threshold spinbox and a state label in
-the Calibration tab's Stage-positioning group. Polling is 250 ms in a daemon
-thread, so the GUI never blocks.
+- It was **a mitigation, not an interlock.** It polled over TANGO, so the
+  worst-case detection distance was *stage speed × poll interval* — at 1 mm/s
+  and 250 ms that is 250 µm of travel before the first `Stop` was even sent,
+  well past the ~100 µm that reaches the objective. It could not catch the
+  failure it was built for.
+- It needed a growing set of **suspend hooks** to avoid firing on legitimate
+  motion (scans, autofocus, jogs, and — found during the §70 merge — re-zero
+  and reinit, which step the reported position discontinuously). Every hook is
+  a chance to leave it suspended, and a guard that is silently off is worse
+  than none.
+- The device-side fixes below **remove the cause** rather than react to it, and
+  the firmware range limit (§70, `TravelLimitsPm`) is a real interlock enforced
+  inside the controller.
 
-### Honest limitation
-This is a **mitigation, not an interlock**. It polls over TANGO, so worst-case
-detection distance is *stage speed × poll interval* — at 1 mm/s and 250 ms
-that is 250 µm before the first Stop is sent. The real fixes are device-side:
+The four device-side fixes this investigation called for:
 
-1. Add `case SA_CTL_MOVE_MODE_CL_RELATIVE` to the absolute→relative
-   conversion in `write_Position`.
-2. Make the move-mode restore in `set_offset` exception-safe (RAII/try-catch).
-3. Re-read `MoveMode` in `write_Position` instead of trusting the cache.
-4. Set `UnitLimitMin`/`UnitLimitMax` on the Z motor — the only true interlock,
-   enforced inside the device before any move is issued.
-
-### Tests
-`test_runner.py` +16 → 192: unit conversion, jump both directions, quiet below
-threshold, nm-axis false-trip resistance, slow-walk drift rule, latching,
-commanded-move allowance and its expiry, scan suspend/resume, disabled guard,
-dropped readings, per-axis independence, message content. The panel wiring was
-verified against the real shipped methods with Qt stubbed and the device faked
-(17 checks, not committed): Stop sent exactly once, no position ever written,
-latching, dialog shown, failed-Stop surfaced, scan suspension.
+1. `write_Position` must not let `CL_RELATIVE` fall through to `default` —
+   **done differently** in §70: it now *pushes* the cached mode to the
+   controller before every move, so the client and the controller cannot
+   disagree about what the value means.
+2. Make the move-mode restore in `set_offset` exception-safe — **done** (§70).
+3. Re-read `MoveMode` in `write_Position` instead of trusting the cache —
+   superseded by (1); pushing is stronger than checking.
+4. Set `UnitLimitMin`/`UnitLimitMax` on the Z motor — **done** (§70): `Init` no
+   longer wipes them, `Initialise` restores them, and they are editable in
+   Setup Defaults.
 
 ---
 
@@ -4594,8 +4582,8 @@ latching, dialog shown, failed-Stop surfaced, scan suspension.
 ## 70. Recent Changes (August 2026) — IR Z-Axis Runaway: Stage Safety Hardening
 
 Branch `claude/mcs2-z-runaway-safety`, merged with `claude/stage-runaway-guard`
-(§69) into one batch; same branch name on TANGO_Devices. 192 tests.
-App version → **v13.18**. **Safety batch** — the IR piezo twice ran away in Z,
+(§69) into one batch; same branch name on TANGO_Devices.
+App version → **v13.18** (→ v13.19 in §71). **Safety batch** — the IR piezo twice ran away in Z,
 which crashes the sample into the objective past ~+100 µm.
 
 **Read §69 first** — it is the same incident, investigated independently, and
@@ -4684,24 +4672,18 @@ steps), so one shared pair of numbers would be wrong for the other piezo and
 actively misleading. Everything in `core/` — the unknown-position guard, the
 Stop button, the reinit invalidation — applies to Cryo automatically.
 
-### Merge integration with §69's guard
-The two batches touch the same file, so the seams matter:
-- **`_move_axis` order**: the unknown-position guard and the travel-limit check
-  run *first*; only a move that survives them calls
-  `_guard.note_commanded_move`. A refused jog must not be announced as
-  commanded motion, or the guard would stand down for a move that never
-  happened.
-- **Frame changes stand the guard down.** ⊘ Zero here makes every axis read 0
-  and ⟲ Reinitialise can change what the numbers mean — both are step changes
-  the guard would otherwise read as a runaway and latch on. New reference-counted
-  `_guard_suspend(reason, on)`; `set_stage_guard_suspended` (the main window's
-  scan hook) is now one reason and the stage operations another, so whichever
-  finishes first cannot re-arm the guard while the other is still driving.
-  `suspend()` forgets the anchor, so the guard re-baselines in the new frame —
-  and a latched trip is preserved, still needing a human re-arm.
+### Merge integration with §69 (now historical)
+The two batches touched the same file. The seams were: `_move_axis` running the
+unknown-position and travel-limit checks **before** announcing the move to the
+guard (a refused jog must not be announced as commanded motion), and a
+reference-counted `_guard_suspend(reason, on)` so the scan hook and the stage
+operations could not re-arm the guard while the other was still driving.
+Both are gone with the guard itself (§71); recorded because the *reasoning*
+applies to anything that watches the readback in future.
 
 ### Verification
-- `python test_runner.py` — 192 (the merged suite; §69 contributed 16).
+- `python test_runner.py` — 192 at the time of the merge; **176 after §71**
+  removed the guard's 16.
 - Offscreen-Qt run of the real `CalibrationPanel` / `DigitJogWidget` /
   `SetupDefaultsPanel` with the hardware layer patched (52 checks, not
   committed — needs Qt): unknown-state gating, per-axis blanking on a failed
@@ -4710,3 +4692,49 @@ The two batches touch the same file, so the seams matter:
   surviving the re-read, Stop dispatch, button gating, defaults round-trip.
 - Both apps constructed, shown and closed offscreen against a throwaway
   `SAMBA_CONFIG_DIR` (never the live one — §67).
+
+---
+
+## 71. Recent Changes (August 2026) — Runaway Guard Removed
+
+Branch `claude/remove-stage-guard` (176 tests). App version → **v13.19**.
+User request, one line: *"take away the runaway guard"*.
+
+Everything §69 added is gone: `core/stage_guard.py` and the
+`Samba_main/` / `Cryo/` shims deleted; the "Runaway guard" checkbox,
+trip-threshold spinbox, state label and "Re-arm" button removed from the
+Calibration tab; `_guard_start` / `_guard_poll` / `_guard_apply` /
+`_guard_trip` / `_guard_rearm` / `_on_guard_toggled` / `_on_guard_threshold` /
+`_guard_suspend` / `set_stage_guard_suspended` removed from
+`core/calibration.py`; the `note_commanded_move` call in `_move_axis`, the
+suspend/resume around the autofocus worker, and the `_set_running` hooks in
+both main windows removed; `TestStageGuard` (16 tests) removed. The 250 ms
+poll timer is gone with it, so the Calibration tab no longer polls the stage in
+the background. §69 keeps the reasoning for why this is defensible.
+
+**There is now no automatic and no manual stop in the UI** — the ⏹ Stop button
+went in §70 (also by request) and the guard's automatic `Stop` goes here. The
+stage's `Stop` command is still reachable from Jive. What remains against a Z
+runaway, in order of strength:
+
+1. **Prevention** — the device-side fixes in §70: `write_Position` pushes the
+   move mode so client and controller cannot disagree, `set_offset`'s restore
+   is exception-safe, `Init` no longer wipes `Conversion` / `UnitLimitMin/Max`.
+   **These need the C++ rebuild to take effect.**
+2. **The controller's own range limit** — `TravelLimitsPm` on the stage device,
+   enforced inside the MCS2 firmware. Opt-in and **not yet set**.
+3. **Software travel limits** — Setup Defaults → Stage Actuators, enforced on
+   the jog controls, the autofocus sweep and before every scan. Also **not yet
+   set**.
+4. Jog boxes that refuse a target they cannot vouch for (§70) — unaffected.
+
+Items 2 and 3 are configuration, not code, and both are still empty. Until they
+are filled in and the C++ is built, nothing in this batch or §70 is actually
+protecting the objective.
+
+### Verification
+`python test_runner.py` 176. `pyflakes` clean on `core/calibration.py`.
+Offscreen-Qt: 27 checks over the real `CalibrationPanel` (no guard attributes
+or methods left, the jog/limit/re-zero/reinit behaviour from §70 all still
+intact), and both apps constructed, shown and closed against a throwaway
+`SAMBA_CONFIG_DIR`.
