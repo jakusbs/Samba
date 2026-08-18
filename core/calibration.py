@@ -26,8 +26,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
-import stage_guard
-from stage_guard import StageGuard
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
@@ -879,12 +877,6 @@ class CalibrationPanel(QWidget):
         self._stage_grp = ctrl_grp
         ctrl_grp.setToolTip("Axis devices are set on the Setup Defaults tab")
 
-        # Runaway guard — see _guard_trip.  Armed once configure_stage()
-        # has told us which axes exist.
-        self._guard = StageGuard()
-        self._guard_timer = None
-        self._guard_busy = False
-        self._guard_suspends: set = set()   # see _guard_suspend
 
         self.jog_x = DigitJogWidget("X", "µm", n_int=2, n_dec=3)
         self.jog_y = DigitJogWidget("Y", "µm", n_int=2, n_dec=3)
@@ -925,47 +917,6 @@ class CalibrationPanel(QWidget):
         btn_row.addWidget(self.home_btn)
         btn_row.addStretch()
         ctrl_l.addLayout(btn_row)
-
-        # ── Runaway guard ────────────────────────────────────────────────────
-        # A SmarAct axis left in CL_RELATIVE executes an absolute position
-        # write as a relative move of that magnitude, so the stage walks away
-        # by its own coordinate on every write.  On the IR setup a +Z
-        # excursion of ~100 µm drives the sample into the objective.  This
-        # watches the readback and sends Stop the moment motion appears that
-        # Samba did not command.
-        guard_row = QHBoxLayout(); guard_row.setSpacing(6)
-        self.guard_cb = QCheckBox("Runaway guard")
-        self.guard_cb.setChecked(True)
-        self.guard_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.guard_cb.setToolTip(
-            "Watch the stage readback and send Stop if it moves without a\n"
-            "command from Samba.  Leave this on: it is the only thing between\n"
-            "a controller-side runaway and the objective.\n\n"
-            "Note this is a software watchdog polling over TANGO — it cannot\n"
-            "outrun a fast runaway.  Hardware unit limits on the motor are the\n"
-            "only true interlock.")
-        self.guard_cb.setStyleSheet("color:#cdd6f4;font-size:11px;")
-        self.guard_cb.toggled.connect(self._on_guard_toggled)
-        guard_row.addWidget(self.guard_cb)
-        guard_row.addWidget(QLabel("trip at"))
-        self.guard_spin = _NoScrollDoubleSpinBox()
-        self.guard_spin.setRange(0.5, 500.0); self.guard_spin.setDecimals(1)
-        self.guard_spin.setValue(stage_guard.DEFAULT_TRIP_UM)
-        self.guard_spin.setSuffix(" µm"); self.guard_spin.setFixedWidth(84)
-        self.guard_spin.valueChanged.connect(self._on_guard_threshold)
-        guard_row.addWidget(self.guard_spin)
-        self.guard_lbl = QLabel("armed")
-        self.guard_lbl.setStyleSheet("color:#a6e3a1;font-size:11px;font-weight:bold;")
-        guard_row.addWidget(self.guard_lbl)
-        self.guard_reset_btn = QPushButton("Re-arm")
-        self.guard_reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.guard_reset_btn.setToolTip(
-            "Clear a tripped guard.  Check why the stage moved before re-arming.")
-        self.guard_reset_btn.clicked.connect(self._guard_rearm)
-        self.guard_reset_btn.setVisible(False)
-        guard_row.addWidget(self.guard_reset_btn)
-        guard_row.addStretch()
-        ctrl_l.addLayout(guard_row)
 
         # LED lights (green = LED1, IR = LED2) — only shown when a Lights device
         # is configured for the setup (set via set_lights_device()).  The On/Off
@@ -1220,15 +1171,6 @@ class CalibrationPanel(QWidget):
             "z": (z_unit or "").strip() or self._DEFAULT_UNIT,
         }
         self._apply_axis_units()
-        # Give the guard the axis units — the IR axes report nm, so a 20 µm
-        # threshold is 20000 native counts.  Then start polling.
-        try:
-            self._guard.set_units(dict(self._stage_units))
-            self._guard.reset()
-            if any((x_dev, y_dev, z_dev)):
-                self._guard_start()
-        except Exception:
-            log.debug("stage guard not started", exc_info=True)
         self._set_axis_tooltip(x_dev, x_attr, y_dev, y_attr, z_dev, z_attr)
         self._probe_home_support(x_dev)
 
@@ -1244,11 +1186,6 @@ class CalibrationPanel(QWidget):
                        "(set on the Setup Defaults tab)")
 
     _DEFAULT_UNIT = "µm"
-
-    # Guard poll period.  Faster narrows the worst-case detection distance
-    # (stage speed x interval) but adds TANGO traffic; 250 ms is a
-    # compromise, and this is a mitigation rather than an interlock.
-    _GUARD_POLL_MS = 250
 
     def _axis_unit(self, axis_key: str) -> str:
         return getattr(self, "_stage_units", {}).get(axis_key, self._DEFAULT_UNIT)
@@ -1303,153 +1240,6 @@ class CalibrationPanel(QWidget):
         except (TypeError, ValueError):
             return None
         return (lo, hi) if hi > lo else None
-    # ── Runaway guard ─────────────────────────────────────────────────────────
-    def _guard_start(self):
-        """Begin polling the stage readback (idempotent)."""
-        if getattr(self, "_guard_timer", None) is None:
-            self._guard_timer = QTimer(self)
-            self._guard_timer.setInterval(self._GUARD_POLL_MS)
-            self._guard_timer.timeout.connect(self._guard_poll)
-        if not self._guard_timer.isActive():
-            self._guard_timer.start()
-
-    def _on_guard_toggled(self, on: bool):
-        self._guard.enabled = bool(on)
-        if on:
-            self._guard.reset()
-            self.guard_lbl.setText("armed")
-            self.guard_lbl.setStyleSheet(
-                "color:#a6e3a1;font-size:11px;font-weight:bold;")
-            self.guard_reset_btn.setVisible(False)
-        else:
-            self.guard_lbl.setText("OFF")
-            self.guard_lbl.setStyleSheet(
-                "color:#f38ba8;font-size:11px;font-weight:bold;")
-
-    def _on_guard_threshold(self, v: float):
-        self._guard.trip_um = float(v)
-        # The drift bound tracks the jump threshold: a creep worth catching is
-        # one that accumulates past a couple of trip-sized steps.
-        self._guard.drift_um = float(v) * 2.0
-
-    def _guard_rearm(self):
-        self._guard.reset()
-        self.guard_reset_btn.setVisible(False)
-        self.guard_lbl.setText("armed")
-        self.guard_lbl.setStyleSheet(
-            "color:#a6e3a1;font-size:11px;font-weight:bold;")
-        self._set_pos_ok("Runaway guard re-armed")
-
-    def _guard_suspend(self, reason: str, on: bool):
-        """Reference-counted suspend, keyed by reason.
-
-        Two independent things stand the guard down — a running scan (via the
-        main window) and the stage operations below that legitimately change
-        the reported position.  A plain boolean would let whichever finished
-        first re-arm the guard while the other was still driving the stage.
-        `suspend()` also forgets the anchor, so the guard re-baselines in the
-        new coordinate frame instead of measuring against the old one; a
-        latched trip is deliberately preserved and still needs a human re-arm.
-        """
-        try:
-            if on:
-                self._guard_suspends.add(reason)
-            else:
-                self._guard_suspends.discard(reason)
-            self._guard.suspend(bool(self._guard_suspends))
-        except Exception:
-            pass
-
-    def set_stage_guard_suspended(self, suspended: bool):
-        """Stand the guard down while something else drives the stage
-        (a scan, a scanlist).  Called by the main window."""
-        self._guard_suspend("scan", suspended)
-
-    def _guard_poll(self):
-        """Sample the axes in a worker thread; never blocks the GUI."""
-        if self._guard_busy or not self._guard.enabled or self._guard.tripped:
-            return
-        info = self._get_axis_info()
-        if not info:
-            return
-        self._guard_busy = True
-
-        def _do():
-            positions = {}
-            for key in ("x", "y", "z"):
-                dev, attr = info.get(key, ("", ""))
-                if not dev:
-                    continue
-                try:
-                    p = get_proxy(dev)
-                    if is_sim_proxy(p):
-                        continue
-                    v, e = safe_read(p, attr, timeout=1.0)
-                    positions[key] = None if e else v
-                except Exception:
-                    positions[key] = None
-            self._gui_apply.emit(lambda pos=positions: self._guard_apply(pos))
-
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _guard_apply(self, positions: dict):
-        self._guard_busy = False
-        try:
-            trip = self._guard.update(positions, time.time())
-        except Exception:
-            return
-        if trip is not None:
-            self._guard_trip(trip)
-
-    def _guard_trip(self, trip):
-        """Stop the stage.  Never writes a position — commanding a position is
-        what misfires, and in CL_RELATIVE it would add another jump."""
-        self.guard_lbl.setText("TRIPPED")
-        self.guard_lbl.setStyleSheet(
-            "color:#f38ba8;font-size:11px;font-weight:bold;")
-        self.guard_reset_btn.setVisible(True)
-        self._set_pos_err(trip.message())
-        log.error("STAGE RUNAWAY GUARD: %s", trip.message())
-
-        dev = self._get_axis_info().get("x", ("", ""))[0]
-
-        def _do():
-            sent, errs = [], []
-            for cmd in ("Stop", "StopAll", "Abort"):
-                try:
-                    p, err = fresh_proxy(dev)
-                    if err or is_sim_proxy(p):
-                        errs.append(err or "simulation"); break
-                    p.command_inout(cmd)
-                    sent.append(cmd)
-                    break                    # first accepted command wins
-                except Exception as e:
-                    errs.append(f"{cmd}: {e}")
-            def _report():
-                if sent:
-                    self._set_pos_err(f"{trip.message()}  [{sent[0]} sent]")
-                else:
-                    self._set_pos_err(
-                        f"{trip.message()}  [STOP FAILED: {'; '.join(errs)[:80]}]")
-                QMessageBox.critical(
-                    self, "Stage runaway — stopped",
-                    f"{trip.message()}\n\n"
-                    + ("A Stop command was sent to the stage.\n\n"
-                       if sent else
-                       "The Stop command could NOT be sent:\n"
-                       f"{'; '.join(errs)[:200]}\n\n"
-                       "Cut power to the controller if the stage is still "
-                       "moving.\n\n")
-                    + "Samba did not command this move.  A SmarAct axis left "
-                      "in CL_RELATIVE move mode executes an absolute position "
-                      "write as a relative move, which walks the stage away by "
-                      "its own coordinate.\n\n"
-                      "Check the axis MoveMode before moving again. The guard "
-                      "stays tripped until you press Re-arm.")
-            self._gui_apply.emit(_report)
-
-        threading.Thread(target=_do, daemon=True).start()
-
     def _move_axis(self, axis_key: str, value_um: float):
         info = self._get_axis_info()
         if axis_key not in info:
@@ -1484,11 +1274,6 @@ class CalibrationPanel(QWidget):
         p, err = fresh_proxy(dev)
         if err: self._set_pos_err(err); return
         if is_sim_proxy(p): self._set_pos_err("Simulation mode"); return
-        # Announce the move so the guard doesn't read our own motion as a fault.
-        try:
-            self._guard.note_commanded_move(axis_key, value_um, time.time())
-        except Exception:
-            pass
         err = safe_write(p, attr, value_um)
         if err: self._set_pos_err(f"{attr}: {err[:60]}")
         else:   self._set_pos_ok(f"Sent {attr} = {value_um:.3f} {unit}")
@@ -1515,10 +1300,6 @@ class CalibrationPanel(QWidget):
             self._set_pos_err("No stage device configured"); return
         for jog in (self.jog_x, self.jog_y, self.jog_z):
             jog.set_unknown("stage re-initialised")
-        # An Init can change what the position numbers mean, so the guard's
-        # anchor is meaningless across it — stand it down and let it
-        # re-baseline from the re-read afterwards.
-        self._guard_suspend("stage_op", True)
         self.reinit_btn.setEnabled(False)
         self._set_pos_ok("Re-initialising stage…")
 
@@ -1544,7 +1325,6 @@ class CalibrationPanel(QWidget):
 
             def _done():
                 self.reinit_btn.setEnabled(True)
-                self._guard_suspend("stage_op", False)
                 if not used:
                     self._set_pos_err(f"Reinitialise failed: {last[:100]}")
                     self._read_all()
@@ -1617,10 +1397,6 @@ class CalibrationPanel(QWidget):
         # the follow-up read fails.  Blank them first, restore from the read.
         for jog in (self.jog_x, self.jog_y, self.jog_z):
             jog.set_unknown("coordinate frame re-zeroed")
-        # Re-zeroing makes every axis' reading jump to 0 — a step the guard
-        # would otherwise read as a runaway and latch on.  It is exactly the
-        # kind of legitimate frame change the suspend is for.
-        self._guard_suspend("stage_op", True)
         self._set_pos_ok("Setting current position as zero…")
 
         def _do():
@@ -1634,7 +1410,6 @@ class CalibrationPanel(QWidget):
                 p.command_inout("SetZero")
                 def _ok():
                     self.home_btn.setEnabled(True)
-                    self._guard_suspend("stage_op", False)
                     self._set_pos_ok("Current position defined as 0 (no movement)")
                     self._read_all()
                 self._gui_apply.emit(_ok)
@@ -1642,7 +1417,6 @@ class CalibrationPanel(QWidget):
                 msg = str(e)
                 def _err():
                     self.home_btn.setEnabled(True)
-                    self._guard_suspend("stage_op", False)
                     self._set_pos_err(f"Set-zero failed: {msg[:120]}")
                     # SetZero attempts all three axes and collects errors, so a
                     # failure can still mean some axes were re-zeroed.  Re-read
@@ -1907,7 +1681,6 @@ class CalibrationPanel(QWidget):
         self._af_worker.error_msg.connect(self._set_af_err)
         self._af_worker.finished_.connect(self._on_af_finished)
         # Autofocus drives Z itself; its sweep would otherwise read as a fault.
-        self.set_stage_guard_suspended(True)
         self._af_worker.start()
         return True
 
@@ -1927,7 +1700,6 @@ class CalibrationPanel(QWidget):
         self.af_start_btn.setEnabled(True); self.af_stop_btn.setEnabled(False)
         # Re-arm first: the completion-callback path below returns early
         # when no callback is registered, which would skip this.
-        self.set_stage_guard_suspended(False)
         cb, self._af_on_done = getattr(self, "_af_on_done", None), None
         if cb is None:
             return

@@ -1627,12 +1627,6 @@ class CryoMainWindow(QMainWindow):
         # access on the ZI device (Device_4Impl is single-threaded; simultaneous
         # state() + read_attribute() calls cause IMP_LIMIT CORBA exceptions).
         self._tint_status_bar("running" if running else "idle")
-        # A scan drives the stage by design — stand the runaway guard down so
-        # it can't fire on commanded motion (and re-arm when the scan ends).
-        try:
-            self.calib_panel.set_stage_guard_suspended(running)
-        except Exception:
-            pass
         for panel in (self.traj_panel.hw, self.sl_panel.hw):
             if hasattr(panel, 'set_scan_running'):
                 panel.set_scan_running(running)
