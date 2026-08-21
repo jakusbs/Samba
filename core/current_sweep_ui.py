@@ -1,18 +1,21 @@
 """
-core/current_sweep_ui.py — Qt half of the current sweep.
+core/current_sweep_ui.py — Qt half of the current sweep and the autofocus box.
 
 CurrentSweepGroup   the "Current sweep" group box on the Scanlist tab
+RefocusGroup        the "Refocus" group box next to it — the single switch and
+                    position for every automatic autofocus
 ThermalSettleWorker the between-currents wait (fixed time or focus plateau)
 
 The sequencing itself lives in the main windows, because starting a scanlist
 is app-specific; everything reusable is here or in core/current_sweep.py.
 """
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QHBoxLayout, QGridLayout,
-    QLabel, QGroupBox, QCheckBox, QComboBox, QSpinBox, QDoubleSpinBox,
+    QLabel, QGroupBox, QCheckBox, QComboBox, QPushButton, QSpinBox,
+    QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
@@ -333,10 +336,8 @@ class CurrentSweepGroup(QGroupBox):
             w.toggled.connect(self._emit_changed)
             return w
 
-        self.refocus_cb = _cb(
-            "Refocus", True,
-            "Run the Calibration tab's autofocus after each settle, with the\n"
-            "scan axis parked at the focus position (0 = middle of the device).")
+        # Whether to refocus at all lives in the Refocus box next door: one
+        # switch for the sweep, the periodic refocus and the start of a run.
         self.pause_bad_cb = _cb(
             "Pause if focus unreliable", False,
             "Hold the sweep when the autofocus reports an endpoint or a noise\n"
@@ -354,7 +355,7 @@ class CurrentSweepGroup(QGroupBox):
         # checkbox row cost ~56 px of the tab's MINIMUM height — which the
         # bottom half of the window cannot spare.
         opts = QHBoxLayout(); opts.setSpacing(14)
-        for _w in (self.refocus_cb, self.pause_bad_cb,
+        for _w in (self.pause_bad_cb,
                    self.auto_range_cb, self.off_at_end_cb):
             opts.addWidget(_w)
         opts.addStretch()
@@ -473,7 +474,6 @@ class CurrentSweepGroup(QGroupBox):
             "cursweep_plateau_min":   self.pl_min_spin.value(),
             "cursweep_plateau_max":   self.pl_max_spin.value(),
             "cursweep_drift_pct_min": self.drift_spin.value(),
-            "cursweep_refocus":       self.refocus_cb.isChecked(),
             "cursweep_pause_bad_focus": self.pause_bad_cb.isChecked(),
             "cursweep_auto_range":    self.auto_range_cb.isChecked(),
             "cursweep_output_off_end": self.off_at_end_cb.isChecked(),
@@ -496,7 +496,6 @@ class CurrentSweepGroup(QGroupBox):
             self.pl_min_spin.setValue(float(cfg.get("cursweep_plateau_min", 3.0)))
             self.pl_max_spin.setValue(float(cfg.get("cursweep_plateau_max", 20.0)))
             self.drift_spin.setValue(float(cfg.get("cursweep_drift_pct_min", 0.5)))
-            self.refocus_cb.setChecked(bool(cfg.get("cursweep_refocus", True)))
             self.pause_bad_cb.setChecked(
                 bool(cfg.get("cursweep_pause_bad_focus", False)))
             self.auto_range_cb.setChecked(
@@ -507,3 +506,140 @@ class CurrentSweepGroup(QGroupBox):
         finally:
             self._loading = False
         self._refresh_summary()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Refocus group — the single switch and position for every automatic autofocus
+# ─────────────────────────────────────────────────────────────────────────────
+class RefocusGroup(QGroupBox):
+    """Automatic autofocus: whether, how often, and where.
+
+    Two rows by two columns:
+
+        [ Refocus ]         X: [ 0.000 nm ]
+        Every: [30.0 min]   Y: [ 0.000 nm ]
+
+    One switch for everything (the current sweep used to carry its own
+    checkbox): when it is off nothing refocuses by itself.  The interval
+    governs scan boundaries WITHIN a scanlist; a current change always
+    refocuses, because the current step is what causes the drift.
+
+    The X/Y fields are editable only for axes the active config actually
+    scans, and carry that axis' own unit — writing a focus position for an
+    axis the scan never moves would be meaningless, and the number is passed
+    to the device raw, so labelling it with the wrong unit is a lie.
+    """
+
+    changed = pyqtSignal()
+
+    _BTN_STYLE = (
+        "QPushButton{background:#252538;border:1px solid #45475a;"
+        "color:#6c7086;font-size:10px;font-weight:bold;padding:0 10px;"
+        "border-radius:6px;}"
+        "QPushButton:hover:enabled{background:#313244;color:#cdd6f4;}"
+        "QPushButton:checked{background:#a6e3a1;color:#1e1e2e;"
+        "border-color:#a6e3a1;}"
+        "QPushButton:disabled{background:#1e1e2e;color:#45475a;"
+        "border-color:#313244;}")
+
+    def __init__(self, parent=None):
+        super().__init__("Refocus", parent)
+        self._loading = False          # see §67 — load() must never echo back
+
+        g = QGridLayout(self); g.setSpacing(6); g.setContentsMargins(8, 8, 8, 8)
+
+        self.refocus_btn = QPushButton("Refocus")
+        self.refocus_btn.setCheckable(True)
+        self.refocus_btn.setFixedHeight(22)
+        self.refocus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.refocus_btn.setStyleSheet(self._BTN_STYLE)
+        self.refocus_btn.setToolTip(
+            "Autofocus automatically: at the start of a scanlist or current\n"
+            "sweep, after every current change, and at scan boundaries once\n"
+            "the interval below has elapsed.  Off = never autofocus by itself.")
+        self.refocus_btn.toggled.connect(self._emit_changed)
+        g.addWidget(self.refocus_btn, 0, 0)
+
+        ev_row = QHBoxLayout(); ev_row.setSpacing(4)
+        ev_row.addWidget(QLabel("Every:"))
+        self.every_spin = _NoScrollDouble()
+        self.every_spin.setRange(0.0, 1440.0); self.every_spin.setDecimals(1)
+        self.every_spin.setValue(30.0); self.every_spin.setSuffix(" min")
+        self.every_spin.setMinimumWidth(84)
+        self.every_spin.setToolTip(
+            "Refocus at the next scan boundary once this long has passed since\n"
+            "the last autofocus.  0 = only at the start and on current changes.")
+        self.every_spin.valueChanged.connect(self._emit_changed)
+        ev_row.addWidget(self.every_spin)
+        g.addLayout(ev_row, 1, 0)
+
+        def _pos(label):
+            w = _NoScrollDouble()
+            w.setRange(-1e9, 1e9); w.setDecimals(3); w.setValue(0.0)
+            w.setMinimumWidth(96)
+            w.setToolTip(f"{label} position the autofocus measures at — the "
+                         f"middle of the device.\nDisabled when the scan does "
+                         f"not move this axis.")
+            w.valueChanged.connect(self._emit_changed)
+            return w
+
+        self._x_lbl = QLabel("X:")
+        self.x_spin = _pos("X")
+        g.addWidget(self._x_lbl, 0, 1); g.addWidget(self.x_spin, 0, 2)
+        self._y_lbl = QLabel("Y:")
+        self.y_spin = _pos("Y")
+        g.addWidget(self._y_lbl, 1, 1); g.addWidget(self.y_spin, 1, 2)
+
+        g.setColumnStretch(2, 1)
+        g.setRowStretch(2, 1)          # keep the two rows at the top
+        self.set_axes(True, "", False, "")
+
+    # ── internals ────────────────────────────────────────────────────────────
+    def _emit_changed(self, *_):
+        if not self._loading:
+            self.changed.emit()
+
+    # ── public API ───────────────────────────────────────────────────────────
+    def set_axes(self, x_enabled: bool, x_unit: str,
+                 y_enabled: bool, y_unit: str):
+        """Enable each position field per scanned axis and label its unit."""
+        for spin, lbl, en, unit in ((self.x_spin, self._x_lbl, x_enabled, x_unit),
+                                    (self.y_spin, self._y_lbl, y_enabled, y_unit)):
+            spin.setEnabled(bool(en))
+            lbl.setEnabled(bool(en))
+            u = (unit or "").strip()
+            spin.setSuffix(f" {u}" if u else "")
+            if not en:
+                spin.setToolTip("This axis is not scanned in the active config, "
+                                "so the autofocus leaves it where it is.")
+
+    def is_enabled(self) -> bool:
+        return self.refocus_btn.isChecked()
+
+    def interval_min(self) -> float:
+        return float(self.every_spin.value())
+
+    def position(self) -> Tuple[Optional[float], Optional[float]]:
+        """(x, y) focus position; None for an axis the scan does not move."""
+        x = self.x_spin.value() if self.x_spin.isEnabled() else None
+        y = self.y_spin.value() if self.y_spin.isEnabled() else None
+        return x, y
+
+    def get_values(self) -> dict:
+        return {
+            "refocus_enabled":   self.refocus_btn.isChecked(),
+            "refocus_every_min": self.every_spin.value(),
+            "refocus_x":         self.x_spin.value(),
+            "refocus_y":         self.y_spin.value(),
+        }
+
+    def load_values(self, cfg: dict):
+        """Restore from a scan config without emitting `changed`."""
+        self._loading = True
+        try:
+            self.refocus_btn.setChecked(bool(cfg.get("refocus_enabled", False)))
+            self.every_spin.setValue(float(cfg.get("refocus_every_min", 30.0)))
+            self.x_spin.setValue(float(cfg.get("refocus_x", 0.0)))
+            self.y_spin.setValue(float(cfg.get("refocus_y", 0.0)))
+        finally:
+            self._loading = False

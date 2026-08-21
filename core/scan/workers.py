@@ -13,6 +13,7 @@ from config import X_TIME
 from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
                       safe_write, demagnetize_magnet, TANGO_AVAILABLE)
 from core.scan.runner import ScanRunner
+from current_sweep import refocus_due
 
 
 class ScanWorker(QThread):
@@ -72,10 +73,13 @@ class ScanlistWorker(QThread):
     scan_aborted  = pyqtSignal()
     error_msg     = pyqtSignal(str)
     relay_changed = pyqtSignal(int)   # emitted whenever relay state is written
+    refocus_due   = pyqtSignal()      # host must autofocus, then call refocus_done()
 
     def __init__(self, cfg_or_list, setup: dict, n_scans: int,
                  list_name: str, relay_flip: bool, field_flip: bool,
-                 setup_name: str = ""):
+                 setup_name: str = "",
+                 refocus_every_min: float = 0.0,
+                 last_focus_t: Optional[float] = None):
         super().__init__()
         # Accept either a single config dict or a per-cycle list of configs.
         # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
@@ -86,6 +90,12 @@ class ScanlistWorker(QThread):
         self.setup_name = setup_name
         self._abort = False; self._paused = False; self._runner = None
         self._relay_state = 0
+        # Periodic autofocus.  last_focus_t is the run-wide timestamp the
+        # host keeps, so a refocus the current sweep just did counts here
+        # too and the two never autofocus twice in a row.
+        self._refocus_min  = max(0.0, float(refocus_every_min or 0.0))
+        self._last_focus_t = last_focus_t
+        self._refocus_hold = False
 
     def abort(self):
         self._abort = True
@@ -102,6 +112,29 @@ class ScanlistWorker(QThread):
     def is_paused(self):
         if self._runner: return self._runner.is_paused()
         return self._paused
+
+    def refocus_done(self, when: Optional[float] = None):
+        """Host has finished the autofocus — release the boundary hold."""
+        self._last_focus_t = time.time() if when is None else float(when)
+        self._refocus_hold = False
+
+    def _maybe_refocus(self):
+        """Hold at a scan boundary while the host autofocuses.
+
+        The wait cannot be driven from scan_done: that signal fires and the
+        loop carries straight on into the next scan, so the worker has to
+        put the hold up ITSELF before asking.  Deliberately not pause():
+        this is not an operator pause and must not move the Pause button.
+        """
+        if self._abort or not refocus_due(self._last_focus_t, time.time(),
+                                          self._refocus_min):
+            return
+        self._refocus_hold = True
+        self.log_msg.emit("Refocus interval elapsed — autofocusing before "
+                          "the next scan…")
+        self.refocus_due.emit()
+        while self._refocus_hold and not self._abort:
+            time.sleep(0.1)
 
     def run(self):
         try:
@@ -317,6 +350,7 @@ class ScanlistWorker(QThread):
                     self.scan_done.emit(scan_idx, fn)
                 scan_idx += 1
                 self.cycle_done.emit(i)   # reset live display between directions
+                self._maybe_refocus()
 
             self.list_progress.emit(i + 1, self.n_scans)
             if self.relay_flip: self._relay_state = 1 - self._relay_state

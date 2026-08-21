@@ -4787,3 +4787,102 @@ only the new current's samples, x anchored at 0, empty plot in fixed mode), 9
 for refocus parking, 18 for the sequencer. Both apps constructed against a
 throwaway `SAMBA_CONFIG_DIR`. `pyflakes` clean on the four touched files apart
 from one pre-existing f-string warning.
+
+---
+
+## 73. Recent Changes (August 2026) — Refocus Box: One Switch for Every Autofocus
+
+Branch `claude/scanlist-refocus` (186 tests). App version → **v13.21**.
+Both apps. Automatic autofocus becomes one control instead of a hardcoded
+position buried in the sweep.
+
+### The box
+A "Refocus" group on the Scanlist tab's top row, next to Scanlist, two rows by
+two columns and the same height (96 px) as the boxes beside it:
+
+```
+[ Refocus ]         X: [ 0.000 nm ]
+Every: [30.0 min]   Y: [ 0.000 nm ]
+```
+
+- The pill is styled like the Trajectory tab's *Zero after scan* — green when
+  armed.
+- **X/Y are editable only for axes the active config scans**, and carry that
+  axis' own unit (from Setup Defaults, config as fallback). A focus position
+  for an axis the scan never moves is meaningless, and the number reaches the
+  device raw, so the wrong unit label would be a lie. `position()` returns
+  `None` for a non-scanned axis and that axis is then left alone.
+- `RefocusGroup.set_axes()` is re-applied on every config load and on a
+  Setup Defaults edit (`refresh_axis_info`).
+
+### One switch, not two
+The Current sweep box's own "Refocus" checkbox is **gone** — with the new box
+it was two controls for one thing. `cursweep_refocus` is dropped from
+`CURRENT_SWEEP_DEFAULTS` and no longer read; old configs keep the key
+harmlessly. Everything now asks `sl_panel.refocus`:
+
+| when | what happens |
+|---|---|
+| scanlist start | one autofocus before the first scan |
+| current sweep start | the first current's own refocus covers it — deliberately **not** a second one |
+| every current change | always refocuses, timer or not: the current step is what causes the drift |
+| scan boundaries | refocus once `refocus_every_min` has elapsed |
+
+`self._focus_t` is a single run-wide timestamp stamped by every completion
+path and handed to `ScanlistWorker(last_focus_t=…)`, so the sweep's refocus
+and the periodic one can never fire back to back. `refocus_every_min = 0`
+disables the periodic one and leaves the start/per-current ones.
+
+### The boundary hold (`core/scan/workers.py`)
+A scanlist runs each scan synchronously inside `ScanlistWorker`, and the
+autofocus is a GUI-side QThread — so the wait cannot be driven from
+`scan_done`, which fires and lets the loop carry straight on. The worker
+instead puts the hold up **itself** before asking:
+
+```python
+self._refocus_hold = True
+self.refocus_due.emit()          # host autofocuses, then calls refocus_done()
+while self._refocus_hold and not self._abort:
+    time.sleep(0.1)
+```
+
+Deliberately not `pause()`: this is not an operator pause and must not move
+the Pause button. `_on_sl_refocus_due` releases the hold **whatever happens**
+— a refocus that is switched off, cannot start, or fails still lets the
+scanlist go, so a focus problem can never strand a measurement.
+
+### Settle watches the focus where it will refocus
+`_park_focus_axes` moves X/Y to the Refocus position before the thermal
+settle starts, so the diode is watched at the same place the autofocus will
+run — and there is no stage move between settle and refocus (the autofocus
+finds the axes already there and skips its own park). Off the GUI thread;
+failures are logged, never silent.
+
+### Separate X and Y targets (`core/calibration.py`)
+`run_autofocus_async(on_done, focus_pos=None, focus_pos_y=None)` replaces the
+old single value plus `also_y` flag. **None now means "leave that axis
+alone"**, which is why the ▶ button passes its spinbox value explicitly
+rather than relying on the None default — the previous ambiguity would have
+moved X to the Calibration tab's position on a Y-only scan.
+
+### Config
+`refocus_enabled` / `refocus_every_min` / `refocus_x` / `refocus_y` in
+`REFOCUS_DEFAULTS` (core/current_sweep.py, one definition for both apps'
+defaults, the migration and the widget). Samba_main schema **v9 → v10**
+(`_migrate_v9_to_v10`), Cryo backfills inline. Off by default, so nothing
+starts focusing by itself on an existing config.
+
+### Tests / verification
+- `test_runner.py` 176 → 186: `TestRefocusConfig` (defaults off in both apps,
+  `cursweep_refocus` gone from the defaults and from a fresh config, migration
+  backfills and preserves an existing choice, Cryo backfill) and
+  `TestRefocusDue` (first boundary due, not due before the interval, due
+  after, interval 0 disables it, garbage interval is not due).
+- Offscreen harnesses (68 checks): the widget (axis gating, units, None for a
+  non-scanned axis, silent load, round-trip, matching box heights), the
+  worker hold (emits, holds, released by `refocus_done`, not due again
+  immediately, interval 0 never holds), the host wiring (position reaches the
+  autofocus, off → caller carries on, a disabled refocus still releases the
+  hold), and the sweep sequencer including "refocus off → sweep still runs".
+- Both apps constructed against a throwaway `SAMBA_CONFIG_DIR`. The panel's
+  minimum height went **down** 492 → 464 px.

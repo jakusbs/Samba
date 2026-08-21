@@ -10,7 +10,7 @@ from typing import Dict, List, TypedDict, Optional
 # core.current_sweep is dependency-free (math/re only), and this module is
 # also loaded by file path in the test suite, where Samba_main/ is not on
 # sys.path but the repo root is.
-from core.current_sweep import CURRENT_SWEEP_DEFAULTS
+from core.current_sweep import CURRENT_SWEEP_DEFAULTS, REFOCUS_DEFAULTS
 
 log = logging.getLogger(__name__)
 
@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.20"
+APP_VERSION = "13.21"
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -250,6 +250,9 @@ def make_default_config(name: str = "scan_x") -> dict:
         # Current sweep — repeat the whole scanlist at several excitation
         # currents, refocusing between them (see core/current_sweep.py).
         **CURRENT_SWEEP_DEFAULTS,
+        # Automatic autofocus: one switch for the sweep, the periodic
+        # refocus inside a scanlist, and the start of a run.
+        **REFOCUS_DEFAULTS,
         "sensors": copy.deepcopy(DEFAULT_SENSORS),
         "display_sensor": "ZI2 x1", "colormap": "RdBu_r",
         # DC Hysteresis (PyHysteresis Tango device)
@@ -449,6 +452,15 @@ def _migrate_v8_to_v9(cfg: dict):
         cfg.setdefault(key, val)
 
 
+def _migrate_v9_to_v10(cfg: dict):
+    """v9→v10: Add the Refocus box (automatic autofocus).  Disabled by
+    default, so nothing starts focusing by itself on an existing config.
+    cursweep_refocus is superseded by refocus_enabled and is left in place
+    unread on old configs."""
+    for key, val in REFOCUS_DEFAULTS.items():
+        cfg.setdefault(key, val)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -459,6 +471,7 @@ _MIGRATIONS = [
     (7, _migrate_v6_to_v7),
     (8, _migrate_v7_to_v8),
     (9, _migrate_v8_to_v9),
+    (10, _migrate_v9_to_v10),
 ]
 
 

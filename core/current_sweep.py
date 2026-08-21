@@ -42,11 +42,40 @@ CURRENT_SWEEP_DEFAULTS = {
     "cursweep_plateau_min":     3.0,     # minutes — see PlateauDetector
     "cursweep_plateau_max":     20.0,    # minutes
     "cursweep_drift_pct_min":   0.5,     # %/min of the focus signal
-    "cursweep_refocus":         True,
     "cursweep_pause_bad_focus": False,
     "cursweep_auto_range":      True,
     "cursweep_output_off_end":  True,
 }
+
+# Autofocus, shared by the sweep and by plain scanlists.  One switch: when
+# refocus_enabled is off nothing refocuses automatically at all.  The interval
+# governs boundaries WITHIN a scanlist; a current change always refocuses,
+# because the current step is what causes the drift.  Both paths share one
+# "last focus" timestamp so they never autofocus twice in a row.
+REFOCUS_DEFAULTS = {
+    "refocus_enabled":   False,
+    "refocus_every_min": 30.0,
+    "refocus_x":         0.0,   # in the X axis' own unit
+    "refocus_y":         0.0,   # in the Y axis' own unit
+}
+
+
+def refocus_due(last_focus_t, now, interval_min) -> bool:
+    """True when a periodic refocus is owed at a scan boundary.
+
+    `last_focus_t` is None before the first autofocus of a run, which counts
+    as due; a non-positive interval disables the periodic refocus entirely
+    (the per-current one is independent of it).
+    """
+    try:
+        interval = float(interval_min) * 60.0
+    except (TypeError, ValueError):
+        return False
+    if interval <= 0:
+        return False
+    if last_focus_t is None:
+        return True
+    return (float(now) - float(last_focus_t)) >= interval
 
 
 # ─────────────────────────────────────────────────────────────────────────────
