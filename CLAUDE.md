@@ -4738,3 +4738,52 @@ Offscreen-Qt: 27 checks over the real `CalibrationPanel` (no guard attributes
 or methods left, the jog/limit/re-zero/reinit behaviour from §70 all still
 intact), and both apps constructed, shown and closed against a throwaway
 `SAMBA_CONFIG_DIR`.
+
+---
+
+## 72. Recent Changes (August 2026) — Sweep Tooltip & Settle-Plot Reset
+
+Branch `claude/sweep-tooltip-plot-reset` (176 tests). App version → **v13.20**.
+Two lab-reported annoyances in the §68 current sweep.
+
+### The whole-box tooltip is gone
+`CurrentSweepGroup` set a tooltip on **itself**, and a `QGroupBox` tooltip
+covers the entire box — so the "tick to repeat the scanlist…" popup appeared
+over every gap between the fields, everywhere in a 1500 px-wide box. Removed:
+the title already carries the on/off state (§68) and the summary line at the
+bottom says what the sweep will do. The per-field tooltips — settle mode,
+min/max wait, drift, and the four option checkboxes — are the useful ones and
+all stay.
+
+### The settle plot resets per current
+`_cs_on_fl_sample` redrew from the (correctly reset) sample lists, but nothing
+ever *cleared* the plot, so the previous content stayed on screen until the
+first sample of the new settle arrived — and in **fixed-wait mode**, which
+emits no samples at all, for the whole wait. On the first current that meant
+the last scan's curve; between currents, the previous current's trace. Either
+way it read as a focus signal that never returns to zero.
+
+- `_cs_after_current` now calls `plot1d.clear()` before starting the settle
+  worker, for **both** modes.
+- After each `show_static`, the time axis is anchored with
+  `ax1.set_xlim(left=0)`, so the trace visibly grows from the moment the
+  current changed rather than from wherever the first sample landed.
+
+### Note on the merge
+§68 was merged into `main` (a790970) and the stage-guard batch (§69–71) landed
+on top, so `main` carries both and `APP_VERSION` jumped 13.16 → 13.19 → 13.20.
+The two batches both edited `core/calibration.py` heavily — §68's `_park` /
+`run_autofocus_async` / axis-tooltip changes and §70's unknown-position guard
+and travel limits — and the merge is coherent: no `_dev_lbl` references
+survive, the runaway guard is absent, and the refocus-parking harness (9
+checks) and sweep sequencer harness (18 checks) both pass against the merged
+tree.
+
+### Verification
+`python test_runner.py` 176. Offscreen-Qt harnesses re-created after the
+scratchpad was cleared: 17 checks for the tooltip removal (group tooltip empty,
+all eight per-field tooltips intact) and the plot reset (one trace per current,
+only the new current's samples, x anchored at 0, empty plot in fixed mode), 9
+for refocus parking, 18 for the sequencer. Both apps constructed against a
+throwaway `SAMBA_CONFIG_DIR`. `pyflakes` clean on the four touched files apart
+from one pre-existing f-string warning.

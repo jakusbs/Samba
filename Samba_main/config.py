@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.19"
+APP_VERSION = "13.20"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 9

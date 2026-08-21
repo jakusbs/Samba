@@ -2281,7 +2281,6 @@ class MainWindow(QMainWindow):
         The setup lock is already held and is kept for the whole sweep — it is
         released in _cs_finish, not per scanlist.
         """
-        sweep = self.sl_panel.cur_sweep
         self._cs_active   = True
         self._cs_abort    = False
         self._cs_currents = list(currents)
@@ -2409,9 +2408,16 @@ class MainWindow(QMainWindow):
         self._cs_settle.log_msg.connect(self._log_append)
         self._cs_settle.done_.connect(self._cs_settle_done)
         # Live focus trace on the 1D plot so the settling is visible while it
-        # happens (fixed mode emits nothing, so the plot is simply left alone).
+        # happens.  The plot is wiped FIRST, for both modes: otherwise the
+        # previous current's trace (or, on the first current, the last scan)
+        # stays on screen for the whole settle, which reads as a curve that
+        # never returns to zero between currents.
         self._cs_fl_t, self._cs_fl_v = [], []
         self._cs_fl_label = f"{self._cs_idx + 1}/{len(self._cs_currents)}, {mA:.4g} mA"
+        try:
+            self.plot1d.clear()
+        except Exception:
+            log.debug("Could not clear the 1D plot for the settle", exc_info=True)
         self._cs_settle.sample.connect(self._cs_on_fl_sample)
         self._cs_settle.start()
 
@@ -2431,6 +2437,11 @@ class MainWindow(QMainWindow):
                 xlabel="Time since current change (s)",
                 ylabel="Focus signal",
                 title=f"Thermal settle — {self._cs_fl_label}")
+            # Anchor the time axis at 0 so the trace visibly grows from the
+            # moment the current changed, instead of the axis starting at
+            # whenever the first sample happened to land.
+            self.plot1d.ax1.set_xlim(left=0.0)
+            self.plot1d.canvas.draw_idle()
         except Exception:
             log.debug("Focus-settle plot update failed", exc_info=True)
 
