@@ -244,10 +244,10 @@ class CurrentSweepGroup(QGroupBox):
         # title, both of which still work by mouse.
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._loading = False        # see §67 — load() must never echo back
-        self.setToolTip(
-            "Tick to repeat the whole scanlist at each current in the series "
-            "below,\nwaiting for the sample to thermalise and refocusing "
-            "between them.")
+        # Deliberately NO tooltip on the group itself: a QGroupBox tooltip
+        # covers the whole box, so it popped up over every gap between the
+        # fields.  The title already carries the on/off state, and the summary
+        # line at the bottom says what the sweep will do.
 
         g = QGridLayout(self); g.setSpacing(4); g.setContentsMargins(8, 4, 8, 4)
 
