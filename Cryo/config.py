@@ -10,7 +10,7 @@ from typing import Dict, List
 # Package path rather than the bare-name shim — core.current_sweep is
 # dependency-free, and this keeps the defaults, the migration and the widget
 # from drifting apart.  See Samba_main/config.py for the same import.
-from core.current_sweep import CURRENT_SWEEP_DEFAULTS
+from core.current_sweep import CURRENT_SWEEP_DEFAULTS, REFOCUS_DEFAULTS
 
 
 def _sanitize(obj):
@@ -328,6 +328,8 @@ def make_default_config(name: str = "scan_x") -> dict:
         # Current sweep — repeat the whole scanlist at several excitation
         # currents, refocusing between them (see core/current_sweep.py).
         **CURRENT_SWEEP_DEFAULTS,
+        # Automatic autofocus (one switch, shared by sweep + scanlist)
+        **REFOCUS_DEFAULTS,
         "field_start_A": -1.0, "field_stop_A": 1.0, "field_npts": 101,
         "field_segments": [[-1.0, 1.0, 101]],   # multi-segment AC sweep
         "field_device":        "",               # "" = use setup's magnet_device
@@ -446,6 +448,9 @@ def _migrate_config(cfg: dict):
     cfg.setdefault("field_flip", False)
     # Current sweep — disabled on old configs, so one plain scanlist runs
     for _k, _v in CURRENT_SWEEP_DEFAULTS.items():
+        cfg.setdefault(_k, _v)
+    # Automatic autofocus — off on old configs
+    for _k, _v in REFOCUS_DEFAULTS.items():
         cfg.setdefault(_k, _v)
 
 def load_setup(name: str) -> dict:

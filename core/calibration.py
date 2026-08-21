@@ -1592,19 +1592,22 @@ class CalibrationPanel(QWidget):
 
     # ── Autofocus ─────────────────────────────────────────────────────────────
     def _start_autofocus(self):
-        """▶ button handler.  Single-axis, no completion callback."""
-        self._launch_autofocus()
+        """▶ button handler: this tab's focus-position spinbox, X only."""
+        self._launch_autofocus(focus_pos=self.focus_pos_spin.value())
 
-    def run_autofocus_async(self, on_done, also_y: bool = False,
-                            focus_pos: Optional[float] = None) -> bool:
+    def run_autofocus_async(self, on_done,
+                            focus_pos: Optional[float] = None,
+                            focus_pos_y: Optional[float] = None) -> bool:
         """Run the ▶ autofocus programmatically and report the outcome.
 
         Used by the current sweep to refocus between currents; the plot, the
         status line and the button states behave exactly as for a manual run.
-        `focus_pos` overrides the tab's focus-position spinbox — the sweep
-        passes 0 explicitly, because "the middle of the device" is what it
-        means to focus there, and it must not depend on a spinbox on another
-        tab that the operator may have left somewhere else.
+        `focus_pos` / `focus_pos_y` override the tab's focus-position
+        spinbox for the X and Y axes.  The scanlist passes the Refocus
+        box's position, so "the middle of the device" is one setting next to
+        the measurement rather than a spinbox on another tab that the
+        operator may have left somewhere else.  Pass None for an axis the
+        scan does not move: it is then left where it is.
         `on_done` receives a dict:
 
             {"ok": bool,        # a focus was found at all
@@ -1615,11 +1618,12 @@ class CalibrationPanel(QWidget):
         Returns False — without ever calling on_done — if it could not start,
         so the caller can decide what to do about a missing FL sensor.
         """
-        return self._launch_autofocus(also_y=also_y, on_done=on_done,
-                                      focus_pos=focus_pos)
+        return self._launch_autofocus(on_done=on_done, focus_pos=focus_pos,
+                                      focus_pos_y=focus_pos_y)
 
-    def _launch_autofocus(self, also_y: bool = False, on_done=None,
-                          focus_pos: Optional[float] = None) -> bool:
+    def _launch_autofocus(self, on_done=None,
+                          focus_pos: Optional[float] = None,
+                          focus_pos_y: Optional[float] = None) -> bool:
         if self._af_worker and self._af_worker.isRunning():
             return False
         info = self._get_axis_info()
@@ -1638,7 +1642,16 @@ class CalibrationPanel(QWidget):
         # The worker drives every in-plane axis through the positioner proxy it
         # opens for Z, so a second axis is only offered when it lives on that
         # same device (true for SmarAct x/y/z and for the Attocube scanner).
-        scan_attr2 = y_attr if (also_y and y_attr and y_dev == z_dev) else ""
+        # None means "leave that axis alone" — a scan that does not move an
+        # axis has no meaningful focus position for it.  A Y target is only
+        # honoured when that axis lives on the same device the worker opens
+        # for Z (true for SmarAct x/y/z and the Attocube scanner), because
+        # the worker drives every in-plane axis through that one proxy.
+        want_x = focus_pos is not None
+        want_y = focus_pos_y is not None
+        if not want_x:
+            scan_attr = ""
+        scan_attr2 = y_attr if (want_y and y_attr and y_dev == z_dev) else ""
 
         self._af_result   = None
         self._af_on_done  = on_done
@@ -1665,16 +1678,14 @@ class CalibrationPanel(QWidget):
         self._af_worker = AutofocusWorker(
             positioner_dev=z_dev, fl_dev=fl_dev,
             focus_attr=z_attr, scan_attr=scan_attr,
-            focus_pos=(self.focus_pos_spin.value() if focus_pos is None
-                       else float(focus_pos)),
+            focus_pos=(float(focus_pos) if want_x else 0.0),
             dz=self.dz_spin.value(),
             d_zmax=self.dzmax_spin.value(),
             maxtries=self.tries_spin.value(),
             fl_attr=fl_attr, z_limits=z_lim,
             z_unit=self._axis_unit("z"),
             scan_attr2=scan_attr2,
-            focus_pos2=(self.focus_pos_spin.value() if focus_pos is None
-                        else float(focus_pos)))
+            focus_pos2=(float(focus_pos_y) if want_y else 0.0))
         self._af_worker.point_measured.connect(self.focus_plot.add_point)
         self._af_worker.status_msg.connect(self._on_af_status)
         self._af_worker.focus_found.connect(self._on_focus_found)

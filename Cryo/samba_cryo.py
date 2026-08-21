@@ -386,6 +386,10 @@ class CryoMainWindow(QMainWindow):
         self._cs_fl_t:      list  = []     # focus trace during the settle
         self._cs_fl_v:      list  = []
         self._cs_fl_label:  str   = ""
+        # Run-wide timestamp of the last automatic autofocus, shared by
+        # the sweep's per-current refocus and the periodic one so the two
+        # never fire back to back.
+        self._focus_t: Optional[float] = None
         self._scan_data:         Dict[str, np.ndarray]    = {}
         self._scan_data_retrace: Dict[str, np.ndarray]    = {}
         self._last_fn:           Optional[str]            = None
@@ -1016,6 +1020,7 @@ class CryoMainWindow(QMainWindow):
         self.sl_panel.polarity_changed.connect(self._on_polarity_changed)
         self.sl_panel.cur_sweep.changed.connect(self._on_polarity_changed)
         self.sl_panel.cur_sweep.changed.connect(self._update_estimate)
+        self.sl_panel.refocus.changed.connect(self._on_polarity_changed)
         # ConfigListPanel — load only Cryo setup
         self.cfg_list.load_setups(self._setups)
         self.cfg_list.config_selected.connect(self._on_config_selected)
@@ -1464,6 +1469,11 @@ class CryoMainWindow(QMainWindow):
 
     def _on_defaults_changed(self):
         """Called when Setup Defaults panel values change — persist and apply."""
+        # Units on the Refocus position fields come from the axes.
+        try:
+            self.sl_panel.refresh_axis_info()
+        except Exception:
+            log.debug("Refocus axis info refresh failed", exc_info=True)
         vals = self.defaults_panel.get_values()
         setup = self._active_setup()
         setup.update(vals)
@@ -2250,8 +2260,17 @@ class CryoMainWindow(QMainWindow):
         # each per-cycle cfg by the copy.deepcopy(cfg) above.
 
         if currents:
+            # The first current refocuses after its settle, so the sweep
+            # already starts the measurement in focus.
             self._cs_begin(cfg_list, currents)
-        else:
+            return
+        # Plain scanlist: autofocus once before the first scan when armed.
+        self._scan_running = True; self._set_running(True)
+
+        def _go(res=None):
+            self._focus_t = _time.time()
+            self._launch_scanlist(cfg_list, reset_status_bar=True)
+        if not self._run_refocus(_go):
             self._launch_scanlist(cfg_list, reset_status_bar=True)
 
     def _launch_scanlist(self, base_list: list, reset_status_bar: bool = True):
@@ -2290,7 +2309,12 @@ class CryoMainWindow(QMainWindow):
 
         self._sl_worker = ScanlistWorker(cfg_list, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
-                                         setup_name=self._active_setup_name)
+                                         setup_name=self._active_setup_name,
+                                         refocus_every_min=(
+                                             self.sl_panel.refocus.interval_min()
+                                             if self.sl_panel.refocus.is_enabled()
+                                             else 0.0),
+                                         last_focus_t=self._focus_t)
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
@@ -2301,6 +2325,7 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.relay_changed.connect(self._on_scanlist_relay_changed)
         self._sl_worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        self._sl_worker.refocus_due.connect(self._on_sl_refocus_due)
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self._scan_start_time = _time.time()
@@ -2438,6 +2463,12 @@ class CryoMainWindow(QMainWindow):
             if idx >= 0:
                 self.sl_panel.hw.range_combo.setCurrentIndex(idx)
 
+        # Park at the refocus position first, then settle there.
+        self._park_focus_axes(lambda: self._cs_start_settle(mA))
+
+    def _cs_start_settle(self, mA: float):
+        if self._cs_abort:
+            self._cs_finish(aborted=True); return
         sweep = self.sl_panel.cur_sweep
         setup = self._active_setup()
         self._cs_settle = ThermalSettleWorker(
@@ -2500,23 +2531,12 @@ class CryoMainWindow(QMainWindow):
             self._cs_finish(aborted=True); return
 
         def _go():
-            if not self.sl_panel.cur_sweep.refocus_cb.isChecked():
-                self._launch_scanlist(self._cs_base_list, reset_status_bar=False)
-                return
-            # Refocus at the focus position of the scan axis (0 = middle of the
-            # device); the second axis is parked too when the scan is a 2D map.
-            also_y = bool(self._cs_base_list[0].get("scan_y"))
-            self._log_append("Refocusing…", level="info")
-            # focus_pos=0: the middle of the device on the swept axis.
-            if not self.calib_panel.run_autofocus_async(
-                    self._cs_focus_done, also_y=also_y, focus_pos=0.0):
-                self._log_append(
-                    "⚠ Autofocus could not start (no FL sensor configured?) — "
-                    "running the scanlist at the current focus", level="warning")
+            if not self._run_refocus(self._cs_focus_done):
                 self._launch_scanlist(self._cs_base_list, reset_status_bar=False)
         self._cs_hold(_go)
 
     def _cs_focus_done(self, res: dict):
+        self._focus_t = _time.time()
         if self._cs_abort:
             self._cs_finish(aborted=True); return
         if not res.get("ok"):
@@ -2621,6 +2641,99 @@ class CryoMainWindow(QMainWindow):
                                              self.sl_panel.hw.amp_spin.setValue(0.0)))
 
         threading.Thread(target=_work, daemon=True, name="cs_output_off").start()
+
+    def _park_focus_axes(self, then):
+        """Move X/Y to the Refocus position, then call `then()`.
+
+        Used before the thermal settle so the focus diode is watched exactly
+        where the refocus will happen — and so there is no stage move between
+        the settle and the autofocus (which then finds the axes already in
+        place and skips its own park).  Off the GUI thread: two TANGO writes
+        to a wedged stage would otherwise freeze the window.
+        """
+        if not self.sl_panel.refocus.is_enabled():
+            then(); return
+        x, y = self._refocus_position()
+        try:
+            info = self.calib_panel.get_axis_info() or {}
+        except Exception:
+            info = {}
+        moves = []
+        for key, target in (("x", x), ("y", y)):
+            dev, attr = info.get(key, ("", ""))
+            if target is not None and dev and attr:
+                moves.append((dev, attr, float(target), key.upper()))
+        if not moves:
+            then(); return
+
+        def _work():
+            msgs = []
+            for dev, attr, target, lbl in moves:
+                proxy, cerr = fresh_proxy(dev)
+                if cerr and TANGO_AVAILABLE:
+                    msgs.append((f"\u26a0 Cannot park {lbl} at {target:.3f} \u2014 "
+                                 f"'{dev}' unreachable ({cerr})", "warning"))
+                    continue
+                werr = safe_write(proxy, attr, target)
+                msgs.append((f"\u26a0 Park {lbl} \u2192 {target:.3f} failed: {werr}",
+                             "warning") if werr else
+                            (f"{lbl} \u2192 {target:.3f} for the settle", "info"))
+            def _apply():
+                for m, lv in msgs:
+                    self._log_append(m, level=lv)
+                then()
+            self._post_to_main.emit(_apply)
+
+        threading.Thread(target=_work, daemon=True, name="cs_park_focus").start()
+
+    # ── Automatic autofocus (Refocus box) ─────────────────────────────────────
+    def _refocus_position(self):
+        """(x, y) target from the Refocus box; None for a non-scanned axis."""
+        try:
+            return self.sl_panel.refocus.position()
+        except Exception:
+            return None, None
+
+    def _run_refocus(self, on_done) -> bool:
+        """Start an autofocus at the Refocus box's position.
+
+        Returns False when nothing was started — refocus switched off, or no
+        FL sensor configured — so the caller can carry straight on.  The
+        run-wide focus timestamp is stamped by the completion handlers, which
+        is what keeps the sweep and the periodic refocus from doing two in a
+        row.
+        """
+        if not self.sl_panel.refocus.is_enabled():
+            return False
+        x, y = self._refocus_position()
+        self._log_append(
+            f"Refocusing at x={'—' if x is None else f'{x:.3f}'}, "
+            f"y={'—' if y is None else f'{y:.3f}'}…", level="info")
+        if self.calib_panel.run_autofocus_async(on_done, focus_pos=x,
+                                                focus_pos_y=y):
+            return True
+        self._log_append(
+            "⚠ Autofocus could not start (no FL sensor configured?) — "
+            "continuing at the current focus", level="warning")
+        return False
+
+    def _on_sl_refocus_due(self):
+        """ScanlistWorker is holding at a scan boundary — autofocus, then let
+        it go.  The hold is released whatever happens, so a failed autofocus
+        can never strand the scanlist."""
+        def _done(res=None):
+            self._focus_t = _time.time()
+            if res and not res.get("ok"):
+                self._log_append(f"⚠ Periodic refocus failed: "
+                                 f"{res.get('msg', '')}", level="warning")
+            elif res and not res.get("reliable"):
+                self._log_append(f"⚠ Periodic refocus unreliable: "
+                                 f"{res.get('msg', '')}", level="warning")
+            w = self._sl_worker
+            if w is not None:
+                w.refocus_done(self._focus_t)
+        if not self._run_refocus(_done):
+            _done(None)
 
     def _on_sl_scan_done(self, idx: int, fn: str):
         """Per-file callback from ScanlistWorker — updates status bar and

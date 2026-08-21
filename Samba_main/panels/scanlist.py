@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from panels._widgets import NoScrollSpinBox, NoScrollDoubleSpinBox, MokeMetadataGroup
 from panels.hardware_panel import HardwarePanel
-from current_sweep_ui import CurrentSweepGroup
+from current_sweep_ui import CurrentSweepGroup, RefocusGroup
 
 
 class ScanlistPanel(QWidget):
@@ -74,6 +74,11 @@ class ScanlistPanel(QWidget):
         nl.setRowStretch(2, 1)             # keep the two rows at the top
         top_row.addWidget(ng, stretch=1)
 
+        # Automatic autofocus — one switch and one position, used by the
+        # periodic refocus inside a scanlist AND by the current sweep.
+        self.refocus = RefocusGroup()
+        top_row.addWidget(self.refocus, alignment=Qt.AlignmentFlag.AlignTop)
+
         root.addLayout(top_row)
 
         # Own row, full width — repeats the whole list at several excitation
@@ -120,6 +125,28 @@ class ScanlistPanel(QWidget):
         if cfg_name == "—": cfg_name = ""
         self.sl_name.setText(self.meta.build_scan_name(amp, freq, cfg_name))
 
+    def apply_axis_info(self, cfg: dict):
+        """Enable each Refocus position field per scanned axis, with units.
+
+        Units come from the setup (the authoritative source, as for the
+        Calibration tab) with the config as a fallback: the number is
+        written to the device raw, so a wrong unit label is a lie.
+        """
+        self._axis_cfg = dict(cfg)
+        try:
+            setup = self._setup_getter() or {}
+        except Exception:
+            setup = {}
+        self.refocus.set_axes(
+            bool(cfg.get("scan_x", True)),
+            setup.get("act1_unit") or cfg.get("act1_unit", ""),
+            bool(cfg.get("scan_y", False)),
+            setup.get("act2_unit") or cfg.get("act2_unit", ""))
+
+    def refresh_axis_info(self):
+        """Re-apply the axis enable/units after a Setup Defaults edit."""
+        self.apply_axis_info(getattr(self, "_axis_cfg", {}))
+
     def set_active_name(self, name: str):
         self.active_lbl.setText(name)
         self._update_auto_name()
@@ -145,6 +172,8 @@ class ScanlistPanel(QWidget):
         self._load_flip(self.field_flip_btn, "Field flip",
                         bool(cfg.get("field_flip", False)))
         self.cur_sweep.load_values(cfg)
+        self.refocus.load_values(cfg)
+        self.apply_axis_info(cfg)
 
     def get_config_partial(self) -> dict:
         """Polarity + current-sweep state for the active scan config."""
@@ -153,6 +182,7 @@ class ScanlistPanel(QWidget):
             "field_flip": self.field_flip_btn.isChecked(),
         }
         d.update(self.cur_sweep.get_values())
+        d.update(self.refocus.get_values())
         return d
 
     def get_settings(self) -> dict:

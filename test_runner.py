@@ -2795,10 +2795,9 @@ class TestCurrentSweepConfig(unittest.TestCase):
 
     def test_v8_to_v9_backfills(self):
         mod = self._load("Samba_main", "sm_cfg_mig")
-        self.assertEqual(mod.SCHEMA_VERSION, 9)
         old = {"_schema_version": 8, "name": "x"}
         mod._migrate_config(old)
-        self.assertEqual(old["_schema_version"], 9)
+        self.assertEqual(old["_schema_version"], mod.SCHEMA_VERSION)
         self.assertFalse(old["cursweep_enabled"])
         self.assertEqual(old["cursweep_fixed_min"], 10.0)
 
@@ -2815,7 +2814,83 @@ class TestCurrentSweepConfig(unittest.TestCase):
         cfg = {"name": "x"}
         mod._migrate_config(cfg)
         self.assertFalse(cfg["cursweep_enabled"])
-        self.assertTrue(cfg["cursweep_refocus"])
+        self.assertEqual(cfg["cursweep_auto_range"], True)
+
+
+class TestRefocusConfig(unittest.TestCase):
+    """The Refocus box is the single switch for every automatic autofocus."""
+
+    def _load(self, app_dir, name):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               app_dir, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_off_by_default_in_both_apps(self):
+        for app_dir, name in (("Samba_main", "sm_rf"), ("Cryo", "cryo_rf")):
+            cfg = self._load(app_dir, name).make_default_config()
+            self.assertFalse(cfg["refocus_enabled"], app_dir)
+            self.assertEqual(cfg["refocus_every_min"], 30.0, app_dir)
+            self.assertEqual(cfg["refocus_x"], 0.0, app_dir)
+            self.assertEqual(cfg["refocus_y"], 0.0, app_dir)
+
+    def test_sweep_no_longer_carries_its_own_refocus_flag(self):
+        """One switch: the sweep's checkbox was removed, so the key must not
+        come back in the defaults and be mistaken for the live setting."""
+        self.assertNotIn("cursweep_refocus", _cs_mod.CURRENT_SWEEP_DEFAULTS)
+        for app_dir, name in (("Samba_main", "sm_rf2"), ("Cryo", "cryo_rf2")):
+            cfg = self._load(app_dir, name).make_default_config()
+            self.assertNotIn("cursweep_refocus", cfg, app_dir)
+
+    def test_migration_backfills_off(self):
+        mod = self._load("Samba_main", "sm_rf_mig")
+        old = {"_schema_version": 9, "name": "x"}
+        mod._migrate_config(old)
+        self.assertFalse(old["refocus_enabled"])
+        self.assertEqual(old["refocus_every_min"], 30.0)
+
+    def test_migration_preserves_an_existing_choice(self):
+        mod = self._load("Samba_main", "sm_rf_keep")
+        cfg = {"_schema_version": 9, "refocus_enabled": True,
+               "refocus_every_min": 5.0, "refocus_x": 1234.0}
+        mod._migrate_config(cfg)
+        self.assertTrue(cfg["refocus_enabled"])
+        self.assertEqual(cfg["refocus_every_min"], 5.0)
+        self.assertEqual(cfg["refocus_x"], 1234.0)
+
+    def test_cryo_migration_backfills(self):
+        mod = self._load("Cryo", "cryo_rf_mig")
+        cfg = {"name": "x"}
+        mod._migrate_config(cfg)
+        self.assertFalse(cfg["refocus_enabled"])
+        self.assertEqual(cfg["refocus_every_min"], 30.0)
+
+
+class TestRefocusDue(unittest.TestCase):
+    """When a periodic refocus is owed at a scan boundary."""
+
+    def test_first_boundary_is_due(self):
+        # No autofocus yet this run — the very first check is due.
+        self.assertTrue(_cs_mod.refocus_due(None, 1000.0, 30.0))
+
+    def test_not_due_before_the_interval(self):
+        self.assertFalse(_cs_mod.refocus_due(1000.0, 1000.0 + 29 * 60, 30.0))
+
+    def test_due_once_the_interval_has_passed(self):
+        self.assertTrue(_cs_mod.refocus_due(1000.0, 1000.0 + 30 * 60, 30.0))
+        self.assertTrue(_cs_mod.refocus_due(1000.0, 1000.0 + 31 * 60, 30.0))
+
+    def test_zero_interval_disables_the_periodic_refocus(self):
+        # 0 = only at the start and on current changes, never at boundaries.
+        self.assertFalse(_cs_mod.refocus_due(None, 1e9, 0.0))
+        self.assertFalse(_cs_mod.refocus_due(1000.0, 1e9, 0.0))
+
+    def test_garbage_interval_is_not_due(self):
+        self.assertFalse(_cs_mod.refocus_due(None, 1000.0, None))
+        self.assertFalse(_cs_mod.refocus_due(None, 1000.0, "soon"))
 
 
 if __name__ == '__main__':
