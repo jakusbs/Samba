@@ -27,11 +27,19 @@ import sys, os, copy, logging, threading, time as _time
 from pathlib import Path
 import numpy as np
 
-# Ensure repo root is on sys.path so that `import core` resolves correctly,
+# Ensure the repo root is on sys.path so that `import core` resolves,
 # regardless of the working directory when the script is launched.
+#
+# APPENDED, not inserted at 0: sys.path[0] is this app's own directory, and
+# that must win for bare-name imports so `import hardware` finds the local
+# re-export shim.  With the root first, any leftover *.py at the repo root
+# (this tree only ever tracks test_runner.py there) shadows the shim of the
+# same name — which surfaced as `cannot import name '_pcache' from
+# 'hardware'` on an installation with a pre-core/ hardware.py still sitting
+# in the root, and would otherwise silently import stale code.
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
+    sys.path.append(_repo_root)
 
 # Use a cryo-specific config dir so it doesn't mix with standard Samba.
 # Set before any config imports so CONFIG_DIR picks it up.
@@ -63,7 +71,7 @@ from current_sweep import (SETTLE_PLATEAU, fmt_hms, format_current_list,
 from current_sweep_ui import ThermalSettleWorker
 from hardware import (get_proxy, fresh_proxy, safe_read, safe_write,
                       evict_proxy, _pcache)
-from applog import setup_logging
+from applog import setup_logging, warn_stale_root_modules
 from validation import (validate_scan_config,
                         MAX_POINTS_1D, MAX_POINTS_2D)
 from scan    import ScanWorker, ScanlistWorker
@@ -2973,6 +2981,10 @@ def _setup_logging():
     uses as well — one copy of the logging policy for both apps.
     """
     setup_logging("samba_cryo")
+    # A pre-core/ module left in the repo root would shadow this
+    # app's own shim if the root came first on sys.path; say so.
+    warn_stale_root_modules(os.path.dirname(os.path.abspath(__file__)),
+                            _repo_root)
 
 
 def main():

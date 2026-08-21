@@ -74,3 +74,36 @@ def setup_logging(app_name: str = "samba",
     if log_path is not None:
         logging.getLogger(__name__).info("Logging to %s", log_path)
     return log_path
+
+
+def warn_stale_root_modules(app_dir: str, repo_root: str) -> list:
+    """Warn about leftover *.py at the repo root that duplicate an app module.
+
+    Both entry points put the repo root on sys.path so `import core` works.
+    A stale module sitting there — a pre-core/ `hardware.py`, `config.py`,
+    `plot_widgets.py`, … left behind by an old install — has the same import
+    name as the app directory's re-export shim.  The entry points append the
+    root rather than inserting it first, so the shim wins and the stale file
+    is harmless; but its presence means the installation is a mix of old and
+    new files, which is worth saying out loud once rather than discovering it
+    through a confusing bug later.
+
+    Returns the list of stale basenames found (empty when the tree is clean).
+    """
+    import glob
+    log = logging.getLogger(__name__)
+    try:
+        app_mods = {os.path.basename(f)
+                    for f in glob.glob(os.path.join(app_dir, "*.py"))}
+        root_mods = {os.path.basename(f)
+                     for f in glob.glob(os.path.join(repo_root, "*.py"))}
+    except Exception:
+        return []
+    stale = sorted(app_mods & root_mods)
+    if stale:
+        log.warning(
+            "Stale modules in the repo root shadow this app's own: %s. "
+            "The repo only tracks test_runner.py there — these are left over "
+            "from an older install and mean the tree is a mix of versions. "
+            "Delete them from %s.", ", ".join(stale), repo_root)
+    return stale
