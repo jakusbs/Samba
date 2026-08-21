@@ -4886,3 +4886,57 @@ starts focusing by itself on an existing config.
   hold), and the sweep sequencer including "refocus off → sweep still runs".
 - Both apps constructed against a throwaway `SAMBA_CONFIG_DIR`. The panel's
   minimum height went **down** 492 → 464 px.
+
+---
+
+## 74. Recent Changes (August 2026) — Repo-Root Modules No Longer Shadow the App Shims
+
+Branch `claude/fix-root-module-shadowing` (186 tests). App version → **v13.22**.
+Reported from the lab: `python samba_cryo.py` died with
+
+```
+ImportError: cannot import name '_pcache' from 'hardware'
+    (/home/intermag/Samba/hardware.py)
+```
+
+### Cause — sys.path order, not the import itself
+Both entry points put the repo root on `sys.path` so `import core` resolves,
+and both did it with **`insert(0, …)`** — ahead of `sys.path[0]`, which is the
+app's own directory. Any leftover `*.py` in the repo root therefore shadowed
+the app-directory re-export shim of the same name. The lab install still had a
+pre-`core/` `hardware.py` sitting in the root; it was imported instead of
+`Cryo/hardware.py`, and it has no `_pcache`.
+
+The repo has only ever tracked `test_runner.py` at the root, so any other
+`*.py` there is stale by definition.
+
+**The ImportError was the lucky case.** For every other shim name —
+`config.py`, `plot_widgets.py`, `calibration.py`, `theme.py`, … — a stale root
+copy imports **silently** and the app just runs old code. That is the likely
+explanation for the earlier oddity where a config carried v10 keys while still
+stamped `_schema_version: 9`.
+
+### Fix
+- Both entry points now **append** the repo root instead of inserting it
+  first, so the app directory always wins for bare-name imports while
+  `import core.…` still resolves. A stale root module can no longer shadow.
+- `applog.warn_stale_root_modules(app_dir, repo_root)`, called from both
+  `main()`s, logs a warning naming any root-level `*.py` that duplicates an
+  app module — the file is now harmless, but its presence means the
+  installation is a mix of versions, which is worth saying once rather than
+  discovering later through a confusing bug.
+- `Samba_main/hardware.py` gained the explicit `_pcache` / `_pcache_lock`
+  re-export that `Cryo/hardware.py` already had. `import *` skips underscore
+  names, so the omission was the same trap waiting for the next private
+  import; the two shims are now identical.
+
+### Verification
+A harness copies the tree to a temp dir, drops a pre-`core/` `hardware.py`
+(no `_pcache`) in the root, and imports each entry module exactly as
+`python samba_cryo.py` does — 12 checks: no ImportError, `hardware` resolves
+to the app's own shim, `_pcache` importable, the stale file reported, and a
+clean tree still imports with nothing reported. `python test_runner.py` 186.
+
+**Lesson: when an entry point extends `sys.path` for a package import, append.
+Prepending the repo root lets any stale file there silently replace a module
+the app depends on.**
