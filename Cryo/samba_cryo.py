@@ -1049,6 +1049,7 @@ class CryoMainWindow(QMainWindow):
         self.dev_registry.registry_changed.connect(self._on_registry_changed)
         self.defaults_panel.defaults_changed.connect(self._on_defaults_changed)
         self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
+        self.calib_panel.autofocus_changed.connect(self._on_calib_autofocus_changed)
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
         self._geo_btn_grp.buttonClicked.connect(self._on_geometry_changed)
         self._piezo_btn_grp.buttonClicked.connect(self._on_stage_type_changed)
@@ -1467,7 +1468,23 @@ class CryoMainWindow(QMainWindow):
         # Rebuild the calibration tab's own sensor rows with the new registry
         self.calib_panel.load_timescan_settings(
             self._active_setup().get("calib_timescan", {}))
+        self.calib_panel.load_autofocus_settings(
+            self._active_setup().get("calib_autofocus", {}))
         self.status_lbl.setText("Device registry saved ✓")
+
+    def _on_calib_autofocus_changed(self):
+        """Persist the Autofocus group per setup, like the time scan.
+
+        The integration time in particular has to survive a restart:
+        the unattended refocuses use it, and a session-only value
+        would silently fall back to the default mid-measurement-run.
+        """
+        setup = self._active_setup()
+        setup["calib_autofocus"] = self.calib_panel.get_autofocus_settings()
+        try:
+            save_setup(self._active_setup_name, setup)
+        except Exception as e:
+            log.error("Autofocus settings save failed: %s", e, exc_info=True)
 
     def _on_calib_timescan_changed(self):
         """Persist the calibration tab's own time-scan settings per setup."""
@@ -1532,6 +1549,8 @@ class CryoMainWindow(QMainWindow):
             self.calib_panel.set_fl_device(fl_dev)
         self.calib_panel.load_timescan_settings(
             self._active_setup().get("calib_timescan", {}))
+        self.calib_panel.load_autofocus_settings(
+            self._active_setup().get("calib_autofocus", {}))
         # ANC300 device — same device regardless of geometry, take from any piezo block
         anc_dev = (setup.get("stage_faraday", {}).get("anc300", {}).get("act1_device", "")
                    or setup.get("stage_voigt", {}).get("anc300", {}).get("act1_device", ""))

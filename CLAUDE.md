@@ -5010,3 +5010,63 @@ Samba_main is unaffected — it has the flat keys.
   an offset that would leave the travel limits parks on the peak and reports
   it. Plus the widget round-trip (silent load, emits on edit, unit suffix)
   and the offset reaching the autofocus through `_run_refocus`.
+
+---
+
+## 76. Recent Changes (August 2026) — Autofocus Owns the Focus-Sensor Integration Time
+
+Branch `claude/autofocus-integration-time` (189 tests). App version → **v13.25**.
+Reported from the lab: with a 20 s integration time set for the measurement,
+the autofocus "was very slow".
+
+### The bug — and it was worse than slow
+The autofocus **never wrote an integration time**.  It triggered the focus
+sensor and read it, inheriting whatever the last *scan* had written to that
+device — and `run()` writes `integration_time` to every sensor device at scan
+start, so a 20 s measurement leaves 20 s on the focus diode.  A sweep is
+30-odd points.
+
+Worse, `trigger_and_read` was called with a fixed `wait_s=2.0`.  Against a
+20 s average the wait expires while the device is still RUNNING and the read
+returns the **previous point's** value — so every sweep point reads the same
+stale number, there is no peak, and the quality assessment is judging noise.
+Slow *or* silently wrong, depending on how the device handles the overlap.
+
+### Fix
+- **The autofocus sets its own integration time** on the focus sensor before
+  the sweep and restores the previous value afterwards.  The restore runs in
+  `run()`'s `finally`, so it covers every exit — early return, abort, or
+  exception — and a scan can never inherit the autofocus's short value.
+- **The wait scales with the integration time** (`3 × integ + 1 s`, floored at
+  the old 2 s cap) instead of being fixed.  When the integration time cannot
+  be written the wait still scales to the value *read* from the device, so
+  the sweep reads fresh values even then.
+- New **"Int (s)"** field in the Autofocus group, default **0.1 s**, placed in
+  column 2 of the existing "Max points" row so the tab gains no height.
+- New setup key **`focus_integ_attr`** (default `integrationtime`, matching
+  the `beckhoff_avg` registry entry) in both apps.
+
+### The autofocus settings are now persisted
+They were session-only.  That is tolerable for `dz`, but not for the
+integration time: the unattended refocuses (§73) use it, so a value that
+silently reverted to the default on restart would change what a long
+measurement run does.  `setup["calib_autofocus"]` holds focus position, dz,
+max range, max points and int time — the same pattern as `calib_timescan`
+(§45), with a `_af_loading` guard so a load cannot echo back and save.
+
+### Also fixed: Cryo ignored its configured FL attribute
+Cryo's defaults panel saves the focus-sensor attribute as
+`focus_averagein_attr`, but the worker read `focus_attr` — which Cryo's
+config does not define.  The operator's choice was silently discarded and
+`"Value"` used instead (it happens to be right for the Beckhoff average
+device, so it worked by luck).  The worker now reads either key.  Same class
+as the §60 bug where the configured `focus_attr` was ignored and hardcoded.
+
+### Verification
+An offscreen harness drives the **real `AutofocusWorker`** against a focus
+sensor whose readings are only fresh if the averaging is waited out
+(12 checks): 0.1 s written before the sweep and 20 s restored after; the
+device left as the scan had it; the wait covering a 5 s integration; no
+integ attr configured still sweeping; a read-only integration time reported
+rather than fatal *and* the wait falling back to the device's own 20 s; and
+the peak still found. `python test_runner.py` 189.

@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.24"
+APP_VERSION = "13.25"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 11
@@ -82,6 +82,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
+        "focus_integ_attr":      "integrationtime",
         "save_dir":              "~/moke_data/Data_Samba_Green",
         "recent_window":       10,
         "notebook_dir":          "~/moke_data",
@@ -130,6 +131,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
+        "focus_integ_attr":      "integrationtime",
         "save_dir":              "~/moke_data/Data_Samba_IR",
         "recent_window":       10,
         "notebook_dir":          "~/moke_data",
@@ -177,6 +179,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "z_min":    0.0, "z_max":    0.0,
         "focus_averagein":       "hpp-N42/beckhoff/averageIn2",
         "focus_attr":            "Value",
+        "focus_integ_attr":      "integrationtime",
         "save_dir":              "~/moke_data/Data_Samba_Cryo",
         "recent_window":       10,
         "notebook_dir":          "~/moke_data",

@@ -523,7 +523,8 @@ class AutofocusWorker(QThread):
                  focus_pos: float, dz: float, d_zmax: float, maxtries: int,
                  fl_attr: str = "Value", z_limits=None, z_unit: str = "µm",
                  scan_attr2: str = "", focus_pos2: float = 0.0,
-                 z_offset: float = 0.0):
+                 z_offset: float = 0.0,
+                 fl_integ_attr: str = "", fl_integ_time: float = 0.0):
         super().__init__()
         self._pos_dev    = positioner_dev
         self._fl_dev     = fl_dev
@@ -544,6 +545,16 @@ class AutofocusWorker(QThread):
         # only decides where the stage is left, for setups that measure
         # slightly off the intensity maximum.
         self._z_offset   = float(z_offset or 0.0)
+        # The focus sensor keeps whatever integration time the last SCAN
+        # wrote — 20 s is a normal measurement value — and a sweep takes
+        # 30-odd points.  Without setting our own the refocus either crawls
+        # or, once the wait cap expires, reads the PREVIOUS point's average
+        # and finds no peak at all.
+        self._fl_integ_attr = (fl_integ_attr or "").strip()
+        self._fl_integ_time = float(fl_integ_time or 0.0)
+        self._fl_p       = None      # kept so run() can restore on any exit
+        self._prev_integ = None
+        self._fl_wait_s  = self._FL_TIMEOUT_S
         self._dz         = dz
         self._d_zmax     = d_zmax
         self._maxtries   = maxtries
@@ -562,6 +573,9 @@ class AutofocusWorker(QThread):
         except Exception:
             self.error_msg.emit(traceback.format_exc())
         finally:
+            # Covers every exit — early return, abort or exception — so the
+            # scan never inherits the autofocus's short integration time.
+            self._restore_fl_integ()
             self.finished_.emit()
 
     def _run_autofocus(self):
@@ -605,6 +619,8 @@ class AutofocusWorker(QThread):
                     f"configured Z travel [{lo:g}, {hi:g}] {self._z_unit} — "
                     "reduce Max range or move closer to focus first")
                 return
+
+        self._apply_fl_integ(fl_p)
 
         _scan_now = "?" if pos_scan is None else f"{pos_scan:.3f}"
         self.status_msg.emit(f"Focusing… Z₀={pos0_z:.3f}  scan={_scan_now}")
@@ -688,6 +704,48 @@ class AutofocusWorker(QThread):
         else:
             self.status_msg.emit(base)
 
+    def _apply_fl_integ(self, fl_p):
+        """Set the autofocus's own integration time on the focus sensor."""
+        self._fl_p = fl_p
+        self._prev_integ = None
+        eff = None
+        if self._fl_integ_attr:
+            old, e = safe_read(fl_p, self._fl_integ_attr)
+            if e is None and old is not None:
+                eff = float(old)
+            if self._fl_integ_time > 0:
+                err = safe_write(fl_p, self._fl_integ_attr,
+                                 float(self._fl_integ_time))
+                if err:
+                    self.status_msg.emit(
+                        f"⚠ Could not set the focus-sensor integration time "
+                        f"({err}) — sweeping at whatever the device has")
+                else:
+                    self._prev_integ = eff
+                    eff = float(self._fl_integ_time)
+                    if self._prev_integ is not None and \
+                            abs(self._prev_integ - eff) > 1e-9:
+                        self.status_msg.emit(
+                            f"Focus sensor integration "
+                            f"{self._prev_integ:.4g} s → {eff:.4g} s "
+                            f"for the sweep")
+        # The wait has to cover the averaging: a fixed 2 s cap against a
+        # 20 s integration returns the previous point's value, so every
+        # sweep point reads the same stale number and no peak is found.
+        self._fl_wait_s = max(self._FL_TIMEOUT_S, (eff or 0.0) * 3.0 + 1.0)
+
+    def _restore_fl_integ(self):
+        """Put the focus sensor's integration time back."""
+        fl_p, self._fl_p = self._fl_p, None
+        prev, self._prev_integ = self._prev_integ, None
+        if fl_p is None or prev is None or not self._fl_integ_attr:
+            return
+        err = safe_write(fl_p, self._fl_integ_attr, float(prev))
+        if err:
+            self.status_msg.emit(
+                f"⚠ Could not restore the focus-sensor integration time to "
+                f"{prev:.4g} s: {err}")
+
     _POS_TOL = 0.01        # "already there" tolerance, in the axis' own unit
 
     def _park(self, p, attr: str, target: float, current) -> bool:
@@ -722,7 +780,7 @@ class AutofocusWorker(QThread):
         counters that the reliability report quotes.  Returns (value, err).
         """
         val, err = trigger_and_read(fl_p, self._fl_attr,
-                                    wait_s=self._FL_TIMEOUT_S)
+                                    wait_s=self._fl_wait_s)
         if err or val is None:
             self._fl_fail += 1
         else:
@@ -863,6 +921,7 @@ class CalibrationPanel(QWidget):
     _gui_apply = pyqtSignal(object)
     # Emitted when the tab's own time-scan settings are edited (persist them)
     timescan_changed = pyqtSignal()
+    autofocus_changed = pyqtSignal()
 
     def __init__(self, setup_getter, config_getter=None, parent=None,
                  sensor_row_factory=None):
@@ -876,6 +935,7 @@ class CalibrationPanel(QWidget):
         self._af_result: Optional[dict] = None   # last focus_found payload
         self._af_on_done = None                  # run_autofocus_async callback
         self._af_last_msg = ""
+        self._af_loading = False
         self._stage_cfg: dict = {}   # populated by configure_stage()
         self._sensor_row_factory = sensor_row_factory
         self._ts_sensor_rows: list = []
@@ -995,29 +1055,50 @@ class CalibrationPanel(QWidget):
         self.focus_pos_spin = QDoubleSpinBox()
         self.focus_pos_spin.setRange(-1e6, 1e6); self.focus_pos_spin.setDecimals(3)
         self.focus_pos_spin.setValue(0.0); self.focus_pos_spin.setSuffix(" µm")
+        self.focus_pos_spin.valueChanged.connect(self._af_settings_changed)
         af_l.addWidget(self.focus_pos_spin, 1, 1, 1, 2)
 
         af_l.addWidget(QLabel("Step (dz):"), 2, 0)
         self.dz_spin = QDoubleSpinBox()
         self.dz_spin.setRange(0.001, 10); self.dz_spin.setDecimals(3)
         self.dz_spin.setValue(0.1); self.dz_spin.setSuffix(" µm")
+        self.dz_spin.valueChanged.connect(self._af_settings_changed)
         af_l.addWidget(self.dz_spin, 2, 1)
 
         af_l.addWidget(QLabel("Max range:"), 3, 0)
         self.dzmax_spin = QDoubleSpinBox()
         self.dzmax_spin.setRange(0.1, 50); self.dzmax_spin.setDecimals(1)
         self.dzmax_spin.setValue(2.0); self.dzmax_spin.setSuffix(" µm")
+        self.dzmax_spin.valueChanged.connect(self._af_settings_changed)
         af_l.addWidget(self.dzmax_spin, 3, 1)
 
         af_l.addWidget(QLabel("Max points:"), 4, 0)
         self.tries_spin = QSpinBox()
         self.tries_spin.setRange(5, 200); self.tries_spin.setValue(20)
+        self.tries_spin.valueChanged.connect(self._af_settings_changed)
         self.tries_spin.setToolTip(
             "Point budget for the coarse sweep over ±max range.\n"
             "If the range needs more points than this at the given step,\n"
             "the coarse step widens — the fine sweep around the peak\n"
             "recovers the resolution.")
         af_l.addWidget(self.tries_spin, 4, 1)
+
+        # The focus sensor keeps the integration time the last SCAN wrote
+        # (20 s is normal), which makes a 30-point sweep crawl or read
+        # stale averages.  Sits in column 2 of the same row: no extra row
+        # on a tab that is short of height.
+        af_l.addWidget(QLabel("Int (s):"), 4, 2)
+        self.af_int_spin = QDoubleSpinBox()
+        self.af_int_spin.setRange(0.001, 60.0)
+        self.af_int_spin.setDecimals(3)
+        self.af_int_spin.setValue(0.1)
+        self.af_int_spin.setToolTip(
+            "Integration time used on the focus sensor DURING the sweep,\n"
+            "and restored afterwards.  The peak search does not need the\n"
+            "measurement's integration time — 0.1 s keeps a 30-point\n"
+            "sweep to a few seconds instead of minutes.")
+        self.af_int_spin.valueChanged.connect(self._af_settings_changed)
+        af_l.addWidget(self.af_int_spin, 4, 3)
 
         af_btn_row = QHBoxLayout()
         self.af_start_btn = QPushButton("▶  Autofocus")
@@ -1125,6 +1206,32 @@ class CalibrationPanel(QWidget):
     def get_timescan_sensors(self) -> list:
         """Sensor dicts (scan-engine format) from the tab's own picker rows."""
         return [r.get() for r in self._ts_sensor_rows]
+
+    # ── Autofocus settings (persisted per setup, like the time scan) ─────
+    def _af_settings_changed(self, *_):
+        if not getattr(self, "_af_loading", False):
+            self.autofocus_changed.emit()
+
+    def get_autofocus_settings(self) -> dict:
+        return {
+            "focus_pos": self.focus_pos_spin.value(),
+            "dz":        self.dz_spin.value(),
+            "d_zmax":    self.dzmax_spin.value(),
+            "max_points": self.tries_spin.value(),
+            "int_time":  self.af_int_spin.value(),
+        }
+
+    def load_autofocus_settings(self, d: dict):
+        """Restore without re-emitting (§67: a load must not echo back)."""
+        self._af_loading = True
+        try:
+            self.focus_pos_spin.setValue(float(d.get("focus_pos", 0.0)))
+            self.dz_spin.setValue(float(d.get("dz", 0.1)))
+            self.dzmax_spin.setValue(float(d.get("d_zmax", 2.0)))
+            self.tries_spin.setValue(int(d.get("max_points", 20)))
+            self.af_int_spin.setValue(float(d.get("int_time", 0.1)))
+        finally:
+            self._af_loading = False
 
     def get_timescan_settings(self) -> dict:
         return {"npts":     int(self.ts_npts_spin.value()),
@@ -1694,7 +1801,11 @@ class CalibrationPanel(QWidget):
         # The FL sensor's ATTRIBUTE is configurable in Setup Defaults; it used
         # to be ignored and hardcoded to "Value", so any non-Beckhoff focus
         # sensor silently produced zero valid readings.
-        fl_attr = (_setup.get("focus_attr", "") or "Value").strip() or "Value"
+        # Cryo's defaults panel saves this as focus_averagein_attr, so a
+        # Cryo operator's choice was silently ignored (§60 bug class).
+        fl_attr = (_setup.get("focus_attr", "")
+                   or _setup.get("focus_averagein_attr", "")
+                   or "Value").strip() or "Value"
         # Optional soft travel limits, same keys as core/validation.py.  These
         # replace the old hardcoded `abs(z) > 100` check, which assumed both a
         # µm axis and a stage whose origin happens to sit near focus.
@@ -1717,7 +1828,10 @@ class CalibrationPanel(QWidget):
             z_unit=self._axis_unit("z"),
             scan_attr2=scan_attr2,
             focus_pos2=(float(focus_pos_y) if want_y else 0.0),
-            z_offset=z_offset)
+            z_offset=z_offset,
+            fl_integ_attr=(_setup.get("focus_integ_attr", "")
+                           or "integrationtime"),
+            fl_integ_time=self.af_int_spin.value())
         self._af_worker.point_measured.connect(self.focus_plot.add_point)
         self._af_worker.status_msg.connect(self._on_af_status)
         self._af_worker.focus_found.connect(self._on_focus_found)

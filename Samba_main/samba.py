@@ -887,6 +887,7 @@ class MainWindow(QMainWindow):
         # When setup defaults are edited, save them and update trajectory labels
         self.setup_defaults.defaults_changed.connect(self._on_defaults_changed)
         self.calib_panel.timescan_changed.connect(self._on_calib_timescan_changed)
+        self.calib_panel.autofocus_changed.connect(self._on_calib_autofocus_changed)
         # When scan mode changes, swap right panel between normal/DC
         self.traj_panel.scan_mode_changed.connect(self._on_scan_mode_changed)
 
@@ -1432,6 +1433,8 @@ class MainWindow(QMainWindow):
         # Rebuild the calibration tab's own sensor rows with the new registry
         self.calib_panel.load_timescan_settings(
             self._active_setup().get("calib_timescan", {}))
+        self.calib_panel.load_autofocus_settings(
+            self._active_setup().get("calib_autofocus", {}))
         self.status_lbl.setText("Device registry saved ✓")
 
     def _collect_setup_load_warnings(self) -> list:
@@ -1461,6 +1464,20 @@ class MainWindow(QMainWindow):
     def _show_setup_load_warnings(self):
         QMessageBox.warning(self, "Setup configuration",
                             "\n\n".join(self._setup_load_warnings))
+
+    def _on_calib_autofocus_changed(self):
+        """Persist the Autofocus group per setup, like the time scan.
+
+        The integration time in particular has to survive a restart:
+        the unattended refocuses use it, and a session-only value
+        would silently fall back to the default mid-measurement-run.
+        """
+        setup = self._active_setup()
+        setup["calib_autofocus"] = self.calib_panel.get_autofocus_settings()
+        try:
+            save_setup(self._active_setup_name, setup)
+        except Exception as e:
+            log.error("Autofocus settings save failed: %s", e, exc_info=True)
 
     def _on_calib_timescan_changed(self):
         """Persist the calibration tab's own time-scan settings per setup."""
