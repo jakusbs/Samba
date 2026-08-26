@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.22"
+APP_VERSION = "13.23"
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -461,6 +461,13 @@ def _migrate_v9_to_v10(cfg: dict):
         cfg.setdefault(key, val)
 
 
+def _migrate_v10_to_v11(cfg: dict):
+    """v10→v11: Add the post-focus Z offset.  0.0 = park on the peak,
+    which is what every existing config did."""
+    cfg.setdefault("refocus_z_offset",
+                   REFOCUS_DEFAULTS["refocus_z_offset"])
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -472,6 +479,7 @@ _MIGRATIONS = [
     (8, _migrate_v7_to_v8),
     (9, _migrate_v8_to_v9),
     (10, _migrate_v9_to_v10),
+    (11, _migrate_v10_to_v11),
 ]
 
 

@@ -2836,6 +2836,28 @@ class TestRefocusConfig(unittest.TestCase):
             self.assertEqual(cfg["refocus_every_min"], 30.0, app_dir)
             self.assertEqual(cfg["refocus_x"], 0.0, app_dir)
             self.assertEqual(cfg["refocus_y"], 0.0, app_dir)
+            # 0 = park exactly on the peak, i.e. the historic behaviour
+            self.assertEqual(cfg["refocus_z_offset"], 0.0, app_dir)
+
+    def test_z_offset_migration_backfills_zero(self):
+        """An existing config must keep parking on the peak."""
+        mod = self._load("Samba_main", "sm_dz_mig")
+        old = {"_schema_version": 10, "name": "x"}
+        mod._migrate_config(old)
+        self.assertEqual(old["refocus_z_offset"], 0.0)
+        self.assertEqual(old["_schema_version"], mod.SCHEMA_VERSION)
+
+    def test_z_offset_migration_preserves_a_set_value(self):
+        mod = self._load("Samba_main", "sm_dz_keep")
+        cfg = {"_schema_version": 10, "refocus_z_offset": 200.0}
+        mod._migrate_config(cfg)
+        self.assertEqual(cfg["refocus_z_offset"], 200.0)
+
+    def test_cryo_z_offset_backfills(self):
+        mod = self._load("Cryo", "cryo_dz_mig")
+        cfg = {"name": "x"}
+        mod._migrate_config(cfg)
+        self.assertEqual(cfg["refocus_z_offset"], 0.0)
 
     def test_sweep_no_longer_carries_its_own_refocus_flag(self):
         """One switch: the sweep's checkbox was removed, so the key must not

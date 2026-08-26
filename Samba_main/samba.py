@@ -2674,11 +2674,14 @@ class MainWindow(QMainWindow):
         if not self.sl_panel.refocus.is_enabled():
             return False
         x, y = self._refocus_position()
+        dz = self.sl_panel.refocus.z_offset()
         self._log_append(
             f"Refocusing at x={'—' if x is None else f'{x:.3f}'}, "
-            f"y={'—' if y is None else f'{y:.3f}'}…", level="info")
-        if self.calib_panel.run_autofocus_async(on_done, focus_pos=x,
-                                                focus_pos_y=y):
+            f"y={'—' if y is None else f'{y:.3f}'}"
+            + (f", then Z {dz:+.3f}" if dz else "") + "…", level="info")
+        if self.calib_panel.run_autofocus_async(
+                on_done, focus_pos=x, focus_pos_y=y,
+                z_offset=self.sl_panel.refocus.z_offset()):
             return True
         self._log_append(
             "⚠ Autofocus could not start (no FL sensor configured?) — "
