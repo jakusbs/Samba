@@ -141,7 +141,8 @@ class ScanlistPanel(QWidget):
             bool(cfg.get("scan_x", True)),
             setup.get("act1_unit") or cfg.get("act1_unit", ""),
             bool(cfg.get("scan_y", False)),
-            setup.get("act2_unit") or cfg.get("act2_unit", ""))
+            setup.get("act2_unit") or cfg.get("act2_unit", ""),
+            setup.get("z_unit") or cfg.get("z_unit", ""))
 
     def refresh_axis_info(self):
         """Re-apply the axis enable/units after a Setup Defaults edit."""

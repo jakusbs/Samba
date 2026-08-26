@@ -57,6 +57,10 @@ REFOCUS_DEFAULTS = {
     "refocus_every_min": 30.0,
     "refocus_x":         0.0,   # in the X axis' own unit
     "refocus_y":         0.0,   # in the Y axis' own unit
+    # Park this far from the found focus, in the Z axis' own unit.  The sweep
+    # still looks for the peak; the offset only decides where the stage is
+    # left, for setups that measure slightly off the intensity maximum.
+    "refocus_z_offset":  0.0,
 }
 
 

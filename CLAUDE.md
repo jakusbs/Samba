@@ -4940,3 +4940,64 @@ clean tree still imports with nothing reported. `python test_runner.py` 186.
 **Lesson: when an entry point extends `sys.path` for a package import, append.
 Prepending the repo root lets any stale file there silently replace a module
 the app depends on.**
+
+---
+
+## 75. Recent Changes (August 2026) — Post-Focus Z Offset
+
+Branch `claude/refocus-z-offset` (189 tests). App version → **v13.23**.
+Both apps. Requested: after the autofocus finds the peak, move Z by a set
+amount and leave the stage there — for setups that measure slightly off the
+intensity maximum.
+
+### The control
+A **ΔZ** field in the Refocus box, as a **third column** so the box stays two
+rows and costs the tab no extra height (verified A/B: the box's minimum is
+100 px with and without it):
+
+```
+[ Refocus ]         X: [ 0.000 nm ]   ΔZ: [ 200.000 nm ]
+Every: [30.0 min]   Y: [ 0.000 nm ]
+```
+
+The suffix is the **Z** axis' unit (from Setup Defaults), not X's — the value
+is written to the Z device raw. 0 = park exactly on the peak, which is what
+every existing config does.
+
+### Behaviour (`AutofocusWorker`)
+`z_offset` is applied only to the **final parking move**:
+
+- The coarse/fine sweep, the parabolic refinement and the quality assessment
+  are untouched — the peak is still what is searched for and judged.
+- The confirmation FL measurement happens at the parked position, so the
+  reported FL is the one you will actually measure at (lower than the peak,
+  as expected).
+- `focus_found` emits the **parked** Z, not the peak, because the jog display
+  and the sweep both take it as the current position.
+- The status line names both: `Focus found at Z = 500.000 nm, parked at
+  700.000 (offset +200.000)`.
+- **Refused rather than clamped** when `peak + offset` leaves the configured
+  Z travel limits: it parks on the peak and says so. Silently parking
+  somewhere else is how a "small" offset ends up against the objective.
+
+### Scope
+Applies to the automatic refocuses the Refocus box drives — scanlist start,
+per current change, and the periodic one. **Not** the Calibration tab's ▶
+button, which keeps its own controls: that button is for finding and
+inspecting focus, and silently applying an offset set on another tab is the
+cross-tab coupling that §73 removed from the focus position.
+
+### Config
+`refocus_z_offset` in `REFOCUS_DEFAULTS`; Samba_main schema **v10 → v11**
+(`_migrate_v10_to_v11`), Cryo backfills inline. 0.0 on every existing config.
+
+### Tests / verification
+- `test_runner.py` 186 → 189: default 0 in both apps, migration backfills 0,
+  a set value survives migration, Cryo backfill.
+- An offscreen harness drives the **real `AutofocusWorker`** over a simulated
+  Gaussian focus curve (10 checks): offset 0 parks on the peak; +200 and −200
+  park exactly that far away with the sign honoured; the peak found is
+  identical regardless of the offset; the reported Z is the parked position;
+  an offset that would leave the travel limits parks on the peak and reports
+  it. Plus the widget round-trip (silent load, emits on edit, unit suffix)
+  and the offset reaching the autofocus through `_run_refocus`.

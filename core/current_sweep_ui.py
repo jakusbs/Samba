@@ -590,7 +590,22 @@ class RefocusGroup(QGroupBox):
         self.y_spin = _pos("Y")
         g.addWidget(self._y_lbl, 1, 1); g.addWidget(self.y_spin, 1, 2)
 
-        g.setColumnStretch(2, 1)
+        # Third column so the box stays two rows tall and costs the tab no
+        # extra height (the bottom half has none to spare).
+        self._dz_lbl = QLabel("ΔZ:")
+        self.dz_spin = _NoScrollDouble()
+        self.dz_spin.setRange(-1e6, 1e6); self.dz_spin.setDecimals(3)
+        self.dz_spin.setValue(0.0); self.dz_spin.setMinimumWidth(104)
+        self.dz_spin.setToolTip(
+            "Move Z by this much after the autofocus finds the peak, and\n"
+            "leave the stage there — for measuring slightly off the\n"
+            "intensity maximum.  0 = park exactly on the peak.\n"
+            "Applies to the automatic refocuses, not the Calibration tab's\n"
+            "▶ button.  Refused if it would leave the Z travel limits.")
+        self.dz_spin.valueChanged.connect(self._emit_changed)
+        g.addWidget(self._dz_lbl, 0, 3); g.addWidget(self.dz_spin, 0, 4)
+
+        g.setColumnStretch(4, 1)
         g.setRowStretch(2, 1)          # keep the two rows at the top
         self.set_axes(True, "", False, "")
 
@@ -601,8 +616,10 @@ class RefocusGroup(QGroupBox):
 
     # ── public API ───────────────────────────────────────────────────────────
     def set_axes(self, x_enabled: bool, x_unit: str,
-                 y_enabled: bool, y_unit: str):
+                 y_enabled: bool, y_unit: str, z_unit: str = ""):
         """Enable each position field per scanned axis and label its unit."""
+        zu = (z_unit or "").strip()
+        self.dz_spin.setSuffix(f" {zu}" if zu else "")
         for spin, lbl, en, unit in ((self.x_spin, self._x_lbl, x_enabled, x_unit),
                                     (self.y_spin, self._y_lbl, y_enabled, y_unit)):
             spin.setEnabled(bool(en))
@@ -619,6 +636,10 @@ class RefocusGroup(QGroupBox):
     def interval_min(self) -> float:
         return float(self.every_spin.value())
 
+    def z_offset(self) -> float:
+        """How far from the focus peak to park Z, in the Z axis' unit."""
+        return float(self.dz_spin.value())
+
     def position(self) -> Tuple[Optional[float], Optional[float]]:
         """(x, y) focus position; None for an axis the scan does not move."""
         x = self.x_spin.value() if self.x_spin.isEnabled() else None
@@ -631,6 +652,7 @@ class RefocusGroup(QGroupBox):
             "refocus_every_min": self.every_spin.value(),
             "refocus_x":         self.x_spin.value(),
             "refocus_y":         self.y_spin.value(),
+            "refocus_z_offset":  self.dz_spin.value(),
         }
 
     def load_values(self, cfg: dict):
@@ -641,5 +663,6 @@ class RefocusGroup(QGroupBox):
             self.every_spin.setValue(float(cfg.get("refocus_every_min", 30.0)))
             self.x_spin.setValue(float(cfg.get("refocus_x", 0.0)))
             self.y_spin.setValue(float(cfg.get("refocus_y", 0.0)))
+            self.dz_spin.setValue(float(cfg.get("refocus_z_offset", 0.0)))
         finally:
             self._loading = False

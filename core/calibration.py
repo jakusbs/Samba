@@ -522,7 +522,8 @@ class AutofocusWorker(QThread):
                  focus_attr: str, scan_attr: str,
                  focus_pos: float, dz: float, d_zmax: float, maxtries: int,
                  fl_attr: str = "Value", z_limits=None, z_unit: str = "µm",
-                 scan_attr2: str = "", focus_pos2: float = 0.0):
+                 scan_attr2: str = "", focus_pos2: float = 0.0,
+                 z_offset: float = 0.0):
         super().__init__()
         self._pos_dev    = positioner_dev
         self._fl_dev     = fl_dev
@@ -538,6 +539,11 @@ class AutofocusWorker(QThread):
         # in Y.  Empty = single-axis behaviour (what the ▶ button uses).
         self._scan_attr2 = (scan_attr2 or "").strip()
         self._focus_pos2 = focus_pos2
+        # Park this far from the found focus.  The peak is still what the
+        # sweep looks for and what the quality assessment judges; the offset
+        # only decides where the stage is left, for setups that measure
+        # slightly off the intensity maximum.
+        self._z_offset   = float(z_offset or 0.0)
         self._dz         = dz
         self._d_zmax     = d_zmax
         self._maxtries   = maxtries
@@ -634,19 +640,41 @@ class AutofocusWorker(QThread):
                                  f"({pos0_z:.3f} µm)")
             return
         best_z, best_fl = best
+        peak_z = best_z
+
+        # Where the stage is actually left: the peak plus the configured
+        # offset.  Refused rather than clamped when it leaves the travel —
+        # silently parking somewhere else is how a "small" offset ends up
+        # against the objective.
+        target_z = best_z + self._z_offset
+        if self._z_offset and self._z_limits is not None:
+            lo, hi = self._z_limits
+            if target_z < lo or target_z > hi:
+                self.status_msg.emit(
+                    f"⚠ Focus {best_z:.3f} + offset {self._z_offset:+.3f} = "
+                    f"{target_z:.3f} {self._z_unit} leaves the configured Z "
+                    f"travel [{lo:g}, {hi:g}] — parking at the focus instead")
+                target_z = best_z
 
         # Move to the found focus (the old code never did this final move)
-        safe_write(p, self._focus_attr, float(best_z))
+        safe_write(p, self._focus_attr, float(target_z))
         time.sleep(self._MOVE_SETTLE_S)
         fl_conf, e = self._measure_fl(fl_p)
         if e is None and fl_conf is not None:
-            self.point_measured.emit(best_z, fl_conf)
+            self.point_measured.emit(target_z, fl_conf)
             best_fl = fl_conf
 
-        self.focus_found.emit(best_z, best_fl)
+        # Report where the stage IS, not where the peak was — the jog
+        # display and the sweep both take this as the current position.
+        self.focus_found.emit(target_z, best_fl)
         q = getattr(self, "_quality", None) or {}
-        base = (f"Focus found at Z = {best_z:.3f} {self._z_unit}  "
-                f"(FL = {best_fl:.4g}) — stage moved there")
+        if abs(target_z - peak_z) > 1e-9:
+            base = (f"Focus found at Z = {peak_z:.3f} {self._z_unit}, "
+                    f"parked at {target_z:.3f} "
+                    f"(offset {self._z_offset:+.3f})  (FL = {best_fl:.4g})")
+        else:
+            base = (f"Focus found at Z = {peak_z:.3f} {self._z_unit}  "
+                    f"(FL = {best_fl:.4g}) — stage moved there")
         if q:
             snr = q.get("snr", float("inf"))
             snr_s = "∞" if snr == float("inf") else f"{snr:.1f}"
@@ -1597,7 +1625,8 @@ class CalibrationPanel(QWidget):
 
     def run_autofocus_async(self, on_done,
                             focus_pos: Optional[float] = None,
-                            focus_pos_y: Optional[float] = None) -> bool:
+                            focus_pos_y: Optional[float] = None,
+                            z_offset: float = 0.0) -> bool:
         """Run the ▶ autofocus programmatically and report the outcome.
 
         Used by the current sweep to refocus between currents; the plot, the
@@ -1619,11 +1648,13 @@ class CalibrationPanel(QWidget):
         so the caller can decide what to do about a missing FL sensor.
         """
         return self._launch_autofocus(on_done=on_done, focus_pos=focus_pos,
-                                      focus_pos_y=focus_pos_y)
+                                      focus_pos_y=focus_pos_y,
+                                      z_offset=z_offset)
 
     def _launch_autofocus(self, on_done=None,
                           focus_pos: Optional[float] = None,
-                          focus_pos_y: Optional[float] = None) -> bool:
+                          focus_pos_y: Optional[float] = None,
+                          z_offset: float = 0.0) -> bool:
         if self._af_worker and self._af_worker.isRunning():
             return False
         info = self._get_axis_info()
@@ -1685,7 +1716,8 @@ class CalibrationPanel(QWidget):
             fl_attr=fl_attr, z_limits=z_lim,
             z_unit=self._axis_unit("z"),
             scan_attr2=scan_attr2,
-            focus_pos2=(float(focus_pos_y) if want_y else 0.0))
+            focus_pos2=(float(focus_pos_y) if want_y else 0.0),
+            z_offset=z_offset)
         self._af_worker.point_measured.connect(self.focus_plot.add_point)
         self._af_worker.status_msg.connect(self._on_af_status)
         self._af_worker.focus_found.connect(self._on_focus_found)
