@@ -170,6 +170,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "zi_settling_attr":    "settlingtime",
         "z_attr":              "position0",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
+        "focus_integ_attr":    "integrationtime",
         "save_dir":            "~/moke_data/Data_Samba_Green",
         "recent_window":       10,
         "notebook_dir":        "~/moke_data",
@@ -187,6 +188,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
         "zi_settling_attr":    "settlingtime",
         "z_attr":              "z",
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
+        "focus_integ_attr":    "integrationtime",
         "save_dir":            "~/moke_data/Data_Samba_IR",
         "recent_window":       10,
         "notebook_dir":        "~/moke_data",
@@ -247,6 +249,7 @@ SETUP_HW_DEFAULTS: Dict[str, dict] = {
             },
         },
         "focus_averagein":     "hpp-N42/beckhoff/averageIn2",
+        "focus_integ_attr":    "integrationtime",
         # Keithley attribute names (editable in Setup Defaults tab)
         "keithley_attr_amplitude":  "amplitude",
         "keithley_attr_frequency":  "frequency",
