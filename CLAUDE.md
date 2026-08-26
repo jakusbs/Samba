@@ -4991,6 +4991,15 @@ cross-tab coupling that §73 removed from the focus position.
 `refocus_z_offset` in `REFOCUS_DEFAULTS`; Samba_main schema **v10 → v11**
 (`_migrate_v10_to_v11`), Cryo backfills inline. 0.0 on every existing config.
 
+### Cryo units come from the piezo block (v13.24)
+Cryo keeps its axis units in the nested `stage_{geometry}[piezo]` block
+(§19), not as flat setup keys, so `setup.get("z_unit")` found nothing and all
+three Refocus fields showed no unit there.  `apply_axis_info` in
+`Cryo/panels.py` now resolves `stage_{geometry}[stage_type]` first, falling
+back to the flat key and then the config.  The labels follow the piezo
+selection: ` nm` for the ANM200 scanner, ` steps` for the ANC300 stepper.
+Samba_main is unaffected — it has the flat keys.
+
 ### Tests / verification
 - `test_runner.py` 186 → 189: default 0 in both apps, migration backfills 0,
   a set value survives migration, Cryo backfill.

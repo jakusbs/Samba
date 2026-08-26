@@ -2569,12 +2569,22 @@ class ScanlistPanel(QWidget):
             setup = self._setup_getter() or {}
         except Exception:
             setup = {}
+        # Cryo keeps its axis units in the nested stage_{geometry}[piezo]
+        # block (§19), not as flat setup keys, so resolve that first — a
+        # position field with no unit, or the wrong one, is a lie about a
+        # number that reaches the device raw.
+        geo   = str(cfg.get("geometry") or "Faraday").lower()
+        stype = str(cfg.get("stage_type") or "anm200")
+        block = ((setup.get(f"stage_{geo}") or {}).get(stype) or {})
+
+        def _unit(key):
+            return (block.get(key) or setup.get(key)
+                    or cfg.get(key, "") or "")
+
         self.refocus.set_axes(
-            bool(cfg.get("scan_x", True)),
-            setup.get("act1_unit") or cfg.get("act1_unit", ""),
-            bool(cfg.get("scan_y", False)),
-            setup.get("act2_unit") or cfg.get("act2_unit", ""),
-            setup.get("z_unit") or cfg.get("z_unit", ""))
+            bool(cfg.get("scan_x", True)), _unit("act1_unit"),
+            bool(cfg.get("scan_y", False)), _unit("act2_unit"),
+            _unit("z_unit"))
 
     def refresh_axis_info(self):
         """Re-apply the axis enable/units after a Setup Defaults edit."""
