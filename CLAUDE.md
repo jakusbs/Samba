@@ -5070,3 +5070,125 @@ device left as the scan had it; the wait covering a 5 s integration; no
 integ attr configured still sweeping; a read-only integration time reported
 rather than fatal *and* the wait falling back to the device's own 20 s; and
 the peak still found. `python test_runner.py` 189.
+
+---
+
+## 77. Recent Changes (September 2026) — Square-Wave Source: Panel Writes Honour the Setup Keys
+
+Branch `claude/keithley-pulse-source` (189 tests). App version → **v13.26**.
+TANGO_Devices half on the same branch name. User report: pointing the Green
+setup at `PyKeithleyPulse` (the square-wave server) and trying to apply a
+current gave a format error.
+
+### The error was `MARSHAL_InvalidEnumValue`, and it meant "no such attribute"
+```
+DevFailed[ DevError[ desc = MARSHAL CORBA system exception: MARSHAL_InvalidEnumValue
+```
+pytango needs an attribute's **data type** to marshal a write; for an
+attribute the device does not have there is no type, so the call goes out
+with an invalid type enum and fails as a *transport* error instead of a
+readable `API_AttrNotFound`. Truncated to `err[:60]` in the status line it
+reads as a format complaint and points nowhere near the cause. **Whenever a
+Samba TANGO write fails with MARSHAL/CORBA rather than a device message,
+suspect a wrong attribute *name* first.**
+
+The two servers do not share an attribute set:
+
+| PyKeithley / PyKeithley2 (sine) | PyKeithleyPulse (square) |
+|---|---|
+| `current`, `amplitude`, `frequency`, `compliance`, `autorange` (**bool**), `range` | `pulseAmplitude`, `pulseDuration`, `maxAmplitude` (write-only), `frequency`, `compliance`, `autoRange` (**double**), `range` |
+| `SINEWAVE`, `WAVEOFF`, `ON`, `OFF` | `SQUAREWAVE`, `WAVEOFF`, `ON`, `OFF` |
+
+Only `amplitude` and `current` are actually missing on the pulse device,
+which is why range/compliance/frequency appeared to work and made the
+failure look type-related rather than name-related.
+
+### The setup keys existed; the writes ignored them
+`Green.json` already had `keithley_amplitude_attr: 'pulseAmplitude'` — the
+Setup Defaults round-trip has been correct since §67. But in **both**
+`HardwarePanel` copies only `_read_keithley` honoured the keys;
+`_write_range` / `_write_amplitude` / `_write_compliance` /
+`_write_frequency` / `_write_keithley` passed string literals, and the I-out
+read was a literal `"current"`. Same class as the §60 bug where the
+configured `focus_attr` was ignored and `"Value"` hardcoded, and the §76 one
+where Cryo's configured FL attribute was discarded.
+
+- New `_keithley_attrs(setup)` on each panel resolves all five names in one
+  place, used by the reads **and** the writes.
+  `Samba_main/panels/hardware_panel.py` uses the `keithley_*_attr` key names,
+  `Cryo/panels.py` the `keithley_attr_*` ones (the two apps have always
+  spelled them differently — do not "unify" them, the setup files on disk
+  carry both spellings).
+- `keithley_current_attr` / `keithley_attr_current` set to **`""`** now means
+  "this source has no output-current readback" and the read is skipped
+  entirely; an **absent** key still falls back to `"current"`, so existing
+  setups are unchanged. The pulse device has no such attribute, so "I out"
+  shows `— mA` and `hw_keithley_current_mA` is absent from its scan files —
+  the amplitude already identifies the excitation.
+- `Cryo/keithley_mixin.py` (`CryoHardwarePanel`) already did this correctly
+  and was the pattern copied; it is untouched.
+
+### Server: writing `pulseAmplitude` now starts the wave
+The deeper asymmetry, and the reason the fix above alone would still have
+sourced nothing: `PyKeithley.amplitude.write` calls `WAVEOFF()` +
+`SINEWAVE()`, so writing an amplitude *starts* the wave. The pulse server's
+`pulseAmplitude.write` only re-armed `if self._wave_running`, a flag set
+solely by the `SQUAREWAVE` command — which Samba never sends (it sends
+`On`/`Off`). So the write updated a cached value, sent no SCPI at all, and
+the panel cheerfully reported `amp → 12.5 mA`.
+
+`pulseAmplitude.write` now matches PyKeithley: a non-zero write `_rearm()`s
+(which sends `SOUR:WAVE:ABOR` first, so it is safe from any state) and sets
+`_wave_running`; a **zero** write aborts the wave instead of arming one,
+because `SOUR:WAVE:AMPL 0` is outside the instrument's 1e-12…0.105 A range
+and would be rejected — and zero is what the panel writes as its fallback
+when the `Off` command fails. `SQUAREWAVE` still works as before.
+`maxAmplitude.write` also re-arms while running, so lowering the cap below a
+live amplitude actually takes effect (the clamp lives in `_rearm`).
+
+### The deployed server is older than this source — redeploy required
+Read off the live device before touching anything: `maxAmplitude` is
+**WRITE-only** and `pulseDuration` = 0.004 s while `frequency` = 3662.11 Hz —
+i.e. `pulseDuration` is stored independently and does **not** track
+`frequency`, so the deployed build predates the computed-`pulseDuration`
+change in fix 7 of the Keithley section of the TANGO_Devices CLAUDE.md. On
+that build `pulseDuration` is decorative: the period comes from `frequency`
+alone. A redeploy brings the amplitude fix, the computed half-period and
+READ_WRITE `maxAmplitude` together.
+
+### Gotchas that are behaviour, not bugs
+- `pulseAmplitude` takes `abs(value)` and is clamped to `maxAmplitude`. The
+  amp spinbox allows −105…105, so a negative amplitude silently becomes
+  positive. `maxAmplitude`'s memorized DB value is **7.5**; it is
+  `memorized` *without* `memorizedAtInit` (`.xmi` `rwType="WRITE"`,
+  `memorized="true"` only), so it is **not** replayed and the server starts
+  at 105 — but anyone writing it from Jive caps the source at 7.5 mA with no
+  indication in Samba.
+- **Same instrument, same socket.** `PyKeithleyPulse` and `PyKeithley` both
+  point at `hpp-n42/socket/keithley6221` (`PyKeithley2` has its own
+  `..._2`), and all three servers run. Only one may drive unit 1 — a write
+  to `PyKeithley` stomps the square wave, and the Keithley accepts only one
+  TCP client at a time.
+- The pulse device's `_RANGE_MAP` sends different SCPI values than
+  PyKeithley's for the same combo strings (`'20mA'` → `0.02` vs `12e-3`), but
+  the 6221 rounds up to the same hardware range, so the two are equivalent.
+
+### Still open (not touched here)
+`_read_hw_snapshot` (`Samba_main/samba.py`) reads the range through the
+**numeric** `_read` helper, which fails on `"20mA"` and then marks the whole
+Keithley device dead for the remaining reads (so `hw_keithley_compliance_V`
+is lost). Pre-existing and affects the sine servers identically — it wants
+the `safe_read_str` treatment §67 gave the panels.
+
+### Verification
+- `python test_runner.py` 189 OK; `py_compile` clean on all three files.
+- Harness (32 checks, not committed — needs the Qt stub): both apps'
+  **real** `_keithley_attrs` against the **real** setup JSONs (Green resolves
+  to `pulseAmplitude`, IR and Cryo unchanged, `""` skips, absent falls back),
+  every resolved name checked to exist on the **live** TANGO device
+  (read-only — `get_attribute_list`, no write ever sent to a current source),
+  and the **real** server setter driven against a fake socket: idle write
+  arms, `ABOR` first, `FUNC SQU`, mA→A conversion, zero aborts and clears the
+  flag, `maxAmplitude` clamp honoured, negative taken as magnitude, cap
+  lowered while running re-arms, `maxAmplitude` write does not start a wave
+  while idle.

@@ -390,20 +390,49 @@ class HardwarePanel(QGroupBox):
         self._set_ok(self.zi_status, "OK")
 
     # ── Keithley ──────────────────────────────────────────────────────────────
+    def _keithley_attrs(self, s) -> dict:
+        """Resolve every Keithley attribute name from the setup defaults.
+
+        One place, used by the reads *and* the writes.  The square-wave
+        server (PyKeithleyPulse) names them differently from the sine one —
+        `pulseAmplitude` instead of `amplitude`, and it has no `current`
+        readback at all — and a write that hardcodes a name the device does
+        not have surfaces as an opaque CORBA marshalling error
+        ("MARSHAL_InvalidEnumValue"), not a readable "attribute not found":
+        pytango needs the attribute's data type to marshal the value, and
+        for an unknown attribute there isn't one.
+
+        `keithley_attr_current` may be set to "" for a source that has no
+        output-current readback; the caller then skips that read.
+        """
+        return {
+            "amp": s.get("keithley_attr_amplitude")  or "amplitude",
+            "frq": s.get("keithley_attr_frequency")  or "frequency",
+            "cpl": s.get("keithley_attr_compliance") or "compliance",
+            "rng": s.get("keithley_attr_range")      or "range",
+            "cur": s.get("keithley_attr_current", "current"),
+        }
+
     def _read_keithley(self):
         s = self._setup(); dev = s.get("keithley_device", "")
         p, conn_err = fresh_proxy(dev); self._update_dev_labels()
         if conn_err:
             self._set_err(self.ks_status, conn_err); return
 
-        amp, e1 = safe_read(p, s.get("keithley_attr_amplitude")  or "amplitude")
-        frq, e2 = safe_read(p, s.get("keithley_attr_frequency")  or "frequency")
-        cpl, e3 = safe_read(p, s.get("keithley_attr_compliance") or "compliance")
-        cur, e4 = safe_read(p, s.get("keithley_attr_current")    or "current")
+        k = self._keithley_attrs(s)
+        amp, e1 = safe_read(p, k["amp"])
+        frq, e2 = safe_read(p, k["frq"])
+        cpl, e3 = safe_read(p, k["cpl"])
+        # A source without an output-current readback (the square-wave server)
+        # leaves this unset rather than being asked for an attribute it does
+        # not have.
+        cur = None
+        if k["cur"]:
+            cur, _e4 = safe_read(p, k["cur"])
         # The range is a memorized string attribute on the Keithley server, so
         # it survives a server restart and is the only trustworthy source for
         # the range the hardware is actually on.
-        rng, e5 = safe_read_str(p, s.get("keithley_attr_range")  or "range")
+        rng, e5 = safe_read_str(p, k["rng"])
         errs = [e for e in [e1, e2] if e]
         if errs:
             self._set_err(self.ks_status, errs[0][:60]); return
@@ -453,7 +482,8 @@ class HardwarePanel(QGroupBox):
         p, conn_err = fresh_proxy(dev)
         if conn_err: self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, "range", self.range_combo.currentText())
+        err = safe_write(p, self._keithley_attrs(s)["rng"],
+                         self.range_combo.currentText())
         if err: self._set_err(self.ks_status, err[:60])
         else:   self._set_ok(self.ks_status, f"range → {self.range_combo.currentText()}")
 
@@ -462,6 +492,7 @@ class HardwarePanel(QGroupBox):
         p, conn_err = fresh_proxy(dev)
         if conn_err: self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p): self._set_sim(self.ks_status); return
+        a_amp = self._keithley_attrs(s)["amp"]
         val = self.amp_spin.value()
         if abs(val) < 1e-9:
             # Zero amplitude → turn output OFF
@@ -470,14 +501,14 @@ class HardwarePanel(QGroupBox):
                 self._set_ok(self.ks_status, "Output OFF (amplitude = 0)")
             except Exception as e:
                 # Fallback: write 0 if Off command not available
-                err = safe_write(p, "amplitude", 0.0)
+                err = safe_write(p, a_amp, 0.0)
                 if err: self._set_err(self.ks_status, err[:60])
                 else:   self._set_ok(self.ks_status, "amp → 0 mA (Off cmd failed)")
         else:
             # Non-zero → ensure output is ON, then write amplitude
             try: p.command_inout("On")
             except Exception: pass  # On command may not exist or may already be on
-            err = safe_write(p, "amplitude", val)
+            err = safe_write(p, a_amp, val)
             if err: self._set_err(self.ks_status, err[:60])
             else:   self._set_ok(self.ks_status, f"amp → {val:.4g} mA")
 
@@ -486,7 +517,8 @@ class HardwarePanel(QGroupBox):
         p, conn_err = fresh_proxy(dev)
         if conn_err: self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, "compliance", self.compl_spin.value())
+        err = safe_write(p, self._keithley_attrs(s)["cpl"],
+                         self.compl_spin.value())
         if err: self._set_err(self.ks_status, err[:60])
         else:   self._set_ok(self.ks_status, f"compliance → {self.compl_spin.value():.2f} V")
 
@@ -495,7 +527,8 @@ class HardwarePanel(QGroupBox):
         p, conn_err = fresh_proxy(dev)
         if conn_err: self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, "frequency", self.freq_spin.value())
+        err = safe_write(p, self._keithley_attrs(s)["frq"],
+                         self.freq_spin.value())
         if err: self._set_err(self.ks_status, err[:60])
         else:   self._set_ok(self.ks_status, f"freq → {self.freq_spin.value():.4g} Hz")
 
@@ -507,10 +540,11 @@ class HardwarePanel(QGroupBox):
             self._set_err(self.ks_status, conn_err); return
         if is_sim_proxy(p):
             self._set_sim(self.ks_status); return
-        # Write range first — even though it can't be read back, it can be set
-        e1 = safe_write(p, "range",     self.range_combo.currentText())
-        e2 = safe_write(p, "amplitude", self.amp_spin.value())
-        e3 = safe_write(p, "frequency", self.freq_spin.value())
+        k = self._keithley_attrs(s)
+        # Range first: it bounds the amplitude the source will accept
+        e1 = safe_write(p, k["rng"], self.range_combo.currentText())
+        e2 = safe_write(p, k["amp"], self.amp_spin.value())
+        e3 = safe_write(p, k["frq"], self.freq_spin.value())
         errs = [e for e in [e1, e2, e3] if e]
         if errs:
             self._set_err(self.ks_status, errs[0][:60])
