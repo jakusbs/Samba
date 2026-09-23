@@ -26,8 +26,9 @@ from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
                            recent_symmetric_ylim, SCALE_RECENT,
-                           RECENT_WINDOW)
+                           RECENT_WINDOW, make_kerr_pill, set_kerr_pill)
 from theme import DIVERGING_CMAPS
+import kerr
 
 REDRAW_INTERVAL_MS = 80
 
@@ -46,6 +47,13 @@ class Live2DWidget(QWidget):
         self._cmap  = "RdBu_r"
         self._sensor = self._xlbl = self._ylbl = ""
         self._dirty = False
+        # Kerr-rotation display.  _data stays in the sensor's own raw unit;
+        # the conversion is applied only where the image is drawn, so toggling
+        # it costs a redraw and never touches the recorded values.
+        self._units: Dict[str, str] = {}      # sensor label -> registry unit
+        self._kerr_cal   = kerr.KerrCalibration()
+        self._kerr_state = None
+        self._kerr_unit: Optional[str] = None  # µrad / nrad currently shown
 
         # constrained_layout keeps the axes filling the figure (with the
         # colorbar) across resizes — avoids the map shrinking to a narrow strip.
@@ -66,6 +74,9 @@ class Live2DWidget(QWidget):
         self.autocolor_cb.setStyleSheet("color:#cdd6f4;font-size:10px;")
         self.autocolor_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
         top.addWidget(self.autocolor_cb)
+        self.kerr_btn = make_kerr_pill(self._on_kerr_clicked, self)
+        top.addWidget(self.kerr_btn)
+        self._refresh_kerr_btn()
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
@@ -83,13 +94,81 @@ class Live2DWidget(QWidget):
         for sp in self.ax.spines.values():
             sp.set_edgecolor("#3a3a5c")
 
+    # ── Kerr-rotation display ────────────────────────────────────────────────
+    def set_sensor_units(self, units: Dict[str, str]):
+        """Registry unit per sensor label — what the Kerr conversion reads."""
+        self._units = dict(units or {})
+        self._dirty = True
+
+    def set_kerr_calibration(self, mv_values):
+        """λ/2 calibration (six mV values) behind the θ pill."""
+        self._kerr_cal = kerr.KerrCalibration(mv_values)
+        self._refresh_kerr_btn()
+        self._redraw_if_ready()
+
+    def set_kerr_state(self, state):
+        """Bind to the shared on/off state so every plot toggles together."""
+        self._kerr_state = state
+        if state is not None:
+            state.subscribe(self._on_kerr_state)
+        self._refresh_kerr_btn()
+
+    def _on_kerr_clicked(self, checked: bool):
+        if self._kerr_state is not None:
+            self._kerr_state.set(checked)
+        else:
+            self._on_kerr_state(checked)
+
+    def _on_kerr_state(self, enabled: bool):
+        set_kerr_pill(self.kerr_btn, enabled)
+        self._kerr_unit = None          # re-pick µrad/nrad for the new view
+        self._redraw_if_ready()
+
+    def _refresh_kerr_btn(self):
+        ok = self._kerr_cal.ok
+        self.kerr_btn.setEnabled(ok)
+        enabled = bool(self._kerr_state.enabled) if self._kerr_state else False
+        set_kerr_pill(self.kerr_btn, ok and enabled)
+        self.kerr_btn.setToolTip(
+            "Show the map as Kerr rotation instead of the raw voltage,\n"
+            f"using the λ/2 calibration: {self._kerr_cal.describe()}."
+            if ok else
+            "Needs a λ/2 (BD) calibration — enter or fit one in the "
+            "BD Calibration tab.")
+
+    def _kerr_factor(self) -> Optional[float]:
+        """Display multiplier for the shown sensor, or None when off."""
+        if self._kerr_state is None or not self._kerr_state.enabled:
+            return None
+        if self._data is None:
+            return None
+        factors, unit = kerr.convert_group(
+            [(self._data, self._units.get(self._sensor, ""))],
+            self._kerr_cal, self._kerr_unit)
+        self._kerr_unit = unit
+        return factors[0]
+
+    def _display_data(self) -> Tuple[Optional[np.ndarray], str]:
+        """(array to draw, title) — converted to µrad/nrad when the pill is on."""
+        f = self._kerr_factor()
+        if f is None or self._data is None:
+            return self._data, self._sensor
+        title = (f"{self._sensor} ({self._kerr_unit})" if self._sensor
+                 else str(self._kerr_unit))
+        return self._data * f, title
+
+    def _redraw_if_ready(self):
+        if self._img is not None:
+            self._dirty = True
+
     def _throttled_draw(self):
         if not self._dirty:
             return
         self._dirty = False
         if self._img is not None and self._data is not None:
+            shown, title = self._display_data()
             if self.autocolor_cb.isChecked():
-                v = self._data[np.isfinite(self._data)]
+                v = shown[np.isfinite(shown)]
                 if len(v) > 1:
                     lo, hi = v.min(), v.max()
                     if lo == hi: hi = lo + 1e-12
@@ -99,13 +178,16 @@ class Live2DWidget(QWidget):
                         m = max(abs(lo), abs(hi))
                         lo, hi = -m, m
                     self._img.set_clim(lo, hi)
-            self._img.set_data(self._data)
+            self._img.set_data(shown)
+            if self.ax.get_title() != title:
+                self.ax.set_title(title, color="#ccccff", fontsize=10)
         self.canvas.draw_idle()
 
     def setup(self, x_arr, y_arr, xl: str, yl: str, sensor: str, cmap: str):
         self._xarr = x_arr; self._yarr = y_arr; self._cmap = cmap
         self._sensor = sensor; self._xlbl = xl; self._ylbl = yl
         self._data = np.full((len(y_arr), len(x_arr)), np.nan)
+        self._kerr_unit = None
         self._redraw()
 
     def _redraw(self):
@@ -113,8 +195,9 @@ class Live2DWidget(QWidget):
         if self._xarr is None:
             self.canvas.draw_idle(); return
         ext = [self._xarr[0], self._xarr[-1], self._yarr[0], self._yarr[-1]]
+        shown, title = self._display_data()
         self._img = self.ax.imshow(
-            self._data, origin="lower", aspect="auto",
+            shown, origin="lower", aspect="auto",
             extent=ext, cmap=self._cmap, interpolation="nearest")
         if self._cb:
             try: self._cb.remove()
@@ -124,7 +207,7 @@ class Live2DWidget(QWidget):
         eng_axis(self._cb.ax.yaxis)
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
-        self.ax.set_title(self._sensor, color="#ccccff", fontsize=10)
+        self.ax.set_title(title, color="#ccccff", fontsize=10)
         self.canvas.draw_idle()
 
     def update_point(self, ix: int, iy: int, val: float):
@@ -135,7 +218,9 @@ class Live2DWidget(QWidget):
     def switch_sensor(self, new_data: 'np.ndarray', label: str):
         if self._img is None: return
         self._data = new_data.copy(); self._sensor = label
-        self.ax.set_title(label, color="#ccccff", fontsize=10)
+        self._kerr_unit = None           # a different channel, different scale
+        shown, title = self._display_data()
+        self.ax.set_title(title, color="#ccccff", fontsize=10)
         self._dirty = True
 
     def set_colormap(self, cmap: str):
@@ -146,6 +231,7 @@ class Live2DWidget(QWidget):
     def clear(self):
         self._data = self._xarr = self._yarr = self._img = None
         self._dirty = False
+        self._kerr_unit = None
         if self._cb:
             try: self._cb.remove()
             except Exception: pass
@@ -178,6 +264,18 @@ class Live1DWidget(QWidget):
         self._lines: Dict[str, Tuple]   = {}
         self._dirty = False
         self._font_pt = 9
+        # Kerr-rotation display.  _yd keeps the raw readings in the channel's
+        # own unit; the conversion is applied where the lines are drawn, so
+        # the toggle never touches the buffers or the recorded data.
+        self._units: Dict[str, str] = {}      # sensor label -> registry unit
+        self._left_meta:  list = []           # (label, unit, colour) per axis,
+        self._right_meta: list = []           # kept so labels can be redrawn
+        self._kerr_cal   = kerr.KerrCalibration()
+        self._kerr_state = None
+        # Display unit (µrad/nrad) currently shown per scope — kept between
+        # redraws so resolve_display_unit()'s hysteresis has something to hold
+        # on to and a signal near 1 µrad cannot flicker the axis label.
+        self._kerr_unit: Dict[str, Optional[str]] = {}
 
         self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e")
         self.ax1    = self.fig.add_subplot(111)
@@ -199,6 +297,9 @@ class Live1DWidget(QWidget):
         self._scale_w, self._scale_mode = make_scale_pills(
             lambda: setattr(self, "_dirty", True), self)
         top.addWidget(self._scale_w)
+        self.kerr_btn = make_kerr_pill(self._on_kerr_clicked, self)
+        top.addWidget(self.kerr_btn)
+        self._refresh_kerr_btn()
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -258,6 +359,111 @@ class Live1DWidget(QWidget):
             return
         self._dirty = True
 
+    # ── Kerr-rotation display ────────────────────────────────────────────────
+    def set_kerr_calibration(self, mv_values):
+        """λ/2 calibration (six mV values) behind the θ pill."""
+        self._kerr_cal = kerr.KerrCalibration(mv_values)
+        self._refresh_kerr_btn()
+        self._refresh_labels()
+        self._dirty = True
+
+    def set_kerr_state(self, state):
+        """Bind to the shared on/off state so every plot toggles together."""
+        self._kerr_state = state
+        if state is not None:
+            state.subscribe(self._on_kerr_state)
+        self._refresh_kerr_btn()
+
+    def _on_kerr_clicked(self, checked: bool):
+        if self._kerr_state is not None:
+            self._kerr_state.set(checked)
+        else:
+            self._on_kerr_state(checked)
+
+    def _on_kerr_state(self, enabled: bool):
+        set_kerr_pill(self.kerr_btn, enabled)
+        self._kerr_unit = {}            # re-pick µrad/nrad for the new view
+        self._refresh_labels()
+        self._dirty = True
+
+    def _refresh_kerr_btn(self):
+        ok = self._kerr_cal.ok
+        self.kerr_btn.setEnabled(ok)
+        enabled = bool(self._kerr_state.enabled) if self._kerr_state else False
+        set_kerr_pill(self.kerr_btn, ok and enabled)
+        self.kerr_btn.setToolTip(
+            "Show voltage channels as Kerr rotation instead of the raw\n"
+            f"reading, using the λ/2 calibration: {self._kerr_cal.describe()}.\n"
+            "Channels that are not a voltage (field, position, time) are\n"
+            "left alone.  Recorded data is unaffected."
+            if ok else
+            "Needs a λ/2 (BD) calibration — enter or fit one in the "
+            "BD Calibration tab.")
+
+    def _kerr_active(self) -> bool:
+        return bool(self._kerr_state is not None and self._kerr_state.enabled
+                    and self._kerr_cal.ok)
+
+    def _kerr_scaling(self) -> Tuple[Dict[str, float], Dict[str, Optional[str]]]:
+        """Per-curve display multipliers, and the unit each scope shows.
+
+        Scopes are the two y-axes and — when the x-axis plots a sensor rather
+        than the actuator or time — the x-axis, each picking its own µrad/nrad
+        so a large DC channel on Y1 cannot force a nulled lock-in signal on Y2
+        into unreadable numbers.  Non-voltage channels get no entry and are
+        drawn exactly as recorded.
+        """
+        if not self._kerr_active():
+            return {}, {}
+
+        factors: Dict[str, float] = {}
+        units: Dict[str, Optional[str]] = {}
+        scopes = [("ax1", [l for l, (_, ax) in self._lines.items() if ax is self.ax1]),
+                  ("ax2", [l for l, (_, ax) in self._lines.items() if ax is self.ax2])]
+        xk = self._x_key
+        if xk not in (X_NATURAL, X_TIME) and xk in self._yd:
+            scopes.append(("x", [xk]))
+
+        for scope, labels in scopes:
+            if not labels:
+                continue
+            series = [(self._yd.get(l), self._units.get(l, "")) for l in labels]
+            fs, unit = kerr.convert_group(series, self._kerr_cal,
+                                          self._kerr_unit.get(scope))
+            units[scope] = unit
+            self._kerr_unit[scope] = unit
+            for lbl, f in zip(labels, fs):
+                if f is not None:
+                    factors[lbl] = f
+        return factors, units
+
+    def _display_unit(self, label: str, scope: str,
+                      factors: Dict[str, float],
+                      units: Dict[str, Optional[str]]) -> str:
+        """Unit to print for *label* — the Kerr unit when it was converted."""
+        if label in factors and units.get(scope):
+            return str(units[scope])
+        return self._units.get(label, "")
+
+    def _refresh_labels(self):
+        """Redraw the axis titles (and the x title) for the current unit."""
+        if not self._lines and not self._left_meta and not self._right_meta:
+            return
+        factors, units = self._kerr_scaling()
+        left = [(lbl, self._display_unit(lbl, "ax1", factors, units), c)
+                for lbl, _u, c in self._left_meta]
+        right = [(lbl, self._display_unit(lbl, "ax2", factors, units), c)
+                 for lbl, _u, c in self._right_meta]
+        set_multicolor_ylabel(self.ax1, left, "#89b4fa", self._font_pt)
+        set_multicolor_ylabel(self.ax2, right, "#f38ba8", self._font_pt)
+        xk = self._x_key
+        if xk in factors:
+            self.ax1.set_xlabel(f"{xk} ({units.get('x')})",
+                                color="#aaaacc", fontsize=self._font_pt)
+        elif xk not in (X_NATURAL, X_TIME) and xk in self._yd:
+            self.ax1.set_xlabel(xk, color="#aaaacc", fontsize=self._font_pt)
+        self.canvas.draw_idle()
+
     def _on_fontsize(self, pt: int):
         """User picked a new on-plot text size — restyle and redraw live."""
         self._font_pt = int(pt)
@@ -307,15 +513,28 @@ class Live1DWidget(QWidget):
         elif k in self._yd:  x_arr = self._yd[k]
         else:                x_arr = self._xd
 
+        before = dict(self._kerr_unit)
+        factors, units = self._kerr_scaling()
+        if x_arr is not None and k in factors:
+            x_arr = x_arr * factors[k]
+
         for lbl, (line, _) in self._lines.items():
             y = self._yd.get(lbl)
             if y is None: continue
+            f = factors.get(lbl)
+            if f is not None:
+                y = y * f
             if x_arr is not None:
                 m = np.isfinite(y) & np.isfinite(x_arr)
                 if m.any(): line.set_data(x_arr[m], y[m])
             else:
                 m = np.isfinite(y)
                 if m.any(): line.set_data(np.arange(len(y))[m], y[m])
+
+        # The µrad→nrad choice can change as the signal grows; relabel only
+        # when it actually did, so the common redraw stays cheap.
+        if self._kerr_unit != before:
+            self._refresh_labels()
 
         # Autoscale.  X always follows the full data range; only the y-scale
         # rule changes with the Full/Recent pill.
@@ -358,6 +577,10 @@ class Live1DWidget(QWidget):
         self._x_label_nat = f"{xl} ({xu})" if xu else xl
         self._yd = {s["label"]: np.full(n_pts, np.nan) for s in all_sensors}
         self._yd[X_TIME] = np.full(n_pts, np.nan)
+        # Units come from the device registry via the sensor list — they decide
+        # which channels the Kerr conversion may touch.
+        self._units = {s["label"]: s.get("unit", "") for s in all_sensors}
+        self._kerr_unit = {}
 
     def apply_config(self, sensors_meta: List[dict], x_key: str):
         self._x_key = x_key
@@ -385,6 +608,9 @@ class Live1DWidget(QWidget):
             lbl  = s["label"]; axis = s.get("axis", "Y1"); unit = s.get("unit", "")
             if axis == "—" or lbl not in self._yd:
                 continue
+            self._units.setdefault(lbl, unit)
+            if unit:
+                self._units[lbl] = unit
             if axis == "Y2":
                 c  = RIGHT_COLORS[ri % len(RIGHT_COLORS)]; ri += 1; ax = self.ax2
                 right_meta.append((lbl, unit, c))
@@ -395,13 +621,28 @@ class Live1DWidget(QWidget):
                             label=lbl, marker=".", markersize=4)
             self._lines[lbl] = (line, ax)
 
+        self._left_meta, self._right_meta = left_meta, right_meta
+        factors, units = self._kerr_scaling()
+
         # Axis titles carry the sensor name(s) + unit, not just the unit —
         # and each sensor's name is drawn in its curve's color, so a shared
-        # axis stays readable at a glance.
-        set_multicolor_ylabel(self.ax1, left_meta, "#89b4fa", self._font_pt)
-        set_multicolor_ylabel(self.ax2, right_meta, "#f38ba8", self._font_pt)
+        # axis stays readable at a glance.  A converted channel prints the
+        # Kerr unit it is actually drawn in.
+        set_multicolor_ylabel(
+            self.ax1, [(l, self._display_unit(l, "ax1", factors, units), c)
+                       for l, _u, c in left_meta], "#89b4fa", self._font_pt)
+        set_multicolor_ylabel(
+            self.ax2, [(l, self._display_unit(l, "ax2", factors, units), c)
+                       for l, _u, c in right_meta], "#f38ba8", self._font_pt)
+        if x_key in factors:
+            # Plotting one sensor against another: the x-axis is a converted
+            # channel too, so say which unit it is now in.
+            self.ax1.set_xlabel(f"{x_lbl} ({units.get('x')})",
+                                color="#aaaacc", fontsize=self._font_pt)
+            if x_arr is not None:
+                x_arr = x_arr * factors[x_key]
 
-        self._fill_lines(x_arr)
+        self._fill_lines(x_arr, factors)
 
         # Compute limits — shared x across both axes, independent y per axis
         all_visible = []
@@ -443,11 +684,14 @@ class Live1DWidget(QWidget):
 
         self._layout()
 
-    def _fill_lines(self, x_arr: Optional[np.ndarray]):
+    def _fill_lines(self, x_arr: Optional[np.ndarray],
+                    factors: Optional[Dict[str, float]] = None):
+        factors = factors or {}
         for lbl, (line, _) in self._lines.items():
             y = self._yd.get(lbl)
             if y is None: continue
-            yf = y.flatten()
+            f = factors.get(lbl)
+            yf = (y * f).flatten() if f is not None else y.flatten()
             if x_arr is not None:
                 xf = x_arr.flatten()
                 m  = np.isfinite(yf) & np.isfinite(xf)
@@ -480,6 +724,7 @@ class Live1DWidget(QWidget):
         """
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
+        self._left_meta = []; self._right_meta = []; self._kerr_unit = {}
         self._dirty = False
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()
@@ -504,6 +749,7 @@ class Live1DWidget(QWidget):
     def clear(self):
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._n = 0; self._xd = None; self._yd = {}; self._lines = {}
+        self._left_meta = []; self._right_meta = []; self._kerr_unit = {}
         self._dirty = False
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()

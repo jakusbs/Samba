@@ -77,6 +77,7 @@ from validation import (validate_scan_config,
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
+from kerr import KerrDisplayState
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SensorPickerRow)
 from panels_cryo import CryoHardwarePanel
@@ -847,6 +848,18 @@ class CryoMainWindow(QMainWindow):
         self.bottom_tabs.addTab(self.defaults_panel, "Setup Defaults")
         bw_l.addWidget(self.bottom_tabs, stretch=1)
 
+        # ── Kerr-rotation (θ) display ────────────────────────────────────────
+        # One shared on/off state behind the θ pills on the 1D plot, both 2D
+        # maps and the data browser, so they never disagree about what is being
+        # shown.  Display only — the recorded data stays in volts.
+        self.kerr_state = KerrDisplayState()
+        self.kerr_state.subscribe(self._on_kerr_toggled)
+        self._kerr_loading = False
+        for _w in (self.plot1d, self.map2d, self.map2d_retrace,
+                   self.data_browser.plot):
+            _w.set_kerr_state(self.kerr_state)
+        self.bd_cal_panel.calibration_applied.connect(self._push_kerr_calibration)
+
         v_split.addWidget(bottom_w)
         v_split.setSizes([500, 400])
         v_split.setStretchFactor(0, 1)
@@ -1191,6 +1204,14 @@ class CryoMainWindow(QMainWindow):
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
+        # Kerr (θ) display toggle — a per-setup preference.  Applied before the
+        # BD values below so the pills settle once, and guarded so restoring it
+        # does not write the setup file straight back out.
+        self._kerr_loading = True
+        try:
+            self.kerr_state.set(bool(setup.get("kerr_display", False)))
+        finally:
+            self._kerr_loading = False
         # BD calibration — load saved values if present, update status
         bd_vals = setup.get("bd_calibration")
         if bd_vals:
@@ -1438,6 +1459,25 @@ class CryoMainWindow(QMainWindow):
             self.live_tabs.setCurrentWidget(self.plot1d.parentWidget())
         except Exception:
             pass
+
+    # ── Kerr-rotation (θ) display ────────────────────────────────────────────
+    def _push_kerr_calibration(self, vals: list):
+        """Hand the current λ/2 values to every plot that can show θ.
+
+        Called whenever the BD Calibration boxes change — a user edit, a
+        Fit & Import, a Load saved, or a config load — so a plot can never
+        convert with a stale calibration.  An all-zero (or otherwise unusable)
+        set disables the pills instead of silently showing zeros.
+        """
+        for w in (self.plot1d, self.map2d, self.map2d_retrace):
+            w.set_kerr_calibration(vals)
+
+    def _on_kerr_toggled(self, enabled: bool):
+        """Persist the θ toggle (a per-rig display preference)."""
+        if self._kerr_loading:
+            return
+        self._active_setup()["kerr_display"] = bool(enabled)
+        self._safe_save()
 
     # ── BD Calibration callbacks ──────────────────────────────────────────────
     def _bd_cal_save(self, vals: list):
@@ -1749,6 +1789,11 @@ class CryoMainWindow(QMainWindow):
 
     def _setup_live_display(self, cfg, active):
         mode, n_x, n_y = self._scan_dims(cfg)
+        # Channel units (from the device registry) decide what the θ display
+        # may convert; the 1D widget gets them through alloc()'s sensor list.
+        _units = {s["label"]: s.get("unit", "") for s in active}
+        self.map2d.set_sensor_units(_units)
+        self.map2d_retrace.set_sensor_units(_units)
         if mode == "2D":
             x_arr  = np.linspace(cfg["act1_start"], cfg["act1_stop"], n_x)
             y_arr  = np.linspace(cfg["act2_start"], cfg["act2_stop"], n_y)

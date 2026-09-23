@@ -26,6 +26,12 @@ class BDCalibrationPanel(QWidget):
     """λ/2 plate calibration — 6 mV values at tick positions 0,5,10,15,20,25."""
 
     calibration_changed = pyqtSignal(list)   # emits list of 6 floats (mV)
+    # Emitted whenever the six values in the boxes change for ANY reason —
+    # user edit, Fit & Import, Load saved, setup switch.  calibration_changed
+    # deliberately stays silent on a programmatic load (it drives saving), but
+    # the Kerr-rotation display has to follow the values wherever they came
+    # from, or a plot would convert with the previous setup's calibration.
+    calibration_applied = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -272,6 +278,7 @@ class BDCalibrationPanel(QWidget):
                 sp.blockSignals(True)
                 sp.setValue(float(vals[i]))
                 sp.blockSignals(False)
+        self.calibration_applied.emit(self.get_calibration())
 
     def set_status(self, text: str):
         self._status_lbl.setText(text)
@@ -312,7 +319,9 @@ class BDCalibrationPanel(QWidget):
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _on_value_changed(self):
-        self.calibration_changed.emit(self.get_calibration())
+        vals = self.get_calibration()
+        self.calibration_changed.emit(vals)
+        self.calibration_applied.emit(vals)
 
     def _on_save(self):
         vals = self.get_calibration()

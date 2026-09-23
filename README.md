@@ -263,7 +263,8 @@ the analysis never averages a truncated line.
 - **Live plots**: 1D multi-channel plot (twin Y axes, legend above the axes, click a
   curve to read out the nearest point, "Text:" size spinbox, light-mode export button)
   and a 2D map (auto color with zero-centred diverging colormaps, live display-sensor
-  switching).
+  switching). Both carry a **θ µrad** pill that shows the signal as Kerr rotation
+  instead of volts (see §10).
 - **Status bar** (bottom): scan counter, start time, elapsed, run/scan time left, dead
   time %, done % — tinted green while running, peach while paused.
 
@@ -373,6 +374,30 @@ The balanced-diode calibration for converting mV to Kerr rotation:
 
 An all-zero calibration is never written — the analysis then falls back to the sample
 folder's `calibration.txt`.
+
+### Kerr rotation on the plots (the "θ µrad" pill)
+
+With a calibration entered, the **θ µrad** pill in the toolbar of the 1D plot, the 2D
+map and the Data Browser switches every **voltage** channel from volts to Kerr rotation:
+
+```
+θ [µrad] = reading × (unit → mV) × slope⁻¹ × π/180 × 1e6
+```
+
+- The factor is the same one the analysis pipeline uses, so the numbers on screen match
+  what comes out of `analyze_SOT` — including its **sign**, which flips if the λ/2 plate
+  was stepped the other way.
+- Channels that are not a voltage (field in mT, position in nm, time, magnet current)
+  are left exactly as recorded, even when they share an axis — the axis title then reads
+  e.g. `DC (µrad), Field (mT)`.
+- **Below 1 µrad the axis switches to nrad**, so a nulled signal stays readable instead
+  of showing a column of zeros.
+- The pill is greyed out until a usable calibration exists, and the three plots share one
+  toggle (per setup, remembered across restarts).
+- **The recorded data is not affected.** The HDF5 file keeps the raw volts plus the six
+  mV values; this is a display conversion only. In the Data Browser each past scan is
+  converted with the calibration stored in *that file*, so overlaying scans taken under
+  different calibrations is still correct.
 
 ---
 

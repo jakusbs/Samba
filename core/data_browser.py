@@ -32,8 +32,10 @@ from PyQt6.QtGui import QColor
 
 from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
-                           fix_toolbar_icons, make_light_export_btn)
+                           fix_toolbar_icons, make_light_export_btn,
+                           make_kerr_pill, set_kerr_pill)
 from theme import DIVERGING_CMAPS
+import kerr
 
 # Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
 # instead of any stored actuator/field/time axis. Not a real dataset name.
@@ -63,6 +65,11 @@ class ScanFile:
         self.raw_meta: Dict = {}
         self.sensor_keys: List[str] = []
         self.sensor_labels: Dict[str, str] = {}  # key → label
+        # The λ/2 sweep this scan was recorded with (/data/calibration), so a
+        # past file is converted with its own calibration rather than whatever
+        # is currently in the BD Calibration tab.
+        self.bd_calibration: Optional[List[float]] = None
+        self.kerr = kerr.KerrCalibration()
         self._read_meta()
 
     def _read_meta(self):
@@ -126,6 +133,19 @@ class ScanFile:
                     "notes":            notes,
                     "is_dc_hyst":       is_dc,
                 }
+
+                # ── λ/2 (BD) calibration recorded with this scan ──────────────
+                # All-zero means "no calibration" — the writers skip that case
+                # (§37), but an older file may still carry one.
+                if is_new and "calibration" in f.get("data", {}):
+                    try:
+                        cal = np.asarray(f["data"]["calibration"][:],
+                                         dtype=float).ravel()
+                        if cal.size and np.any(cal != 0.0):
+                            self.bd_calibration = [float(v) for v in cal]
+                            self.kerr = kerr.KerrCalibration(self.bd_calibration)
+                    except Exception:
+                        pass
 
                 # ── Hardware snapshot & step-size attrs ───────────────────────
                 _meta_src = f.get("metadata", f)
@@ -329,6 +349,7 @@ class ScanFile:
                         return None
                     data_arr = dg[sensor_key][:]
                     slbl = str(dg[sensor_key].attrs.get("label", sensor_key))
+                    sunit = str(dg[sensor_key].attrs.get("unit", ""))
                     # Find x/y setpoints by role — name-agnostic
                     xset_key = next(
                         (k for k in dg if str(dg[k].attrs.get("role","")) == "x_setpoint"),
@@ -355,6 +376,7 @@ class ScanFile:
                         return None
                     data_arr = f["sensors"][sensor_key][:]
                     slbl = str(f["sensors"][sensor_key].attrs.get("label", sensor_key))
+                    sunit = str(f["sensors"][sensor_key].attrs.get("unit", ""))
                     x_col = "field_T" if "field_T" in f["axes"] else "x_actual"
                     if x_col in f["axes"]:
                         x_arr = f["axes"]["x_setpoint"][:]
@@ -370,7 +392,7 @@ class ScanFile:
                 return {
                     "data": data_arr, "x_arr": x_arr, "y_arr": y_arr,
                     "x_label": x_lbl, "y_label": y_lbl,
-                    "sensor_label": slbl,
+                    "sensor_label": slbl, "sensor_unit": sunit,
                 }
         except Exception:
             return None
@@ -419,6 +441,10 @@ class ScanFile:
 class BrowserPlotWidget(QWidget):
     """Standalone plot for the data browser — supports 1D overlay and 2D display."""
 
+    # Emitted when the θ pill is clicked (or the shared state changes) so the
+    # panel re-reads the files and re-plots with the new unit.
+    kerr_changed = pyqtSignal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # constrained_layout keeps the axes filling the figure (with the
@@ -435,6 +461,11 @@ class BrowserPlotWidget(QWidget):
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
+        self._kerr_state = None
+        self._kerr_available = False
+        self.kerr_btn = make_kerr_pill(self._on_kerr_clicked, self)
+        top.addWidget(self.kerr_btn)
+        self._refresh_kerr_btn()
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
         top.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
@@ -457,6 +488,49 @@ class BrowserPlotWidget(QWidget):
             sp.set_edgecolor("#3a3a5c")
         # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
         eng_axis(self.ax.yaxis)
+
+    # ── Kerr-rotation display ────────────────────────────────────────────────
+    def set_kerr_state(self, state):
+        """Bind to the shared on/off state so every plot toggles together."""
+        self._kerr_state = state
+        if state is not None:
+            state.subscribe(self._on_kerr_state)
+        self._refresh_kerr_btn()
+
+    def kerr_enabled(self) -> bool:
+        return bool(self._kerr_state is not None and self._kerr_state.enabled)
+
+    def set_kerr_available(self, available: bool, why: str = ""):
+        """Whether the file(s) currently shown carry a usable calibration."""
+        self._kerr_available = bool(available)
+        self._kerr_why = why
+        self._refresh_kerr_btn()
+
+    def _on_kerr_clicked(self, checked: bool):
+        if self._kerr_state is not None:
+            self._kerr_state.set(checked)
+        else:
+            self._on_kerr_state(checked)
+
+    def _on_kerr_state(self, enabled: bool):
+        set_kerr_pill(self.kerr_btn, enabled)
+        self.kerr_changed.emit(bool(enabled))
+
+    def _refresh_kerr_btn(self):
+        enabled = self.kerr_enabled()
+        set_kerr_pill(self.kerr_btn, enabled)
+        self.kerr_btn.setEnabled(True)   # the toggle is global, not per file
+        if self._kerr_available:
+            self.kerr_btn.setToolTip(
+                "Show voltage channels as Kerr rotation instead of the raw\n"
+                "reading, using each file's own /data/calibration.\n"
+                f"{getattr(self, '_kerr_why', '')}".rstrip())
+        else:
+            self.kerr_btn.setToolTip(
+                "Show voltage channels as Kerr rotation instead of the raw\n"
+                "reading, using each file's own /data/calibration.\n"
+                "The selected file carries no usable λ/2 calibration, so it "
+                "is shown unconverted.")
 
     def _on_fontsize(self, pt: int):
         self._font_pt = int(pt)
@@ -685,6 +759,8 @@ class DataBrowserPanel(QWidget):
 
         # ── Right: plot ───────────────────────────────────────────────────────
         self.plot = BrowserPlotWidget()
+        # Flipping the θ pill re-reads the file and re-plots in the new unit.
+        self.plot.kerr_changed.connect(lambda _on: self._replot())
         splitter.addWidget(self.plot)
         splitter.setSizes([300, 300, 520])
         splitter.setStretchFactor(0, 0)     # file list keeps its width
@@ -832,18 +908,24 @@ class DataBrowserPanel(QWidget):
             if terms and shown:
                 date_item.setExpanded(True)
 
+    def _replot(self):
+        """Re-draw whatever is currently shown (single file or overlay)."""
+        sel = [i for i in self.tree.selectedItems()
+               if i.data(0, Qt.ItemDataRole.UserRole)]
+        if len(sel) > 1:
+            self._overlay_selected()
+        else:
+            self._plot_current()
+
     def _autoplot_tick(self):
         """Re-draw the current plot so a running scan keeps updating."""
         cb = getattr(self, 'autoplot_cb', None)
         if cb is None or not cb.isChecked() or not self.isVisible():
             return
         try:
-            sel = [i for i in self.tree.selectedItems()
-                   if i.data(0, Qt.ItemDataRole.UserRole)]
-            if len(sel) > 1:
-                self._overlay_selected()
-            elif sel:
-                self._plot_current()
+            if any(i.data(0, Qt.ItemDataRole.UserRole)
+                   for i in self.tree.selectedItems()):
+                self._replot()
         except Exception:
             pass        # a file being written can fail a read; try again next tick
 
@@ -884,6 +966,8 @@ class DataBrowserPanel(QWidget):
         """Display metadata and populate column combos."""
         m = sf.meta
         is_dc = m.get("is_dc_hyst", False)
+        # Tell the θ pill whether this file can be converted at all.
+        self.plot.set_kerr_available(sf.kerr.ok, sf.kerr.describe())
         status_icon = {"completed": "✓", "aborted": "⚠", "running": "⏳"}.get(
             m["scan_status"], "?")
 
@@ -998,6 +1082,15 @@ class DataBrowserPanel(QWidget):
             lines.append("Hardware at scan start:")
             lines.extend(hw_rows)
 
+        # λ/2 calibration — a dataset, not a /metadata attr, so the catch-all
+        # below never sees it.  It is what the θ (Kerr rotation) pill uses.
+        if sf.bd_calibration:
+            lines.append("─" * 28)
+            lines.append("λ/2 calibration (mV at ticks 0,5,10,15,20,25):")
+            lines.append("  " + ", ".join(f"{v:.2f}" for v in sf.bd_calibration))
+            lines.append(f"  → {sf.kerr.sln:+.4g} µrad/mV" if sf.kerr.ok
+                         else "  → not usable as a calibration")
+
         # Everything else in /metadata.  The sections above are a curated
         # display order; this catch-all guarantees that anything written to the
         # file is visible here, instead of silently dropping whatever is not on
@@ -1085,6 +1178,56 @@ class DataBrowserPanel(QWidget):
             self._last_y_key = yk
         self._plot_current()
 
+    # ── Kerr-rotation conversion (display only — files are never rewritten) ──
+    def _kerr_convert_1d(self, items: List[Tuple["ScanFile", Dict]]) -> bool:
+        """Convert the y (and any sensor x) of each dataset to Kerr rotation.
+
+        Each file is converted with **its own** ``/data/calibration``, so an
+        overlay of scans taken under different calibrations is still correct;
+        the µrad/nrad choice is then made once across all of them so the shared
+        axis reads in one unit.  Returns True if anything was converted.
+        """
+        if not self.plot.kerr_enabled() or not items:
+            return False
+        did = False
+        for key, ukey in (("y", "y_unit"), ("x", "x_unit")):
+            factors, peak = [], 0.0
+            for sf, r in items:
+                f = sf.kerr.factor(r.get(ukey, ""))
+                factors.append(f)
+                if f is None:
+                    continue
+                arr = np.asarray(r.get(key), dtype=float)
+                fin = arr[np.isfinite(arr)] if arr.size else arr
+                if fin.size:
+                    peak = max(peak, float(np.max(np.abs(fin))) * abs(f))
+            if not any(f is not None for f in factors):
+                continue
+            unit = kerr.resolve_display_unit(peak)
+            scale = kerr.display_scale(unit)
+            for (sf, r), f in zip(items, factors):
+                if f is None:
+                    continue
+                r[key] = np.asarray(r[key], dtype=float) * (f * scale)
+                r[ukey] = unit
+                did = True
+        return did
+
+    def _kerr_convert_2d(self, sf: "ScanFile", result: Dict) -> bool:
+        """Same for a colour map — one sensor, so one unit."""
+        if not self.plot.kerr_enabled():
+            return False
+        f = sf.kerr.factor(result.get("sensor_unit", ""))
+        if f is None:
+            return False
+        data = np.asarray(result["data"], dtype=float)
+        fin = data[np.isfinite(data)]
+        peak = float(np.max(np.abs(fin))) * abs(f) if fin.size else 0.0
+        unit = kerr.resolve_display_unit(peak)
+        result["data"] = data * (f * kerr.display_scale(unit))
+        result["sensor_label"] = f"{result.get('sensor_label', '')} ({unit})"
+        return True
+
     def _plot_current(self):
         """Plot with the user's column selection — a 2D colour map when the
         2D-map toggle is on, otherwise a 1D line plot."""
@@ -1113,6 +1256,7 @@ class DataBrowserPanel(QWidget):
             sensor_key = y_key or "auto"
             result = sf.read_2d(sensor_key=sensor_key)
             if result and np.asarray(result["data"]).ndim == 2:
+                self._kerr_convert_2d(sf, result)
                 self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
                                   result["x_label"], result["y_label"],
                                   result["sensor_label"],
@@ -1132,6 +1276,7 @@ class DataBrowserPanel(QWidget):
             result = sf.read_1d(x_key, y_key)
         if result:
             result["legend"] = sf.basename
+            self._kerr_convert_1d([(sf, result)])
             self.plot.plot_1d([result], title=sf.meta["scan_name"])
         else:
             self.meta_text.append("\n⚠ Could not read selected columns from file.")
@@ -1140,6 +1285,7 @@ class DataBrowserPanel(QWidget):
         """Overlay all selected scan files on one 1D plot."""
         items = self.tree.selectedItems()
         datasets = []
+        pairs = []
         title_parts = []
         for item in items:
             fp = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1151,10 +1297,12 @@ class DataBrowserPanel(QWidget):
                 if result:
                     result["legend"] = sf.basename
                     datasets.append(result)
+                    pairs.append((sf, result))
                     if sf.meta["scan_name"] not in title_parts:
                         title_parts.append(sf.meta["scan_name"])
 
         if datasets:
+            self._kerr_convert_1d(pairs)
             self.plot.plot_1d(datasets, title=f"Overlay: {', '.join(title_parts[:3])}")
         else:
             QMessageBox.information(self, "No data",

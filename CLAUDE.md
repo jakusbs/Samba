@@ -5284,3 +5284,122 @@ the scanlist `.txt` as a comment line — free provenance, since
   the three-button group still lines up with the Scanlist box.
 - `py_compile` clean; both entry points import.
 
+---
+
+## 79. Recent Changes (September 2026) — Kerr-Rotation (θ) Display Toggle
+
+Branch `claude/kerr-rotation-display` (232 tests). App version → **v13.28**.
+Both apps. User request: a toggle that multiplies the measured voltage by the
+λ/2 calibration factor so the plots read in Kerr rotation instead of volts.
+
+### What it does
+A **θ µrad** pill in the toolbar of the live 1D plot, the live 2D map(s) and
+the data browser. When it is on, every channel whose unit is a **voltage** is
+drawn as an angle:
+
+```
+θ [µrad] = raw × unit→mV × sln       sln [µrad/mV] = (1/slope) · π/180 · 1e6
+```
+
+`slope` [mV/deg] is the straight-line fit of the six BD-calibration values
+against the optical angle (ticks / 25 × 2 deg — the half-wave plate doubles the
+mechanical angle), i.e. **exactly the number `Analysis/analyze_samba.py`
+computes**; verified equal to `read_h5_calibration()` to 1e-9 on a real file.
+
+- **Display only.** `/data` keeps the raw volts and `/data/calibration` keeps
+  the six mV values, so the offline analysis is unaffected and can still
+  recompute this itself. Nothing new is written to HDF5 — a stored second copy
+  could silently disagree with the raw data it was derived from.
+- **The unit comes from the device registry** (live) or the dataset's `unit`
+  attribute (browser): `µV → ×1e-3`, `V → ×1e3`, `mV → ×1`. A channel that is
+  **not** a voltage — field in mT, position in nm, time in s, magnet current in
+  A — has no conversion and is drawn exactly as recorded, on the same axis if
+  that is where it sits. So a Y2 holding DC and Field reads
+  `DC (µrad), Field (mT)`.
+- **Below 1 µrad the axis switches to nrad** (×1000 — dividing would give
+  mrad), which is the case that matters: a nulled lock-in signal is a column of
+  zeros in µrad. The choice is made **per scope** — Y1, Y2, and the x-axis when
+  it plots a sensor — so a large DC channel on one axis cannot force a nulled
+  signal on the other into unreadable numbers.
+- **Hysteresis on that choice** (nrad below 1 µrad, back to µrad only at 2) so
+  a signal sitting on the boundary cannot relabel the axis every 80 ms redraw.
+  The chosen unit is kept per scope between redraws for exactly this; it is
+  reset by `clear()`, `alloc()`, `switch_sensor()` and a toggle.
+
+### The sign is kept, deliberately
+`sln = 1/slope` is **negative for a descending λ/2 sweep**, and the archive is
+mixed: of the 54 calibration files that fit cleanly, **40 descend and 14
+ascend**. Taking `|sln|` would have made the live plot disagree with the
+offline analysis about which way is positive, so the signed value is used and
+the pill's tooltip states the factor including its sign.
+
+### Refusing rather than guessing
+`calibration_slope()` returns None — pills disabled, nothing converted — for an
+all-zero calibration (what §37 leaves in the panel when a setup has none), a
+set of fewer than 2 or more than 6 values, any non-finite value, **six
+identical readings** (the fit leaves ~1e-19 of float noise, not 0, and 1/that
+is a factor of 1e19 that would silently rescale every curve), and a set that
+**turns around** instead of trending with the tick (the fitted line then
+explains less than 10 % of the spread).
+
+### Structure
+- **`core/kerr.py`** (new) — Qt-free, numpy only, like `core/bd_fit.py` and
+  `core/current_sweep.py`: `calibration_slope`, `unit_to_mV`,
+  `KerrCalibration`, `resolve_display_unit` / `display_scale`,
+  `convert_group`, and `KerrDisplayState`. Shims in both app directories
+  (§74 — `core/plot_widgets.py` bare-imports it).
+- **`core/plot_interact.py`** — `make_kerr_pill` / `set_kerr_pill`, styled like
+  the Full/Recent pills.
+- **`KerrDisplayState`** is one shared observable behind all the pills, so the
+  1D plot, the 2D map(s) and the browser can never disagree about what is being
+  shown. Observers are plain callables (no Qt), and a broken observer cannot
+  take the toggle down with it.
+- The widgets keep the **raw** buffers and apply the factor only where lines /
+  images are drawn, so toggling costs a redraw and `show_static` (the BD fit
+  trace, which is a calibration in volts) is untouched by construction.
+- **Data browser**: `ScanFile` now also reads `/data/calibration` into
+  `bd_calibration` / `kerr`, so **each file is converted with its own
+  calibration** — an overlay of scans taken under different calibrations is
+  correct, and the shared axis still picks one unit across all of them. The
+  calibration is also shown in the metadata panel (it is a dataset, so the §62
+  catch-all never saw it). `read_2d` gained `sensor_unit`.
+- **`BDCalibrationPanel.calibration_applied`** (new signal) fires from
+  `load_calibration()` as well as an edit. `calibration_changed` deliberately
+  stays silent on a programmatic load (it drives saving), but the display has
+  to follow the values wherever they came from — a setup switch, Fit & Import,
+  Load saved — or a plot would convert with the previous setup's calibration.
+- **Setup key `kerr_display`** (False) in `SETUP_HW_DEFAULTS` for every setup in
+  both apps — a per-rig display preference, saved on toggle and restored in
+  `_load_active_config` under a `_kerr_loading` guard so restoring it cannot
+  write the setup file straight back out. Setup-level, so no schema migration.
+
+### Tests / verification
+- `test_runner.py` 209 → **232**: the slope (matching the analysis formula, the
+  sign flip with direction, offset-independence, and every refusal case), unit
+  resolution including both micro signs, `KerrCalibration.factor`, the
+  µrad/nrad choice and its hysteresis, `convert_group` (one unit per axis,
+  non-voltages skipped, all-NaN survivable), `KerrDisplayState`, and the
+  per-setup default in both apps.
+- Offscreen-Qt harnesses against the **real** widgets and **real** archive
+  files (not committed — they need Qt): 25 checks on the live plots
+  (conversion arithmetic per unit, non-voltage channels untouched, axis titles,
+  the nrad branch and its stability, raw buffers preserved, shared state,
+  `show_static` unaffected), 18 on the data browser (calibration read from real
+  files, slope equal to `Analysis.read_h5_calibration`, 1D/2D conversion,
+  overlay with two different calibrations, a file with no calibration shown
+  unconverted), and 24 constructing **both** main windows against a throwaway
+  `SAMBA_CONFIG_DIR` (§67 — never the live one): pills bound, calibration
+  pushed on every BD change, toggle persisted and restored without a rewrite.
+- Rendered offscreen at 900 px and 560 px; a byte-diff of the 2D map against
+  `main` is confined to the toolbar region, i.e. the plot itself is unchanged.
+
+### Also checked (no change needed): BD fit vs. staircase direction
+The user asked whether `Fit & Import` can fail when the staircase runs the
+other way. It cannot: `_spacing_cv` divides by `|mean|`, so ascending and
+descending score identically — confirmed synthetically and by fitting the whole
+archive (40 descending / 14 ascending, all fine). Nor does the sweep have to
+cross zero: all-positive and all-negative staircases fit, because `_midpoint`
+only breaks ties between *equally uniform* runs. A run that genuinely turns
+around inside the six is refused (CV ≈ 480 %), which is correct, and a 9-hold
+trace where the operator reverses **after** the six ticks still picks the right
+six. The only consequence of direction is the **sign of `sln`**, handled above.

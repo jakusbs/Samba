@@ -246,6 +246,48 @@ def make_scale_pills(on_change: Callable[[], None] = None, parent=None,
     return box, mode_getter
 
 
+def make_kerr_pill(on_toggle: Callable[[bool], None] = None, parent=None):
+    """Return a checkable "θ µrad" pill for the Kerr-rotation display toggle.
+
+    Styled like the Full/Recent pills so the plot toolbars stay one family.
+    Callers own the state: ``on_toggle(checked)`` fires on a user click, and
+    :func:`set_kerr_pill` writes the state back without re-emitting (used when
+    another plot's pill is the one that was clicked).
+
+    Qt is imported lazily so this module stays import-safe without it.
+    """
+    from PyQt6.QtWidgets import QPushButton
+    from PyQt6.QtCore import Qt
+
+    b = QPushButton("θ µrad", parent)
+    b.setCheckable(True)
+    b.setChecked(False)
+    b.setFixedHeight(22)
+    b.setMinimumWidth(58)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    b.setStyleSheet(
+        "QPushButton{background:#252538;border:1px solid #45475a;"
+        "color:#6c7086;font-size:10px;font-weight:bold;padding:0 8px;"
+        "border-radius:6px;}"
+        "QPushButton:hover{background:#313244;color:#cdd6f4;}"
+        "QPushButton:checked{background:#cba6f7;color:#1e1e2e;"
+        "border-color:#cba6f7;}"
+        "QPushButton:disabled{background:#252538;color:#45475a;"
+        "border-color:#313244;}")
+    if on_toggle is not None:
+        b.clicked.connect(lambda checked: on_toggle(bool(checked)))
+    return b
+
+
+def set_kerr_pill(btn, checked: bool) -> None:
+    """Set a Kerr pill's state without emitting ``clicked``."""
+    if btn is None:
+        return
+    was = btn.blockSignals(True)
+    btn.setChecked(bool(checked))
+    btn.blockSignals(was)
+
+
 def eng_axis(axis):
     """Format a matplotlib Axis with SI engineering notation (24µ, 1.3m, 5k).
 

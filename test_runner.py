@@ -3141,5 +3141,211 @@ class TestRefocusDue(unittest.TestCase):
         self.assertFalse(_cs_mod.refocus_due(None, 1000.0, "soon"))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 25. Kerr-rotation display — calibration slope, units, µrad/nrad
+# ─────────────────────────────────────────────────────────────────────────────
+
+import kerr as _kerr                                     # noqa: E402
+
+
+# The six mV values of a real descending λ/2 sweep
+# (20260810/102928_TIME_N37Cr_10_Ni_15__001_calibration.h5).
+_REAL_SWEEP = [43.0, 21.6, 0.9, -20.0, -41.8, -63.6]
+
+
+class TestKerrCalibrationSlope(unittest.TestCase):
+    """µrad/mV from the six λ/2 values — the factor the θ toggle applies."""
+
+    def test_matches_the_analysis_formula(self):
+        """Same number as Analysis/analyze_samba.read_h5_calibration."""
+        ticks = np.linspace(0, 25, 6)
+        x_deg = ticks / (100.0 / 4.0) * 2.0
+        slope = np.polyfit(x_deg, np.asarray(_REAL_SWEEP), 1)[0]
+        expected = (1.0 / slope) * np.pi / 180.0 * 1e6
+        self.assertAlmostEqual(_kerr.calibration_slope(_REAL_SWEEP),
+                               expected, places=9)
+
+    def test_sign_follows_the_sweep_direction(self):
+        """Reversing the staircase flips the sign — it is NOT taken as |sln|.
+
+        40 of the lab's 54 fittable calibration files descend and 14 ascend.
+        Keeping the sign is what makes the display agree with the offline
+        analysis about which way is positive.
+        """
+        down = _kerr.calibration_slope(_REAL_SWEEP)
+        up   = _kerr.calibration_slope(_REAL_SWEEP[::-1])
+        self.assertLess(down, 0.0)
+        self.assertGreater(up, 0.0)
+        self.assertAlmostEqual(abs(down), abs(up), places=6)
+
+    def test_offset_does_not_change_the_slope(self):
+        """Only the steps matter — a sweep that never crosses zero is fine."""
+        shifted = [v + 500.0 for v in _REAL_SWEEP]
+        self.assertAlmostEqual(_kerr.calibration_slope(_REAL_SWEEP),
+                               _kerr.calibration_slope(shifted), places=9)
+
+    def test_unusable_inputs_give_none(self):
+        for bad in (None, [], [1.0], [0.0] * 6, [1.0, float("nan"), 3.0],
+                    [5.0] * 6):                      # flat → zero slope
+            self.assertIsNone(_kerr.calibration_slope(bad), repr(bad))
+
+    def test_too_many_values_refused(self):
+        # Only six tick positions exist; anything longer is not this sweep.
+        self.assertIsNone(_kerr.calibration_slope(_REAL_SWEEP + [-85.0]))
+
+    def test_flat_values_do_not_produce_a_huge_factor(self):
+        """Six identical readings fit a slope of ~1e-19, not 0 — refuse them.
+
+        Dividing by that float noise would hand the plots a factor of ~1e19
+        and silently rescale every curve.
+        """
+        self.assertIsNone(_kerr.calibration_slope([5.0] * 6))
+        self.assertIsNone(_kerr.calibration_slope([-12.5] * 6))
+
+    def test_values_that_turn_around_are_refused(self):
+        """A run that goes down and back up has no slope to speak of."""
+        self.assertIsNone(
+            _kerr.calibration_slope([43.0, 21.6, 0.9, 0.9, 21.6, 43.0]))
+
+
+class TestKerrUnits(unittest.TestCase):
+    """The channel's own registry unit decides the conversion."""
+
+    def test_voltage_units(self):
+        self.assertEqual(_kerr.unit_to_mV("V"), 1e3)
+        self.assertEqual(_kerr.unit_to_mV("mV"), 1.0)
+        self.assertEqual(_kerr.unit_to_mV("µV"), 1e-3)     # U+00B5
+        self.assertEqual(_kerr.unit_to_mV("μV"), 1e-3)     # U+03BC
+        self.assertEqual(_kerr.unit_to_mV(" uv "), 1e-3)
+
+    def test_non_voltage_units_are_left_alone(self):
+        for u in ("mT", "T", "nm", "steps", "s", "A", "K", "", None, "None"):
+            self.assertIsNone(_kerr.unit_to_mV(u), repr(u))
+
+    def test_factor_combines_unit_and_slope(self):
+        cal = _kerr.KerrCalibration(_REAL_SWEEP)
+        self.assertTrue(cal.ok)
+        # A ZI channel reads µV, so its factor is sln/1000 µrad per µV.
+        self.assertAlmostEqual(cal.factor("µV"), cal.sln * 1e-3, places=12)
+        self.assertAlmostEqual(cal.factor("V"),  cal.sln * 1e3,  places=9)
+        self.assertIsNone(cal.factor("mT"))
+
+    def test_no_calibration_converts_nothing(self):
+        cal = _kerr.KerrCalibration([0.0] * 6)
+        self.assertFalse(cal.ok)
+        self.assertIsNone(cal.factor("V"))
+
+
+class TestKerrDisplayUnit(unittest.TestCase):
+    """µrad, or nrad when the rotation is below 1 µrad."""
+
+    def test_picks_nrad_below_one_urad(self):
+        self.assertEqual(_kerr.resolve_display_unit(0.15), _kerr.NRAD)
+        self.assertEqual(_kerr.resolve_display_unit(5.0),  _kerr.URAD)
+
+    def test_nrad_is_a_thousand_times_urad(self):
+        # nrad = µrad × 1000 (dividing would give mrad).
+        self.assertEqual(_kerr.display_scale(_kerr.NRAD), 1000.0)
+        self.assertEqual(_kerr.display_scale(_kerr.URAD), 1.0)
+
+    def test_hysteresis_keeps_the_label_still(self):
+        """A signal sitting on the boundary must not flip the axis each frame."""
+        # Already in nrad: stay there until well clear of 1 µrad.
+        self.assertEqual(_kerr.resolve_display_unit(1.2, _kerr.NRAD), _kerr.NRAD)
+        self.assertEqual(_kerr.resolve_display_unit(2.5, _kerr.NRAD), _kerr.URAD)
+        # Already in µrad: only drop to nrad once clearly below 1 µrad.
+        self.assertEqual(_kerr.resolve_display_unit(1.2, _kerr.URAD), _kerr.URAD)
+        self.assertEqual(_kerr.resolve_display_unit(0.4, _kerr.URAD), _kerr.NRAD)
+
+    def test_no_data_keeps_the_current_unit(self):
+        self.assertEqual(_kerr.resolve_display_unit(0.0, _kerr.NRAD), _kerr.NRAD)
+        self.assertEqual(_kerr.resolve_display_unit(float("nan")), _kerr.URAD)
+
+
+class TestKerrConvertGroup(unittest.TestCase):
+    """Curves sharing one axis share one unit; non-voltages are untouched."""
+
+    def setUp(self):
+        self.cal = _kerr.KerrCalibration(_REAL_SWEEP)
+
+    def test_one_unit_for_the_whole_axis(self):
+        big   = np.array([0.0, 100.0])      # µV → ~15 µrad
+        small = np.array([0.0, 0.5])
+        factors, unit = _kerr.convert_group(
+            [(big, "µV"), (small, "µV")], self.cal)
+        self.assertEqual(unit, _kerr.URAD)
+        self.assertEqual(factors[0], factors[1])
+
+    def test_small_signal_alone_reads_in_nrad(self):
+        small = np.array([0.0, 0.5])        # µV → ~0.08 µrad
+        factors, unit = _kerr.convert_group([(small, "µV")], self.cal)
+        self.assertEqual(unit, _kerr.NRAD)
+        peak = abs(small[1] * factors[0])
+        self.assertGreater(peak, 1.0)       # readable, not a column of zeros
+        self.assertAlmostEqual(factors[0], self.cal.sln * 1e-3 * 1000.0,
+                               places=9)
+
+    def test_non_voltage_curve_gets_no_factor(self):
+        factors, unit = _kerr.convert_group(
+            [(np.array([1.0, 2.0]), "µV"), (np.array([1.0, 2.0]), "mT")],
+            self.cal)
+        self.assertIsNotNone(factors[0])
+        self.assertIsNone(factors[1])
+        self.assertIsNotNone(unit)
+
+    def test_axis_with_nothing_convertible(self):
+        factors, unit = _kerr.convert_group(
+            [(np.array([1.0]), "mT")], self.cal)
+        self.assertEqual(factors, [None])
+        self.assertIsNone(unit)
+
+    def test_all_nan_series_survives(self):
+        nan = np.array([np.nan, np.nan])
+        factors, unit = _kerr.convert_group([(nan, "µV")], self.cal)
+        self.assertIsNotNone(factors[0])
+        self.assertIn(unit, (_kerr.URAD, _kerr.NRAD))
+
+
+class TestKerrDisplayState(unittest.TestCase):
+    """The shared toggle every plot's θ pill is bound to."""
+
+    def test_notifies_on_change_only(self):
+        seen = []
+        st = _kerr.KerrDisplayState()
+        st.subscribe(seen.append)
+        st.set(True); st.set(True); st.set(False)
+        self.assertEqual(seen, [True, False])
+
+    def test_a_broken_observer_does_not_take_the_others_down(self):
+        seen = []
+        st = _kerr.KerrDisplayState()
+        st.subscribe(lambda _e: (_ for _ in ()).throw(RuntimeError("torn down")))
+        st.subscribe(seen.append)
+        st.set(True)
+        self.assertEqual(seen, [True])
+        self.assertTrue(st.enabled)
+
+
+class TestKerrDisplaySetting(unittest.TestCase):
+    """kerr_display is a per-setup preference in both apps."""
+
+    def _cfgmod(self, app):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"kerr_cfg_{app}",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         app, "config.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_default_is_off_in_every_setup(self):
+        for app in ("Samba_main", "Cryo"):
+            mod = self._cfgmod(app)
+            for name, setup in mod.SETUP_HW_DEFAULTS.items():
+                self.assertIs(setup.get("kerr_display"), False,
+                              f"{app}/{name} missing or wrong kerr_display")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

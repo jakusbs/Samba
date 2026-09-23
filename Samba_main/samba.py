@@ -61,6 +61,7 @@ from validation import validate_scan_config
 from scan    import ScanWorker, ScanlistWorker
 from lab_notebook import append_measurement, notebook_path as _nb_path
 from plot_widgets import Live2DWidget, Live1DWidget
+from kerr import KerrDisplayState
 from panels  import (ConfigListPanel, RightPanel,
                      TrajectoryPanel, ScanlistPanel, SetupDefaultsPanel)
 from panels.bd_calibration import BDCalibrationPanel
@@ -689,6 +690,18 @@ class MainWindow(QMainWindow):
         self.bottom_tabs.addTab(self.setup_defaults, "Setup Defaults")
         bw_l.addWidget(self.bottom_tabs, stretch=1)
 
+        # ── Kerr-rotation (θ) display ────────────────────────────────────────
+        # One shared on/off state behind the θ pills on the 1D plot, the 2D map
+        # and the data browser, so the three never disagree about what is being
+        # shown.  Display only — the recorded data stays in volts.
+        self.kerr_state = KerrDisplayState()
+        self.kerr_state.subscribe(self._on_kerr_toggled)
+        self._kerr_loading = False
+        self.plot1d.set_kerr_state(self.kerr_state)
+        self.map2d.set_kerr_state(self.kerr_state)
+        self.data_browser.plot.set_kerr_state(self.kerr_state)
+        self.bd_cal_panel.calibration_applied.connect(self._push_kerr_calibration)
+
         v_split.addWidget(bottom_w)
         v_split.setSizes([500, 400])
         v_split.setStretchFactor(0, 1)
@@ -1158,6 +1171,14 @@ class MainWindow(QMainWindow):
         sd = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         self.save_dir.setText(sd)
         self.server_dir.setText(setup.get("server_sync_dir", ""))
+        # Kerr (θ) display toggle — a per-setup preference.  Applied before the
+        # BD values below so the pills settle once, and guarded so restoring it
+        # does not write the setup file straight back out.
+        self._kerr_loading = True
+        try:
+            self.kerr_state.set(bool(setup.get("kerr_display", False)))
+        finally:
+            self._kerr_loading = False
         # BD calibration — load saved values if present, update status
         bd_vals = setup.get("bd_calibration")
         if bd_vals:
@@ -1402,6 +1423,29 @@ class MainWindow(QMainWindow):
             self.live_tabs.setCurrentWidget(self.plot1d.parentWidget())
         except Exception:
             pass
+
+    # ── Kerr-rotation (θ) display ────────────────────────────────────────────
+    def _push_kerr_calibration(self, vals: list):
+        """Hand the current λ/2 values to every plot that can show θ.
+
+        Called whenever the BD Calibration boxes change — a user edit, a
+        Fit & Import, a Load saved, or a setup switch — so a plot can never
+        convert with another setup's calibration.  An all-zero (or otherwise
+        unusable) set disables the pills instead of silently showing zeros.
+        """
+        self.plot1d.set_kerr_calibration(vals)
+        self.map2d.set_kerr_calibration(vals)
+
+    def _on_kerr_toggled(self, enabled: bool):
+        """Persist the θ toggle per setup (it is a per-rig display preference)."""
+        if self._kerr_loading or getattr(self, "_switching_setup", False):
+            return
+        setup = self._active_setup()
+        setup["kerr_display"] = bool(enabled)
+        try:
+            save_setup(self._active_setup_name, setup)
+        except Exception as e:                       # never break the plot
+            log.error("Saving the θ display toggle failed: %s", e, exc_info=True)
 
     # ── BD Calibration callbacks ──────────────────────────────────────────────
     def _bd_cal_save(self, vals: list):
@@ -1708,6 +1752,10 @@ class MainWindow(QMainWindow):
 
     def _setup_live_display(self, cfg, active):
         mode, n_x, n_y = self._scan_dims(cfg)
+        # Channel units (from the device registry) decide what the θ display
+        # may convert; the 1D widget gets them through alloc()'s sensor list.
+        self.map2d.set_sensor_units(
+            {s["label"]: s.get("unit", "") for s in active})
         if mode == "2D":
             x_arr = np.linspace(cfg["act1_start"], cfg["act1_stop"], n_x)
             y_arr = np.linspace(cfg["act2_start"], cfg["act2_stop"], n_y)
