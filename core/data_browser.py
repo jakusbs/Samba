@@ -9,7 +9,7 @@ Features:
   • Overlay multiple 1D scans for comparison
   • Handles incomplete/aborted files (from incremental saving)
 """
-import os, glob
+import os, glob, threading
 import numpy as np
 import h5py
 from datetime import datetime
@@ -30,12 +30,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
 
-from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
+from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS, CONFIG_DIR
 from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            make_kerr_pill, set_kerr_pill)
 from theme import DIVERGING_CMAPS
 import kerr
+import scan_index
 
 # Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
 # instead of any stored actuator/field/time axis. Not a real dataset name.
@@ -622,6 +623,11 @@ class DataBrowserPanel(QWidget):
     Designed to be added as a tab in MainWindow.bottom_tabs.
     """
     file_loaded = pyqtSignal(str)  # emits filepath when a scan is loaded
+    # Queued signals from the background indexer.  A plain thread must not touch
+    # widgets; a queued signal is delivered to the GUI thread unconditionally,
+    # where QTimer.singleShot from a non-Qt thread is version-dependent (§44).
+    _index_progress = pyqtSignal(int, int, int)  # token, files read, files to read
+    _index_done     = pyqtSignal(int, dict)      # token, sync() result summary
 
     def __init__(self, save_dir_getter, parent=None):
         """save_dir_getter: callable returning the current save directory path."""
@@ -634,6 +640,31 @@ class DataBrowserPanel(QWidget):
         self._autoplot_timer.setInterval(3000)
         self._autoplot_timer.timeout.connect(self._autoplot_tick)
         self._autoplot_timer.start()
+
+        # ── Metadata index ────────────────────────────────────────────────────
+        # Searching used to read metadata off disk: the filter expands every
+        # matching date folder, and expanding a folder opened every HDF5 in it
+        # on the GUI thread — one broad keystroke opened the whole archive
+        # (3.5 s for 3697 files, and growing monthly).  Now every file's
+        # searchable metadata is read once into an on-disk index and the search
+        # never opens anything; a re-sync is a stat walk (~6 ms) plus a real
+        # read of only the files that changed, i.e. the running scan.
+        self._index: Optional[scan_index.ScanIndex] = None
+        self._index_dir: str = ""
+        self._index_thread: Optional[threading.Thread] = None
+        self._index_stop: Optional[threading.Event] = None
+        # A sync is identified by a token so a superseded one (setup switched
+        # mid-index) can finish and save quietly without writing its progress
+        # into a panel that has moved on.
+        self._index_token: int = 0
+        self._index_progress.connect(self._on_index_progress)
+        self._index_done.connect(self._on_index_done)
+        # Debounce: the filter used to run on every keystroke over the whole
+        # tree.  One pass per typing pause is plenty and keeps the box smooth.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._reapply_filter)
 
         root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(4)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -673,12 +704,20 @@ class DataBrowserPanel(QWidget):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search  (sample, notes, operator, filename…)")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(self._apply_filter)
+        self.search_edit.textChanged.connect(self._on_search_text)
         self.search_edit.setToolTip(
-            "Filter the file tree. Matches the filename and any metadata already\n"
-            "read for that file. Space-separated terms must all match.\n"
-            "Collapsed date folders are searched by filename only until opened.")
+            "Filter the file tree. Matches the filename plus the sample, operator,\n"
+            "notes, device, scan name/type, incidence and polarization recorded in\n"
+            "the file. Space-separated terms must all match.\n"
+            "Searches every date folder, open or not — no file is opened to do it.")
         left_l.addWidget(self.search_edit)
+
+        # Indexing progress.  Hidden unless a sync is actually doing work, so
+        # the usual case (nothing changed) shows nothing at all.
+        self.index_lbl = QLabel("")
+        self.index_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
+        self.index_lbl.setVisible(False)
+        left_l.addWidget(self.index_lbl)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["File", "Status", "Points"])
@@ -769,6 +808,106 @@ class DataBrowserPanel(QWidget):
 
         root.addWidget(splitter)
 
+    # ── Metadata index ────────────────────────────────────────────────────────
+    def _ensure_index(self, base: str):
+        """Create/load the index for `base`, reusing it while the dir is the same."""
+        if self._index is not None and self._index_dir == base:
+            return self._index
+        self._stop_indexing()
+        try:
+            cache = scan_index.index_path(base, CONFIG_DIR)
+        except Exception:
+            cache = None
+        self._index = scan_index.ScanIndex(base, cache)
+        self._index_dir = base
+        try:
+            self._index.load()
+        except Exception:
+            pass                      # a bad cache is just an empty one
+        return self._index
+
+    def _start_indexing(self):
+        """Bring the index up to date on a worker thread.
+
+        Only files whose mtime/size changed are opened, so after the first run
+        this is a stat walk and a no-op — except for a scan still being written,
+        which is exactly the file whose row should keep updating.
+        """
+        idx = self._index
+        if idx is None:
+            return
+        if self._index_thread is not None and self._index_thread.is_alive():
+            return                    # one sync at a time; refresh() re-runs later
+        self._index_token += 1
+        token = self._index_token
+        stop = threading.Event()      # per-sync, so stopping one cannot un-stop another
+        self._index_stop = stop
+
+        def _work():
+            try:
+                res = idx.sync(
+                    progress_cb=lambda d, t: self._index_progress.emit(token, d, t),
+                    should_stop=stop.is_set)
+            except Exception as e:
+                res = {"error": str(e), "read": 0, "total": 0,
+                       "removed": 0, "indexed": len(idx.entries), "stopped": False}
+            self._index_done.emit(token, res)
+
+        self._index_thread = threading.Thread(target=_work, daemon=True,
+                                              name="samba-scan-index")
+        self._index_thread.start()
+
+    def _stop_indexing(self):
+        """Ask a running sync to finish early (panel closing, directory switch).
+
+        Deliberately does not join: the worker checks between files, so it exits
+        within about a millisecond, and it still saves what it read — while the
+        GUI thread carries straight on instead of waiting on a disk read.
+        """
+        if self._index_stop is not None:
+            self._index_stop.set()
+        self._index_stop = None
+        self._index_thread = None
+
+    def _on_index_progress(self, token: int, done: int, total: int):
+        if token != self._index_token:
+            return                    # a superseded sync winding down
+        self.index_lbl.setText(f"Indexing metadata…  {done} / {total}")
+        self.index_lbl.setVisible(True)
+
+    def _on_index_done(self, token: int, res: dict):
+        if token != self._index_token:
+            return
+        if res.get("error"):
+            self.index_lbl.setText(f"Indexing failed: {res['error'][:60]}")
+            self.index_lbl.setVisible(True)
+            return
+        self.index_lbl.setVisible(False)
+        if res.get("read") or res.get("removed"):
+            self._fill_rows_from_index()   # newly-read rows lose their "…"
+            txt = self.search_edit.text()
+            if txt.strip():                # and can now match a live search
+                self._apply_filter(txt)
+
+    def _fill_rows_from_index(self):
+        """Fill every still-unknown row's Status/Points from the index."""
+        idx = self._index
+        if idx is None:
+            return
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                date_item = self.tree.topLevelItem(i)
+                for j in range(date_item.childCount()):
+                    item = date_item.child(j)
+                    if item.text(1) not in ("…", ""):
+                        continue
+                    fp = item.data(0, Qt.ItemDataRole.UserRole)
+                    if fp:
+                        self._fill_item_from_index(item, idx.get(fp))
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
     # ── File discovery ────────────────────────────────────────────────────────
     def refresh(self):
         """Scan the save directory and populate the tree."""
@@ -789,54 +928,52 @@ class DataBrowserPanel(QWidget):
             reverse=True
         )
 
-        for dd in date_dirs:
-            date_path = os.path.join(base, dd)
-            h5_files = sorted(glob.glob(os.path.join(date_path, "*.h5")), reverse=True)
-            if not h5_files:
-                continue
+        # Every row is filled from the index, so no HDF5 is opened here and
+        # every folder — open or collapsed — is complete and searchable.  A
+        # file the index has not seen yet (first run, or a scan written
+        # seconds ago) shows "…" until the background sync reaches it.
+        idx = self._ensure_index(base)
 
-            # Format date nicely
-            try:
-                date_label = datetime.strptime(dd, "%Y%m%d").strftime("%Y-%m-%d (%a)")
-            except Exception:
-                date_label = dd
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for dd in date_dirs:
+                date_path = os.path.join(base, dd)
+                h5_files = sorted(glob.glob(os.path.join(date_path, "*.h5")), reverse=True)
+                if not h5_files:
+                    continue
 
-            date_item = QTreeWidgetItem([date_label, "", f"{len(h5_files)} files"])
-            self.tree.addTopLevelItem(date_item)
+                # Format date nicely
+                try:
+                    date_label = datetime.strptime(dd, "%Y%m%d").strftime("%Y-%m-%d (%a)")
+                except Exception:
+                    date_label = dd
 
-            # Only the newest (expanded) folder reads HDF5 metadata eagerly.
-            # Older folders get name-only rows; their metadata is filled in on
-            # expand (_on_date_expanded).  Reading every file's metadata here
-            # froze the GUI for seconds on setup switch / post-scan refresh
-            # once the data directory held months of scans.
-            eager = (dd == date_dirs[0])
-            for fp in h5_files:
-                if eager:
-                    sf = ScanFile(fp)
-                    if not sf.valid:
-                        continue
-                    self._loaded_files[fp] = sf
-                    item = QTreeWidgetItem([sf.basename, "", ""])
-                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
-                    self._fill_item_meta(item, sf)
-                else:
+                date_item = QTreeWidgetItem([date_label, "", f"{len(h5_files)} files"])
+                self.tree.addTopLevelItem(date_item)
+
+                for fp in h5_files:
                     item = QTreeWidgetItem([os.path.basename(fp), "…", ""])
                     item.setData(0, Qt.ItemDataRole.UserRole, fp)
                     item.setForeground(1, QColor("#6c7086"))
-                date_item.addChild(item)
-            date_item.setExpanded(eager)   # after children exist
+                    self._fill_item_from_index(item, idx.get(fp) if idx else None)
+                    date_item.addChild(item)
+                date_item.setExpanded(dd == date_dirs[0])   # after children exist
+        finally:
+            self.tree.setUpdatesEnabled(True)
 
         if self.tree.topLevelItemCount() == 0:
             placeholder = QTreeWidgetItem(["No scans found", "", ""])
             placeholder.setForeground(0, QColor("#6c7086"))
             self.tree.addTopLevelItem(placeholder)
+            return
+
+        self._start_indexing()
 
     @staticmethod
-    def _fill_item_meta(item, sf: "ScanFile"):
-        """Set the status/points columns + colour coding from a loaded ScanFile."""
-        status = sf.meta["scan_status"]
-        pts    = f"{sf.meta['points_acquired']}/{sf.meta['points_planned']}"
-        item.setText(1, status); item.setText(2, pts)
+    def _set_row_status(item, status: str, pts_acq, pts_plan):
+        """Set the Status/Points columns + colour coding on one row."""
+        item.setText(1, status)
+        item.setText(2, f"{pts_acq}/{pts_plan}")
         if status == "completed":
             item.setForeground(1, QColor("#a6e3a1"))
         elif status == "aborted":
@@ -845,6 +982,24 @@ class DataBrowserPanel(QWidget):
             item.setForeground(1, QColor("#f38ba8"))
         else:
             item.setForeground(1, QColor("#6c7086"))
+
+    @classmethod
+    def _fill_item_from_index(cls, item, entry: Optional[Dict]):
+        """Set the status/points columns from an index entry.
+
+        `None` means the file is not indexed yet (leave the "…" placeholder) or
+        could not be read at all — marked "?" and made unclickable, as before.
+        """
+        if entry is None:
+            return
+        if not entry.get("ok"):
+            item.setText(1, "?")
+            item.setForeground(0, QColor("#6c7086"))
+            item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
+            return
+        cls._set_row_status(item, entry.get("scan_status", "?"),
+                            entry.get("points_acquired", 0),
+                            entry.get("points_planned", 0))
 
     def _get_scanfile(self, fp: str):
         """Return the cached ScanFile for `fp`, loading it lazily on first use.
@@ -858,55 +1013,80 @@ class DataBrowserPanel(QWidget):
         return sf
 
     def _reapply_filter(self):
-        """Re-run the active search (after a refresh or a lazy load)."""
+        """Debounce tick: run the search the operator has just finished typing."""
         txt = self.search_edit.text() if hasattr(self, 'search_edit') else ''
-        if txt.strip():
-            self._apply_filter(txt)
+        self._apply_filter(txt, restore_tree=True)
+
+    def _on_search_text(self, _text: str = ""):
+        """Restart the debounce timer — the filter runs once the typing stops."""
+        self._search_timer.start()
 
     def _on_date_expanded(self, date_item):
-        """Fill in metadata for a lazily-added date folder on first expand."""
+        """Fill in any rows still waiting on the index when a folder is opened.
+
+        Reads nothing: expanding a folder used to open every HDF5 in it, which
+        is what made a search freeze the app.  A row still showing "…" here is
+        one the background sync has not reached yet, and it fills in by itself
+        when the sync finishes.
+        """
+        idx = self._index
+        if idx is None:
+            return
         for i in range(date_item.childCount()):
             item = date_item.child(i)
             if item.text(1) != "…":
                 continue                       # already populated
             fp = item.data(0, Qt.ItemDataRole.UserRole)
-            sf = self._get_scanfile(fp) if fp else None
-            if sf is None:
-                item.setText(1, "?")
-                item.setForeground(0, QColor("#6c7086"))
-                item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
-                continue
-            self._fill_item_meta(item, sf)
+            if fp:
+                self._fill_item_from_index(item, idx.get(fp))
 
     # ── Search / filter ───────────────────────────────────────────────────────
     def _match_terms(self, fp: str, item, terms) -> bool:
-        """True when every term appears in the filename or the file's metadata."""
-        hay = [item.text(0).lower()]
-        sf = self._loaded_files.get(fp)      # do NOT force a load: filtering
-        if sf is not None:                   # must stay cheap while typing
-            for k in ("sample_id", "operator", "notes", "scan_type",
-                      "scan_name", "device_id", "incidence", "polarization"):
-                v = sf.meta.get(k, sf.raw_meta.get(k))
-                if v not in (None, ""):
-                    hay.append(str(v).lower())
-        blob = " ".join(hay)
+        """True when every term appears in this file's indexed text.
+
+        A pure dict lookup — no file is opened, so every date folder is searched
+        by its full metadata whether or not it has ever been expanded.
+        """
+        if self._index is not None:
+            return self._index.matches(fp, terms, fallback_name=item.text(0))
+        blob = item.text(0).lower()
         return all(t in blob for t in terms)
 
-    def _apply_filter(self, text: str = ""):
-        """Show only files matching the search box; hide empty date folders."""
-        terms = [t for t in (text or "").lower().split() if t]
-        for i in range(self.tree.topLevelItemCount()):
-            date_item = self.tree.topLevelItem(i)
-            shown = 0
-            for j in range(date_item.childCount()):
-                child = date_item.child(j)
-                fp = child.data(0, Qt.ItemDataRole.UserRole)
-                ok = True if not terms else self._match_terms(fp, child, terms)
-                child.setHidden(not ok)
-                shown += 1 if ok else 0
-            date_item.setHidden(bool(terms) and shown == 0)
-            if terms and shown:
-                date_item.setExpanded(True)
+    def _apply_filter(self, text: str = "", restore_tree: bool = False):
+        """Show only files matching the search box; hide empty date folders.
+
+        `restore_tree` collapses back to the opening state when the search is
+        cleared.  Off by default so a background index update re-running the
+        filter cannot collapse a folder the operator opened by hand.
+        """
+        terms = scan_index.split_terms(text)
+        # Expanding and hiding thousands of rows one at a time repaints the tree
+        # on every call; batch the whole pass into one update.
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                date_item = self.tree.topLevelItem(i)
+                shown = 0
+                for j in range(date_item.childCount()):
+                    child = date_item.child(j)
+                    fp = child.data(0, Qt.ItemDataRole.UserRole)
+                    ok = True if not terms else self._match_terms(fp, child, terms)
+                    child.setHidden(not ok)
+                    shown += 1 if ok else 0
+                date_item.setHidden(bool(terms) and shown == 0)
+                if terms:
+                    if shown:
+                        date_item.setExpanded(True)
+                elif restore_tree:
+                    # Cleared search: back to the opening state — newest folder
+                    # open, the rest collapsed — instead of every month expanded.
+                    date_item.setExpanded(i == 0)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    def closeEvent(self, event):
+        self._stop_indexing()
+        super().closeEvent(event)
 
     def _replot(self):
         """Re-draw whatever is currently shown (single file or overlay)."""
@@ -955,11 +1135,16 @@ class DataBrowserPanel(QWidget):
     # ── Selection handling ────────────────────────────────────────────────────
     def _on_selection(self):
         items = self.tree.selectedItems()
-        # Show metadata for the last selected file
+        # Show metadata for the last selected file.  The full ScanFile is read
+        # here, on demand, for the one file being looked at — the tree itself
+        # is populated from the index and opens nothing.
         for item in reversed(items):
             fp = item.data(0, Qt.ItemDataRole.UserRole)
-            if fp and fp in self._loaded_files:
-                self._show_file(self._loaded_files[fp])
+            if not fp:
+                continue
+            sf = self._get_scanfile(fp)
+            if sf is not None:
+                self._show_file(sf)
                 return
 
     def _show_file(self, sf: ScanFile):
@@ -1232,10 +1417,13 @@ class DataBrowserPanel(QWidget):
         """Plot with the user's column selection — a 2D colour map when the
         2D-map toggle is on, otherwise a 1D line plot."""
         # Find the last selected file
-        fp = None
+        fp, sf = None, None
         for item in reversed(self.tree.selectedItems()):
             candidate = item.data(0, Qt.ItemDataRole.UserRole)
-            if candidate and candidate in self._loaded_files:
+            if not candidate:
+                continue
+            sf = self._get_scanfile(candidate)
+            if sf is not None:
                 fp = candidate
                 break
         if not fp:
@@ -1246,7 +1434,6 @@ class DataBrowserPanel(QWidget):
             return
         x_key = self.x_combo.currentData()
         y_key = self.y_combo.currentData()
-        sf = self._loaded_files[fp]
         is_dc = sf.meta.get("is_dc_hyst", False)
 
         # ── 2D colour map of the selected Y channel ───────────────────────────
@@ -1289,8 +1476,8 @@ class DataBrowserPanel(QWidget):
         title_parts = []
         for item in items:
             fp = item.data(0, Qt.ItemDataRole.UserRole)
-            if fp and fp in self._loaded_files:
-                sf = self._loaded_files[fp]
+            sf = self._get_scanfile(fp) if fp else None
+            if sf is not None:
                 x_key = self.x_combo.currentData() or "auto"
                 y_key = self.y_combo.currentData() or "auto"
                 result = sf.read_1d(x_key, y_key)

@@ -5403,3 +5403,109 @@ only breaks ties between *equally uniform* runs. A run that genuinely turns
 around inside the six is refused (CV ≈ 480 %), which is correct, and a 9-hold
 trace where the operator reverses **after** the six ticks still picks the right
 six. The only consequence of direction is the **sign of `sln`**, handled above.
+
+---
+
+## 80. Recent Changes (September 2026) — Data-Browser Metadata Index
+
+Branch `claude/browser-metadata-index` (246 tests). App version → **v13.29**.
+Both apps (`core/data_browser.py` is shared). Reported: the browser only opens
+the newest files, and typing in the search box freezes the app.
+
+### The freeze was the search *expanding folders*, not the search reading files
+§62 was careful that `_match_terms` never forces a load — and then
+`_apply_filter` called `date_item.setExpanded(True)` on every folder with a hit,
+which fires `itemExpanded` → `_on_date_expanded` → `ScanFile(fp)` for **every**
+file in that folder, synchronously on the GUI thread. One broad first keystroke
+matched filenames in nearly all 58 Green date folders and opened the entire
+archive. `textChanged` also ran the whole filter per keystroke, with no debounce.
+
+Measured on `Data_Samba_Green` (3697 files, 1.1 GB): 3.5 s to read every file's
+metadata, and it grows every month. Warm cache barely beat cold, so the cost is
+per-file HDF5 open overhead, not disk — it does not improve on its own.
+
+### `core/scan_index.py` (new) — read once, search a dict
+Qt-free and matplotlib-free (stdlib + h5py only) so it is unit-testable in CI,
+like `core/bd_fit.py` and `core/current_sweep.py`. Shims in both app directories
+per §74. A **cache, never a source of truth** — deleting it costs one rebuild,
+and nothing here writes to the data directory.
+
+- `ScanIndex(base_dir, cache_file)` holds `{path: entry}` where an entry is the
+  file's `(mtime, size)` plus the fields an operator actually types:
+  sample, operator, notes, scan name/type, device id, incidence, polarization —
+  and status/points for the tree columns.
+- `sync()` stat-walks the tree (`os.scandir`, no file opened) and re-reads
+  **only** the paths whose mtime or size changed. In steady state that is the
+  scan currently being written and nothing else.
+- Persisted to `~/.config/moke_scan/browser_index_<dir>_<hash8>.json`, atomic
+  write. Keyed by the full path's hash, so two setups — or the same setup
+  pointed at another disk — never share one index.
+- A corrupt, missing or version-mismatched cache is simply an empty index.
+- A file that cannot be read still gets an entry (`ok: False`) stamped with its
+  mtime/size, so it is not re-opened every sync — while a scan still being
+  written keeps changing size and is therefore re-read until it is complete.
+  `get()` returns it as-is: **"we looked and could not read it" is a different
+  answer from "we have not looked yet"**, and the browser shows them
+  differently ("?" versus "…"). Returning `None` for both was a bug caught by
+  the harness — the "?" branch was unreachable.
+- Long first builds checkpoint every 500 files, so quitting halfway does not
+  throw the work away.
+
+### Browser wiring (`core/data_browser.py`)
+- `refresh()` no longer opens anything: **every** row in **every** folder is
+  filled from the index, so the `…` placeholders and the eager-newest-folder
+  special case are gone and a collapsed month is as complete as an open one.
+- The sync runs on a daemon thread and reports through **queued signals**
+  (`_index_progress` / `_index_done`) — a plain thread must not touch widgets,
+  and `QTimer.singleShot` from one is version-dependent (§44). Progress shows in
+  a small label under the search box, hidden when there is nothing to do.
+- Each sync carries a **token**; a superseded one (setup switched mid-index)
+  finishes and saves quietly instead of writing into a panel that has moved on.
+  `_stop_indexing` deliberately does **not** join — the worker checks between
+  files, so it exits in about a millisecond while the GUI thread carries on.
+- `_on_date_expanded` reads nothing; it only fills rows the sync has not reached.
+- The search box is **debounced** (250 ms) and `_match_terms` is a dict lookup,
+  falling back to the filename for a file not indexed yet.
+- `_apply_filter` batches the pass inside `setUpdatesEnabled(False)` — expanding
+  and hiding thousands of rows one at a time repaints the tree every call.
+- Clearing the search collapses back to the opening state, but **only** from the
+  debounce path (`restore_tree=True`): a background index update re-running the
+  filter must not collapse a folder the operator opened by hand.
+
+### Caught while building: selection and plotting relied on the eager load
+`_on_selection`, `_plot_current` and `_overlay_selected` all gated on
+`fp in self._loaded_files`, which `refresh()` used to pre-populate for the
+newest folder. Removing the eager load would have left clicking a file doing
+nothing. They now call `_get_scanfile(fp)` — the lazy loader §40 already wrote
+for exactly this and which nothing had been using — so the full `ScanFile` is
+read on demand for the one file being looked at.
+
+### Measured after (same archive)
+| | before | after |
+|---|---|---|
+| broad first keystroke ("p") | ~3.5 s freeze | **6 ms** |
+| `refresh()` on the GUI thread | opened the newest folder | **20 ms**, opens nothing |
+| first index build | — | 1.6 s, in the background |
+| re-sync (nothing changed) | — | 6 ms |
+| launch from cache | — | 8.7 ms to load 1.7 MB |
+| search across 3697 files | filename-only unless expanded | 0.8 ms, full metadata |
+
+Searching `sample_id` now finds **697** files that filename matching alone
+found **0** of — collapsed folders were previously searchable by name only.
+
+### Tests / verification
+- `test_runner.py` 232 → **246**: `TestScanIndex` — field extraction, NUL-padded
+  fixed-length strings, unreadable files recorded rather than skipped, term
+  matching and the filename fallback, the date-folder walk, second sync opening
+  nothing, changed/deleted files, stop-and-keep, cache round trip, corrupt and
+  version-mismatched caches, per-directory index paths.
+- Offscreen-Qt harness driving the **real** `DataBrowserPanel` (32 checks, not
+  committed — needs Qt): every row filled without expanding, `h5py.File` patched
+  to **count opens during filtering (zero)**, metadata-only terms hitting
+  collapsed folders, debounce, clear-restores-the-tree, a background update not
+  collapsing a hand-opened folder, stale-token results ignored, selection /
+  plot / overlay still working, a second launch reading the cache and opening
+  nothing, a new scan becoming searchable after `refresh()`, and the real Green
+  archive end to end.
+- Both main windows constructed, refreshed, searched and closed offscreen
+  against a throwaway `SAMBA_CONFIG_DIR` (§67 — never the live one).

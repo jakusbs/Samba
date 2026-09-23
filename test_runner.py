@@ -3347,5 +3347,197 @@ class TestKerrDisplaySetting(unittest.TestCase):
                               f"{app}/{name} missing or wrong kerr_display")
 
 
+class TestScanIndex(unittest.TestCase):
+    """core/scan_index.py — the data browser's metadata cache.
+
+    The browser used to read metadata off disk while the operator typed, which
+    froze the app once the archive held thousands of files.  These cover the
+    contract the search now depends on: read once, search a dict, and re-open
+    only what actually changed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'core'))
+        import importlib
+        cls.si = importlib.import_module('scan_index')
+
+    def _mkdir(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix='sidx_')
+        self.addCleanup(lambda: __import__('shutil').rmtree(d, ignore_errors=True))
+        return d
+
+    def _make(self, base, folder, name, **meta):
+        import h5py
+        d = os.path.join(base, folder)
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, name)
+        with h5py.File(fp, 'w') as f:
+            f.attrs['scan_type'] = meta.pop('scan_type', 'SPATIAL')
+            f.attrs['scan_status'] = meta.pop('scan_status', 'completed')
+            g = f.create_group('metadata')
+            g.attrs['points_acquired'] = meta.pop('pa', 10)
+            g.attrs['points_planned'] = meta.pop('pp', 10)
+            for k, v in meta.items():
+                g.attrs[k] = v
+        return fp
+
+    # ── reading one file ─────────────────────────────────────────────────────
+    def test_read_entry_extracts_searchable_fields(self):
+        base = self._mkdir()
+        fp = self._make(base, '20260901', 'a.h5', sample_id='Widget A',
+                        operator='jakub', notes='cooled overnight',
+                        scan_status='aborted', pa=7, pp=50)
+        st = os.stat(fp)
+        e = self.si.read_entry(fp, st.st_mtime, st.st_size)
+        self.assertTrue(e['ok'])
+        self.assertEqual(e['sample_id'], 'Widget A')
+        self.assertEqual(e['operator'], 'jakub')
+        self.assertEqual(e['scan_status'], 'aborted')
+        self.assertEqual((e['points_acquired'], e['points_planned']), (7, 50))
+
+    def test_read_entry_strips_nul_padding(self):
+        # Fixed-length HDF5 strings come back as NUL-padded bytes; TANGO
+        # DevString readbacks are padded out of C buffers in the first place
+        # (§59).  The index must not carry the padding into the search text.
+        import h5py
+        base = self._mkdir()
+        fp = self._make(base, '20260901', 'a.h5')
+        with h5py.File(fp, 'a') as f:
+            f['metadata'].attrs.create('sample_id', b'Widget\x00\x00',
+                                       dtype=h5py.string_dtype('utf-8', 10))
+        st = os.stat(fp)
+        e = self.si.read_entry(fp, st.st_mtime, st.st_size)
+        self.assertEqual(e['sample_id'], 'Widget')
+
+    def test_unreadable_file_is_recorded_not_skipped(self):
+        # "we looked and could not read it" must be distinguishable from
+        # "not indexed yet" — the browser shows "?" versus "…".
+        base = self._mkdir()
+        os.makedirs(os.path.join(base, '20260901'))
+        fp = os.path.join(base, '20260901', 'broken.h5')
+        with open(fp, 'w') as fh:
+            fh.write('not hdf5')
+        st = os.stat(fp)
+        e = self.si.read_entry(fp, st.st_mtime, st.st_size)
+        self.assertFalse(e['ok'])
+        self.assertEqual(e['name'], 'broken.h5')
+
+    # ── matching ─────────────────────────────────────────────────────────────
+    def test_matches_requires_every_term(self):
+        base = self._mkdir()
+        fp = self._make(base, '20260901', 'scan_alpha.h5',
+                        sample_id='Widget A', operator='jakub')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        self.assertTrue(idx.matches(fp, self.si.split_terms('widget')))
+        self.assertTrue(idx.matches(fp, self.si.split_terms('jakub alpha')))
+        self.assertFalse(idx.matches(fp, self.si.split_terms('jakub tobias')))
+        self.assertTrue(idx.matches(fp, []))          # empty search shows all
+
+    def test_matches_falls_back_to_filename_when_unindexed(self):
+        idx = self.si.ScanIndex('/nowhere')
+        self.assertTrue(idx.matches('/nowhere/20260901_alpha.h5',
+                                    self.si.split_terms('alpha')))
+        self.assertFalse(idx.matches('/nowhere/20260901_alpha.h5',
+                                     self.si.split_terms('beta')))
+
+    # ── the directory walk ───────────────────────────────────────────────────
+    def test_scan_tree_finds_h5_in_date_folders_only(self):
+        base = self._mkdir()
+        self._make(base, '20260901', 'a.h5')
+        self._make(base, '20260415', 'b.h5')
+        with open(os.path.join(base, '20260901', 'notes.txt'), 'w') as fh:
+            fh.write('x')
+        with open(os.path.join(base, 'loose.h5'), 'w') as fh:
+            fh.write('x')                      # not inside a date folder
+        found = self.si.scan_tree(base)
+        self.assertEqual(sorted(os.path.basename(p) for p in found), ['a.h5', 'b.h5'])
+
+    def test_scan_tree_survives_a_missing_directory(self):
+        self.assertEqual(self.si.scan_tree('/no/such/place'), {})
+
+    # ── incremental behaviour ────────────────────────────────────────────────
+    def test_second_sync_opens_nothing(self):
+        base = self._mkdir()
+        for i in range(3):
+            self._make(base, '20260901', f'a{i}.h5', sample_id='S')
+        idx = self.si.ScanIndex(base)
+        first = idx.sync(save=False)
+        second = idx.sync(save=False)
+        self.assertEqual(first['read'], 3)
+        self.assertEqual(second['read'], 0)      # this is what keeps refresh cheap
+        self.assertEqual(second['indexed'], 3)
+
+    def test_changed_file_is_re_read(self):
+        base = self._mkdir()
+        fp = self._make(base, '20260901', 'a.h5', sample_id='Before')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        self._make(base, '20260901', 'a.h5', sample_id='After')   # rewrite
+        os.utime(fp, (0, 0))                                      # force a change
+        self.assertEqual(idx.sync(save=False)['read'], 1)
+        self.assertEqual(idx.entries[fp]['sample_id'], 'After')
+
+    def test_deleted_file_is_dropped(self):
+        base = self._mkdir()
+        fp = self._make(base, '20260901', 'a.h5')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        os.remove(fp)
+        res = idx.sync(save=False)
+        self.assertEqual(res['removed'], 1)
+        self.assertNotIn(fp, idx.entries)
+
+    def test_sync_can_be_stopped_and_keeps_what_it_read(self):
+        base = self._mkdir()
+        for i in range(5):
+            self._make(base, '20260901', f'a{i}.h5')
+        idx = self.si.ScanIndex(base)
+        res = idx.sync(should_stop=lambda: True, save=False)
+        self.assertTrue(res['stopped'])
+        self.assertEqual(res['read'], 0)
+
+    # ── persistence ──────────────────────────────────────────────────────────
+    def test_cache_round_trip(self):
+        base = self._mkdir()
+        cache = os.path.join(self._mkdir(), 'idx.json')
+        self._make(base, '20260901', 'a.h5', sample_id='Widget A')
+        idx = self.si.ScanIndex(base, cache)
+        idx.sync()
+        self.assertTrue(os.path.isfile(cache))
+
+        idx2 = self.si.ScanIndex(base, cache)
+        self.assertTrue(idx2.load())
+        self.assertEqual(idx2.sync(save=False)['read'], 0)   # cache is trusted
+        fp = os.path.join(base, '20260901', 'a.h5')
+        self.assertTrue(idx2.matches(fp, self.si.split_terms('widget')))
+
+    def test_corrupt_or_outdated_cache_is_an_empty_index(self):
+        import json
+        base = self._mkdir()
+        cache = os.path.join(self._mkdir(), 'idx.json')
+        with open(cache, 'w') as fh:
+            fh.write('{ not json')
+        idx = self.si.ScanIndex(base, cache)
+        self.assertFalse(idx.load())
+        self.assertEqual(idx.entries, {})
+
+        with open(cache, 'w') as fh:
+            json.dump({"version": self.si.INDEX_VERSION + 99,
+                       "files": {"/x.h5": {"ok": True}}}, fh)
+        idx2 = self.si.ScanIndex(base, cache)
+        self.assertFalse(idx2.load())
+        self.assertEqual(idx2.entries, {})
+
+    def test_index_path_is_per_directory(self):
+        a = self.si.index_path('/data/Data_Samba_Green', '/cfg')
+        b = self.si.index_path('/other/Data_Samba_Green', '/cfg')
+        self.assertNotEqual(a, b)                       # same basename, different disk
+        self.assertEqual(a, self.si.index_path('/data/Data_Samba_Green', '/cfg'))
+        self.assertTrue(os.path.basename(a).startswith('browser_index_Data_Samba_Green_'))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
