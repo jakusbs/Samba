@@ -3436,6 +3436,67 @@ class TestScanIndex(unittest.TestCase):
         self.assertFalse(idx.matches(fp, self.si.split_terms('jakub tobias')))
         self.assertTrue(idx.matches(fp, []))          # empty search shows all
 
+    # ── dates ────────────────────────────────────────────────────────────────
+    def test_date_search_matches_the_folder(self):
+        # A scan's filename starts at HHMMSS and no attribute carries the date,
+        # so the date folder is the only place it exists.
+        base = self._mkdir()
+        june = self._make(base, '20260608', '101010_SPATIAL_a.h5', sample_id='S')
+        sept = self._make(base, '20260918', '101010_SPATIAL_b.h5', sample_id='S')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        for q in ('20260608', '2026-06-08', '2026/6/8', '2026-6-8'):
+            with self.subTest(query=q):
+                terms = self.si.split_terms(q)
+                self.assertTrue(idx.matches(june, terms), q)
+                self.assertFalse(idx.matches(sept, terms), q)
+
+    def test_partial_date_selects_a_month_or_year(self):
+        base = self._mkdir()
+        june = self._make(base, '20260608', 'a.h5')
+        sept = self._make(base, '20260918', 'b.h5')
+        last = self._make(base, '20250608', 'c.h5')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        month = self.si.split_terms('2026-06')
+        self.assertTrue(idx.matches(june, month))
+        self.assertFalse(idx.matches(sept, month))
+        self.assertFalse(idx.matches(last, month))
+        self.assertTrue(idx.matches(june, self.si.split_terms('202606')))
+        year = self.si.split_terms('2026')
+        self.assertTrue(idx.matches(june, year) and idx.matches(sept, year))
+        self.assertFalse(idx.matches(last, year))
+
+    def test_date_combines_with_another_term(self):
+        base = self._mkdir()
+        a = self._make(base, '20260608', 'a.h5', sample_id='Widget A')
+        b = self._make(base, '20260608', 'b.h5', sample_id='Other')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        terms = self.si.split_terms('2026-06-08 widget')
+        self.assertTrue(idx.matches(a, terms))
+        self.assertFalse(idx.matches(b, terms))
+
+    def test_date_known_even_for_an_unreadable_file(self):
+        base = self._mkdir()
+        os.makedirs(os.path.join(base, '20260608'))
+        fp = os.path.join(base, '20260608', 'broken.h5')
+        with open(fp, 'w') as fh:
+            fh.write('not hdf5')
+        idx = self.si.ScanIndex(base)
+        idx.sync(save=False)
+        self.assertFalse(idx.entries[fp]['ok'])
+        self.assertTrue(idx.matches(fp, self.si.split_terms('20260608')))
+
+    def test_normalize_term_leaves_non_dates_alone(self):
+        # A looser pattern would rewrite ordinary numeric terms and break them.
+        for t in ('0.5', '1.2.3', 'pmoke', '20260608', '12mA', '2026',
+                  'a/b', '99-1-1', '2026-13-45'):
+            with self.subTest(term=t):
+                self.assertEqual(self.si.normalize_term(t), t)
+        self.assertEqual(self.si.normalize_term('2026/6/8'), '2026-06-08')
+        self.assertEqual(self.si.normalize_term('2026.6'), '2026-06')
+
     def test_matches_falls_back_to_filename_when_unindexed(self):
         idx = self.si.ScanIndex('/nowhere')
         self.assertTrue(idx.matches('/nowhere/20260901_alpha.h5',

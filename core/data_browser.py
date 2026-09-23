@@ -702,13 +702,18 @@ class DataBrowserPanel(QWidget):
         # already loaded for a file (sample, operator, notes, config name,
         # scan type), so "wu89" or "PMOKE" narrows the tree immediately.
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search  (sample, notes, operator, filename…)")
+        self.search_edit.setPlaceholderText("Search  (sample, notes, operator, date, filename…)")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._on_search_text)
         self.search_edit.setToolTip(
             "Filter the file tree. Matches the filename plus the sample, operator,\n"
             "notes, device, scan name/type, incidence and polarization recorded in\n"
             "the file. Space-separated terms must all match.\n"
+            "\n"
+            "Dates work too, year first: 20260608 or 2026-06-08 for one day,\n"
+            "202606 or 2026-06 for a month, 2026 for a year.  '2026-06 pmoke'\n"
+            "narrows that month to the PMOKE scans.\n"
+            "\n"
             "Searches every date folder, open or not — no file is opened to do it.")
         left_l.addWidget(self.search_edit)
 

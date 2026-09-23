@@ -5509,3 +5509,45 @@ found **0** of — collapsed folders were previously searchable by name only.
   archive end to end.
 - Both main windows constructed, refreshed, searched and closed offscreen
   against a throwaway `SAMBA_CONFIG_DIR` (§67 — never the live one).
+
+### Follow-up: search by date (v13.30, index version 3)
+
+A scan's date was the one thing the search could not find. The filename starts
+at `HHMMSS`, and no metadata attribute carries the date either — `scan_name` is
+just `DC_Hyst` — so it exists **only** as the name of the date folder, which the
+index did not record. Typing `20260608` matched nothing at all.
+
+`read_entry` now stores a `date` field built by `date_tokens(path)` from the
+parent folder, in **both** the compact and dashed spellings (`20260608
+2026-06-08`), so ordinary substring matching covers the whole range of what an
+operator types with no special-casing in the filter:
+
+| typed | matches |
+|---|---|
+| `20260608`, `2026-06-08`, `2026/6/8`, `2026-6-8` | that day |
+| `202606`, `2026-06` | that month |
+| `2026` | that year |
+| `2026-06 pmoke` | PMOKE scans in that month |
+
+`split_terms` canonicalises a date-shaped term through `normalize_term`, so the
+separator and zero-padding the operator happens to use stop mattering.
+`_DATE_TERM_RE` is deliberately strict (`^\d{4}[-/.]\d{1,2}([-/.]\d{1,2})?$`):
+a looser pattern would rewrite ordinary numeric terms — `0.5` → `0-5` — and
+break searching for them. Month **names** were considered and rejected: `may`
+is a substring of too many sample names to be safe in an AND-ed substring
+search.
+
+The date is path-derived, so it is recorded even for a file that cannot be
+opened (a broken scan stays findable by when it was taken) and is used in the
+not-yet-indexed fallback in `matches()` too.
+
+`INDEX_VERSION` 2 → 3 so existing caches rebuild and pick up the field —
+measured at 1.7 s for the 3697-file Green archive, once.
+
+**Verified** against the real archive through the real panel (10 checks): all
+four spellings of a probe day return exactly the 6 files that day holds, the
+month forms return exactly its 1600, the year form the whole year, `2026-08
+pmoke` narrows to 764, a future date returns nothing, exactly one date folder
+is left visible, and the search takes 6 ms. `test_runner.py` 246 → 251
+(five date cases including `normalize_term` leaving `0.5`, `1.2.3`, `a/b` and
+out-of-range `2026-13-45` untouched).

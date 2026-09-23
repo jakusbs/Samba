@@ -38,7 +38,7 @@ import h5py
 # Index format.  Bump when the stored fields change in a way that makes an
 # existing file useless — a mismatch rebuilds from scratch rather than trying
 # to migrate a cache that costs seconds to regenerate.
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 # Metadata attributes worth searching on.  Deliberately a small subset: the
 # index is loaded into memory in full, and these are the fields an operator
@@ -85,6 +85,48 @@ def _as_int(v, default: int = 0) -> int:
         return int(v)
     except Exception:
         return default
+
+
+# A scan's date is the name of the folder it sits in — the filename starts at
+# HHMMSS and no metadata attribute carries it — so without this a date is the
+# one thing the search cannot find.
+_DATE_DIR_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+# A date typed with separators, in the folder's own year-month-day order.
+# Deliberately strict: a looser pattern would rewrite ordinary numeric terms
+# ("0.5" → "0-5") and break searching for them.
+_DATE_TERM_RE = re.compile(r"^(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?$")
+
+
+def date_tokens(path: str) -> str:
+    """Searchable date text for a scan, from its date folder.
+
+    Both the compact and dashed spellings, so plain substring matching covers
+    the whole range of what an operator types: `20260608`, `2026-06-08`,
+    `202606` or `2026-06` for the month, `2026` for the year.
+    """
+    parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    m = _DATE_DIR_RE.match(parent)
+    if not m:
+        return ""
+    y, mo, d = m.groups()
+    return f"{y}{mo}{d} {y}-{mo}-{d}"
+
+
+def normalize_term(term: str) -> str:
+    """Canonicalise a date-shaped search term; leave everything else alone.
+
+    `2026/6/8` and `2026-6-8` both become `2026-06-08`, which is one of the
+    spellings `date_tokens` stores — so the separator and zero-padding the
+    operator happens to use stop mattering.
+    """
+    m = _DATE_TERM_RE.match(term)
+    if not m:
+        return term
+    y, mo, d = m.group(1), m.group(2), m.group(3)
+    out = f"{y}-{int(mo):02d}"
+    if d is not None:
+        out += f"-{int(d):02d}"
+    return out
 
 
 def index_path(save_dir: str, config_dir) -> str:
@@ -136,8 +178,10 @@ def read_entry(path: str, mtime: float, size: int) -> Dict:
     still being written keeps changing size and is therefore re-read until it
     is complete.
     """
+    # The date comes from the path, so it is recorded even for a file that
+    # cannot be opened — a broken scan stays findable by when it was taken.
     entry: Dict = {"mtime": mtime, "size": size, "ok": False,
-                   "name": os.path.basename(path)}
+                   "name": os.path.basename(path), "date": date_tokens(path)}
     try:
         with h5py.File(path, "r") as f:
             src = f.get("metadata", f)
@@ -166,7 +210,7 @@ def read_entry(path: str, mtime: float, size: int) -> Dict:
 
 def entry_blob(entry: Dict) -> str:
     """The lowercase text a search matches against."""
-    parts = [entry.get("name", "")]
+    parts = [entry.get("name", ""), entry.get("date", "")]
     for k in SEARCH_FIELDS:
         v = entry.get(k)
         if v:
@@ -175,7 +219,8 @@ def entry_blob(entry: Dict) -> str:
 
 
 def split_terms(text: str) -> List[str]:
-    return [t for t in (text or "").lower().split() if t]
+    """Search terms, with date-shaped ones canonicalised (see normalize_term)."""
+    return [normalize_term(t) for t in (text or "").lower().split() if t]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,5 +381,8 @@ class ScanIndex:
             return True
         blob = self._blobs.get(path)
         if blob is None:
-            blob = (fallback_name or os.path.basename(path or "")).lower()
+            # Not indexed yet: the name and the date are both free (the date is
+            # the folder), so only the file's own metadata is missing.
+            blob = " ".join((fallback_name or os.path.basename(path or ""),
+                             date_tokens(path or ""))).lower()
         return all(t in blob for t in terms)
