@@ -2336,6 +2336,7 @@ class CryoMainWindow(QMainWindow):
 
         self._sl_worker = ScanlistWorker(cfg_list, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
+                                         flip_order=sl["flip_order"],
                                          setup_name=self._active_setup_name,
                                          refocus_every_min=(
                                              self.sl_panel.refocus.interval_min()

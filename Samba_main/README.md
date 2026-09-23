@@ -150,8 +150,9 @@ Run a sequence of N identical scans with optional inter-scan modifications:
 
 | Option | Effect |
 |---|---|
-| **Relay flip** | Toggles the optical relay polarity between each scan (alternates +1/−1) |
-| **Field flip** | Negates the magnet current between each scan; auto-demagnetizes after the list |
+| **Relay flip** | Toggles the optical relay polarity between scans (alternates +1/−1) |
+| **Field flip** | Negates the magnet current between scans; auto-demagnetizes after the list |
+| **Switching** | Order the enabled flips visit the two states: `AB` (`A B A B …`, switch every cycle) or `ABBA` (`A B B A A B B A …`, switch in pairs). ABBA cancels a linear drift to first order in the A−B difference and halves the number of field reversals. |
 
 A `.txt` index file is written alongside the HDF5 files listing each scan's path, relay sign, and applied field.
 

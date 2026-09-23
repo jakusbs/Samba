@@ -70,7 +70,8 @@ Logs are written to `~/.config/moke_scan/logs/samba_cryo.log` (rotating, 2 MB x 
 
 **Bottom tabs:**
 - **Trajectory** — configure scan type, axes, sensors, and integration time
-- **Scanlist** — run the same scan N times with automatic field/relay flipping
+- **Scanlist** — run the same scan N times with automatic field/relay flipping, in `AB`
+  or `ABBA` order (ABBA halves the number of superconducting-magnet ramps)
 - **Data Browser** — browse and plot saved HDF5 files
 - **Script Console** — embedded Python REPL for ad-hoc automation
 - **Device Registry** — manage TANGO device paths used by sensors

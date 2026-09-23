@@ -53,6 +53,8 @@ _hw.fresh_proxy        = lambda path: (_FallbackProxy(), None)   # overridden pe
 _hw.safe_read          = lambda proxy, attr, **kw: (0.0, None)
 _hw.safe_write         = lambda proxy, attr, val, **kw: None
 _hw.demagnetize_magnet = MagicMock()
+_hw.is_sim_proxy       = lambda proxy: False      # workers.py polarity guard
+_hw.TANGO_AVAILABLE    = False
 sys.modules['hardware'] = _hw
 
 # ── Import runner after stubs are in place ────────────────────────────────────
@@ -1699,6 +1701,230 @@ class TestPolarityControlConfig(unittest.TestCase):
         a = self._meta_attrs({})
         self.assertNotIn("relay_flip", a)
         self.assertNotIn("field_flip", a)
+        self.assertNotIn("flip_order", a)
+
+    # ── Switching order (AB / ABBA) ──────────────────────────────────────────
+    def test_flip_order_defaults_to_ab(self):
+        cfg = self._fresh_config().make_default_config("scan")
+        self.assertEqual(cfg["flip_order"], "AB")
+
+    def test_flip_order_migration_backfills_ab(self):
+        """An old config has always switched on every cycle — AB keeps it
+        measuring exactly the same sequence."""
+        cfgmod = self._fresh_config()
+        old = {"_schema_version": 11, "scan_type": "SPATIAL"}
+        cfgmod._migrate_config(old)
+        self.assertEqual(old["flip_order"], "AB")
+        self.assertEqual(old["_schema_version"], cfgmod.SCHEMA_VERSION)
+
+    def test_flip_order_migration_preserves_abba(self):
+        cfgmod = self._fresh_config()
+        cfg = {"_schema_version": 11, "flip_order": "ABBA"}
+        cfgmod._migrate_config(cfg)
+        self.assertEqual(cfg["flip_order"], "ABBA")
+
+    def test_hdf5_records_flip_order(self):
+        a = self._meta_attrs({"relay_flip": True, "field_flip": True,
+                              "flip_order": "ABBA"})
+        self.assertEqual(str(a["flip_order"]), "ABBA")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17b. core/polarity.py — AB / ABBA switching order
+# ─────────────────────────────────────────────────────────────────────────────
+class TestFlipOrder(unittest.TestCase):
+    """The pure schedule: which cycle is A, which is B, and where the state
+    changes.  ScanlistWorker does nothing else to decide the polarity, so a
+    wrong answer here is a mis-labelled measurement."""
+
+    def _mod(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+        import polarity
+        return polarity
+
+    def _seq(self, order, n=8):
+        p = self._mod()
+        return "".join(p.phase_label(p.flip_phase(i, order)) for i in range(n))
+
+    def test_ab_alternates_every_cycle(self):
+        self.assertEqual(self._seq("AB"), "ABABABAB")
+
+    def test_abba_alternates_in_pairs(self):
+        self.assertEqual(self._seq("ABBA"), "ABBAABBA")
+
+    def test_abba_pattern_continues_past_the_first_quartet(self):
+        """The i=3→4 boundary is A→A: quartet 2 must not restart at B."""
+        self.assertEqual(self._seq("ABBA", 12), "ABBAABBAABBA")
+
+    def test_both_orders_are_balanced(self):
+        for order in ("AB", "ABBA"):
+            self.assertEqual(self._seq(order, 8).count("A"), 4, order)
+
+    def test_abba_halves_the_state_changes(self):
+        p = self._mod()
+        ab   = [i for i in range(8) if p.switches_before(i, "AB")]
+        abba = [i for i in range(8) if p.switches_before(i, "ABBA")]
+        self.assertEqual(ab,   [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(abba, [1, 3, 5, 7])
+
+    def test_cycle_zero_never_switches(self):
+        """The list starts in whatever state the hardware is already in."""
+        p = self._mod()
+        for order in ("AB", "ABBA"):
+            self.assertFalse(p.switches_before(0, order), order)
+
+    def test_unknown_order_falls_back_to_ab(self):
+        """Hand-edited JSON must not silently invent a schedule."""
+        p = self._mod()
+        for bad in ("", None, "abab", "BAAB", 7):
+            self.assertEqual(p.normalize_order(bad), "AB", repr(bad))
+        self.assertEqual(self._seq("nonsense"), "ABABABAB")
+
+    def test_order_is_case_insensitive(self):
+        self.assertEqual(self._seq("abba"), "ABBAABBA")
+
+
+def _import_workers():
+    """Import core/scan/workers.py with the Qt signals faked out.
+
+    The module-level PyQt6 stub makes pyqtSignal return None, which is enough
+    for runner.py — it declares none.  ScanlistWorker declares a dozen and
+    emits from all of them, so a no-op signal object is swapped in for the
+    duration of the import (class attributes bind at class-creation time).
+    """
+    class _FakeSignal:
+        def emit(self, *a, **kw):    pass
+        def connect(self, *a, **kw): pass
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(root, 'core', 'scan'),
+              os.path.join(root, 'core'), root):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    import importlib
+    old = _qt.QtCore.pyqtSignal
+    _qt.QtCore.pyqtSignal = lambda *a, **kw: _FakeSignal()
+    try:
+        sys.modules.pop('workers', None)
+        return importlib.import_module('workers')
+    finally:
+        _qt.QtCore.pyqtSignal = old
+
+
+class TestScanlistFlipSchedule(unittest.TestCase):
+    """ScanlistWorker driven through a whole list against fake hardware.
+
+    Checks the thing the operator actually sees: which relay state each scan
+    is measured at, how many times the magnet is reversed, and what the
+    scanlist .txt claims about it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = _import_workers()
+
+    def _run_list(self, n, order, relay_flip=True, field_flip=True,
+                  relay0=0, field0=1.0):
+        """Run n cycles and return (relay states per scan, field per scan)."""
+        import tempfile
+        W = self.W
+
+        class _Relay:
+            def __init__(self, state):
+                self.state = state; self.writes = []
+            def read_attribute(self, attr):
+                return types.SimpleNamespace(value=self.state)
+            def write_attribute(self, attr, val):
+                self.state = int(val); self.writes.append(int(val))
+
+        relay  = _Relay(relay0)
+        magnet = object()
+        field  = {"v": field0, "writes": 0}
+
+        def _fresh(dev):
+            return (relay if dev == "relay/dev" else magnet), None
+        def _read(proxy, attr, **kw):
+            return (field["v"], None) if proxy is magnet else (0.0, None)
+        def _write(proxy, attr, val, **kw):
+            if proxy is magnet:
+                field["v"] = val; field["writes"] += 1
+            return None
+
+        class _Runner:
+            def __init__(self, cfg, setup): pass
+            def run(self, cbs):             return "/data/scan.h5"
+            def abort(self):                pass
+            def pause(self):                pass
+            def resume(self):               pass
+            def is_paused(self):            return False
+
+        setup = {"relay_device": "relay/dev", "relay_attr": "switchvar",
+                 "magnet_device": "magnet/dev",
+                 "save_dir": os.path.join(tempfile.mkdtemp(), "data"),
+                 "demagnetize_after_scan": False}
+
+        w = W.ScanlistWorker({"name": "s_trace"}, setup, n, "list",
+                             relay_flip, field_flip, flip_order=order)
+        # The settle poll is real time against a fake magnet that arrives
+        # instantly; the schedule is what is under test, not the ramp.
+        w._wait_field_settled = lambda *a, **kw: None
+
+        orig = (W.fresh_proxy, W.safe_read, W.safe_write)
+        W.fresh_proxy, W.safe_read, W.safe_write = _fresh, _read, _write
+        old_runner, W.ScanRunner = W.ScanRunner, _Runner
+        try:
+            w._run_list()
+        finally:
+            W.fresh_proxy, W.safe_read, W.safe_write = orig
+            W.ScanRunner = old_runner
+
+        # setup_name is "", so the worker writes <save_dir>/ScanLists/<name>.txt
+        self._last_txt = os.path.join(setup["save_dir"], "ScanLists", "list.txt")
+        return relay.writes, field["writes"]
+
+    # ── Relay ────────────────────────────────────────────────────────────────
+    def test_relay_ab_alternates_every_scan(self):
+        writes, _ = self._run_list(8, "AB", field_flip=False)
+        self.assertEqual(writes, [0, 1, 0, 1, 0, 1, 0, 1])
+
+    def test_relay_abba_alternates_in_pairs(self):
+        writes, _ = self._run_list(8, "ABBA", field_flip=False)
+        self.assertEqual(writes, [0, 1, 1, 0, 0, 1, 1, 0])
+
+    def test_relay_schedule_starts_from_the_device_state(self):
+        """Cycle 0 is whatever the relay already reads back — the pattern is
+        relative to it, not to a hard-coded 0."""
+        writes, _ = self._run_list(8, "ABBA", field_flip=False, relay0=1)
+        self.assertEqual(writes, [1, 0, 0, 1, 1, 0, 0, 1])
+
+    def test_relay_held_when_flip_disabled(self):
+        writes, _ = self._run_list(4, "ABBA", relay_flip=False,
+                                   field_flip=False, relay0=1)
+        self.assertEqual(writes, [1, 1, 1, 1])
+
+    # ── Field ────────────────────────────────────────────────────────────────
+    def test_field_ab_reverses_on_every_boundary(self):
+        _, flips = self._run_list(8, "AB", relay_flip=False)
+        self.assertEqual(flips, 7)
+
+    def test_field_abba_reverses_half_as_often(self):
+        """The B→B and A→A boundaries leave the magnet alone — the point of
+        ABBA on a slow (superconducting) magnet."""
+        _, flips = self._run_list(8, "ABBA", relay_flip=False)
+        self.assertEqual(flips, 4)
+
+    def test_field_not_touched_when_flip_disabled(self):
+        _, flips = self._run_list(8, "ABBA", field_flip=False)
+        self.assertEqual(flips, 0)
+
+    # ── Provenance ───────────────────────────────────────────────────────────
+    def test_txt_records_the_order(self):
+        self._run_list(4, "ABBA")
+        with open(self._last_txt) as f:
+            head = f.read()
+        self.assertIn("order=ABBA", head)
+        self.assertIn("relay_flip=1", head)
 
 
 class TestNStepPair(unittest.TestCase):

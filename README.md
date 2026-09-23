@@ -227,9 +227,12 @@ is running.
 The Scanlist tab queues many scans of the active config with, per entry, a relay state
 and a field polarity. Between scans the worker switches the relay and/or flips the
 magnet current, then waits for the field to actually settle (rate-of-change polling — no
-assumed target). The finished list is written as a `.txt` scanlist file (one line per
-scan: filename, relay sign, field) which is the input to the analysis pipeline. Aborted
-scans never enter the `.txt`, so the analysis never averages a truncated line.
+assumed target). The **switching order** is selectable: `AB` alternates on every cycle,
+`ABBA` alternates in pairs (`A B B A A B B A …`), which cancels a linear drift to first
+order in the A−B difference and halves the number of field reversals. The finished list
+is written as a `.txt` scanlist file (one line per scan: filename, relay sign, field)
+which is the input to the analysis pipeline. Aborted scans never enter the `.txt`, so
+the analysis never averages a truncated line.
 
 ---
 

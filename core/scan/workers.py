@@ -14,6 +14,8 @@ from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
                       safe_write, demagnetize_magnet, TANGO_AVAILABLE)
 from core.scan.runner import ScanRunner
 from current_sweep import refocus_due
+from polarity import (ORDER_AB, flip_phase, normalize_order, order_preview,
+                      phase_label, switches_before)
 
 
 class ScanWorker(QThread):
@@ -77,6 +79,7 @@ class ScanlistWorker(QThread):
 
     def __init__(self, cfg_or_list, setup: dict, n_scans: int,
                  list_name: str, relay_flip: bool, field_flip: bool,
+                 flip_order: str = ORDER_AB,
                  setup_name: str = "",
                  refocus_every_min: float = 0.0,
                  last_focus_t: Optional[float] = None):
@@ -87,9 +90,17 @@ class ScanlistWorker(QThread):
         self.setup = setup; self.n_scans = n_scans
         self.list_name = list_name
         self.relay_flip = relay_flip; self.field_flip = field_flip
+        # Switching order of the two polarity states — AB (every cycle) or
+        # ABBA (in pairs, cancelling linear drift).  See core/polarity.py.
+        self.flip_order = normalize_order(flip_order)
         self.setup_name = setup_name
         self._abort = False; self._paused = False; self._runner = None
+        # Relay state of cycle 0 — whatever the device is already in.  Every
+        # later cycle is this XOR the cycle's phase, so the schedule is a
+        # function of the cycle index and cannot drift out of step the way a
+        # running toggle does when a cycle is skipped.
         self._relay_state = 0
+        self._relay_base  = 0
         # Periodic autofocus.  last_focus_t is the run-wide timestamp the
         # host keeps, so a refocus the current sweep just did counts here
         # too and the two never autofocus twice in a row.
@@ -263,6 +274,13 @@ class ScanlistWorker(QThread):
             self.relay_changed.emit(self._relay_state)
         except Exception:
             self._relay_state = 0
+        self._relay_base = self._relay_state
+
+        if self.relay_flip or self.field_flip:
+            _prev = order_preview(self.flip_order, min(self.n_scans, 8))
+            if self.n_scans > 8:
+                _prev += " …"
+            self.log_msg.emit(f"Polarity order {self.flip_order}:  {_prev}")
 
         base     = os.path.expanduser(self.setup.get("save_dir", "~/moke_data"))
         # Place ScanLists alongside the data dir (not inside it).
@@ -287,10 +305,20 @@ class ScanlistWorker(QThread):
         scan_idx = 0   # global counter across all cycles × directions
         for i in range(self.n_scans):
             if self._abort: break
+            # ── Polarity state for this cycle (0 = A, 1 = B) ──────────────────
+            # Cycle 0 is A by definition: the list starts in whatever state
+            # the hardware is already in.
+            phase = flip_phase(i, self.flip_order)
+            if self.relay_flip:
+                self._relay_state = self._relay_base ^ phase
+
             # ── Field flip ────────────────────────────────────────────────────
-            # Skip the flip on cycle 0; flipping starts from cycle 1 onward.
-            # Flip happens once per cycle, BEFORE trace AND retrace.
-            if self.field_flip and i > 0:
+            # Reverse only when this cycle's phase differs from the previous
+            # one's: every boundary in AB order (the historic behaviour), but
+            # only every other one in ABBA, which leaves the magnet alone on
+            # the B→B and A→A boundaries.  Flip happens once per cycle,
+            # BEFORE trace AND retrace.
+            if self.field_flip and switches_before(i, self.flip_order):
                 self._flip_field(mag_p, mag_cur, mag_fld)
                 if self._abort: break
 
@@ -318,8 +346,10 @@ class ScanlistWorker(QThread):
                 elif name.endswith("_retrace"): dir_lbl = " [retrace]"
                 else:                           dir_lbl = ""
 
+                pol_lbl = (f" [{self.flip_order}:{phase_label(phase)}]"
+                           if (self.relay_flip or self.field_flip) else "")
                 self.status_msg.emit(
-                    f"Cycle {i+1}/{self.n_scans}{dir_lbl}  "
+                    f"Cycle {i+1}/{self.n_scans}{dir_lbl}{pol_lbl}  "
                     f"relay={'1(−1)' if self._relay_state else '0(+1)'}  "
                     f"field={field_T:+.3f} T")
 
@@ -353,7 +383,6 @@ class ScanlistWorker(QThread):
                 self._maybe_refocus()
 
             self.list_progress.emit(i + 1, self.n_scans)
-            if self.relay_flip: self._relay_state = 1 - self._relay_state
 
         # Auto-demagnetize after scanlist — disabled for superconducting magnets
         # (set "demagnetize_after_scan": false in setup to suppress)
@@ -365,6 +394,11 @@ class ScanlistWorker(QThread):
         if results:
             with open(txt_path, "w") as f:
                 f.write(f"# Scanlist: {self.list_name}  {datetime.now().isoformat()}\n")
+                # Comment lines are skipped by the analysis reader, so this is
+                # free provenance: which flips ran, and in which order.
+                f.write(f"# polarity: relay_flip={int(bool(self.relay_flip))} "
+                        f"field_flip={int(bool(self.field_flip))} "
+                        f"order={self.flip_order}\n")
                 f.write("# path\trelay_sign\tfield_T\n")
                 for fn, rs, fT in results:
                     f.write(f"{fn}\t{rs:+d}\t{fT:.6f}\n")

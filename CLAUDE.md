@@ -5192,3 +5192,95 @@ the `safe_read_str` treatment §67 gave the panels.
   flag, `maxAmplitude` clamp honoured, negative taken as magnitude, cap
   lowered while running re-arms, `maxAmplitude` write does not start a wave
   while idle.
+
+---
+
+## 78. Recent Changes (September 2026) — ABBA Switching Order for the Scanlist Flips
+
+Branch `claude/abba-switching-order` (209 tests). App version → **v13.27**.
+Both apps: the Scanlist tab's "Polarity control" group gained a third toggle,
+**Switching: AB / ABBA**, deciding the order in which the enabled flips visit
+the two polarity states.
+
+### Why
+A scanlist alternated on **every** cycle boundary and only that way:
+
+```
+AB     A B A B A B A B      every A sits earlier than the B after it
+ABBA   A B B A A B B A      each A→B step is paired with a B→A step
+```
+
+Both orders spend half the list in each state, so the analysis still sees the
+same two groups (it groups by `relay_sign × sign(field)`, from columns 2–3 of
+the scanlist `.txt` — the *order* is invisible to it). The difference is
+**drift**: in AB order a signal drifting linearly in time biases the whole A
+group one way and the whole B group the other, and the A−B difference carries
+the drift in full. ABBA cancels a linear drift to first order within each
+quartet.
+
+Second, unequal benefit: ABBA switches on **half** the boundaries, so the
+magnet is reversed 4× instead of 7× over an 8-scan list. On the Cryo
+superconducting magnet that is the difference between one slow ramp per scan
+and one per two scans.
+
+### `core/polarity.py` — new, pure, testable
+The schedule is a pure function of the cycle index, in a Qt/TANGO-free module
+next to `core/nstep.py` and `core/current_sweep.py`, with a re-export shim in
+each app directory (`Samba_main/polarity.py`, `Cryo/polarity.py`) following
+the §74 rule:
+
+- `flip_phase(i, order)` → 0 (A) / 1 (B). ABBA is `((i + 1) // 2) % 2`, not a
+  4-entry lookup: written as a table the i=3→4 boundary (A→A) turns into a
+  spurious switch when the pattern repeats.
+- `switches_before(i, order)` → does cycle *i* differ from *i−1*. Cycle 0 is
+  never a switch: the list starts in whatever state the hardware is in, and
+  that state *is* "A" for the run.
+- `normalize_order()` — anything unrecognised (absent key, hand-edited JSON,
+  wrong case) falls back to `AB`. A wrong answer here silently changes what
+  the magnet does, so an unknown value takes the historic behaviour.
+
+### `ScanlistWorker` — schedule, not a running toggle
+`core/scan/workers.py` took a `flip_order` argument and stopped tracking the
+relay with `self._relay_state = 1 - self._relay_state` at the end of each
+cycle. The relay state is now derived per cycle from the state the device was
+*read* at (`self._relay_base ^ phase`), which cannot drift out of step the way
+a running toggle does when a cycle is skipped. The field flip is gated on
+`switches_before()` instead of `i > 0` — in AB order that is every boundary,
+i.e. exactly the old behaviour.
+
+The order is logged once at the start (`Polarity order ABBA:  A B B A A B B A …`),
+shown per cycle in the status line (`Cycle 3/8 [ABBA:B]`), and written into
+the scanlist `.txt` as a comment line — free provenance, since
+`_iter_scanlist` in the analysis skips every `#` line wherever it sits.
+
+### Persistence + metadata
+- Config key **`flip_order`** (`"AB"` / `"ABBA"`), round-tripped through
+  `ScanlistPanel.load_config()` / `get_config_partial()` / `get_settings()`
+  in both apps, and saved on toggle through the existing `polarity_changed`
+  signal.
+- `_load_flip()` gained `on_text` / `off_text` so the order button reuses the
+  same silent-load-plus-explicit-caption path as the two flip buttons.
+- **Schema v11→v12** with `_migrate_v11_to_v12` backfilling `"AB"`, so every
+  existing config runs precisely the sequence it always did.
+- `_write_hw_metadata` writes `flip_order` next to `relay_flip` / `field_flip`
+  — under the same rule, only when the key is present, so a single scan (which
+  switches nothing) has all three absent rather than claiming a configuration
+  that never applied.
+
+### Tests / verification
+- `test_runner.py` +20 → **209**. `TestFlipOrder` covers the pure schedule
+  (both patterns, the repeat past the first quartet, balance, half the state
+  changes, cycle 0, junk/case handling). `TestScanlistFlipSchedule` drives the
+  **real** `ScanlistWorker._run_list` through 8-cycle lists against a fake
+  relay/magnet — relay writes `[0,1,0,1,…]` vs `[0,1,1,0,0,1,1,0]`, the
+  pattern starting from a device that reads back 1, 7 vs 4 field reversals,
+  nothing written when a flip is off, and `order=ABBA` in the `.txt`. Importing
+  the worker needs a signal object rather than the suite's `pyqtSignal → None`
+  stub; `_import_workers()` swaps one in for the import only.
+- GUI harness (36 checks, not committed): both apps' **real** `ScanlistPanel`
+  — default AB, caption tracking, `polarity_changed` on user toggle and
+  silence on `load_config`, missing/lower-case/junk values, and a save/load
+  round-trip through the real config defaults. Rendered offscreen to confirm
+  the three-button group still lines up with the Scanlist box.
+- `py_compile` clean; both entry points import.
+

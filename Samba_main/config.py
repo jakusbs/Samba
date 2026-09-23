@@ -11,6 +11,7 @@ from typing import Dict, List, TypedDict, Optional
 # also loaded by file path in the test suite, where Samba_main/ is not on
 # sys.path but the repo root is.
 from core.current_sweep import CURRENT_SWEEP_DEFAULTS, REFOCUS_DEFAULTS
+from core.polarity import ORDER_AB
 
 log = logging.getLogger(__name__)
 
@@ -18,10 +19,10 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.26"
+APP_VERSION = "13.27"
 
 # Current schema version — bump when adding new fields
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI / plot constants
@@ -248,8 +249,9 @@ def make_default_config(name: str = "scan_x") -> dict:
         # Scanlist polarity control — alternate the optical relay and/or the
         # magnet polarity between cycles.  The analysis groups scans by
         # relay_sign × sign(field), so with neither enabled every scan in a
-        # list is measured at one polarity.
-        "relay_flip": False, "field_flip": False,
+        # list is measured at one polarity.  flip_order picks the switching
+        # order: "AB" every cycle, "ABBA" in pairs (see core/polarity.py).
+        "relay_flip": False, "field_flip": False, "flip_order": ORDER_AB,
         # Current sweep — repeat the whole scanlist at several excitation
         # currents, refocusing between them (see core/current_sweep.py).
         **CURRENT_SWEEP_DEFAULTS,
@@ -471,6 +473,13 @@ def _migrate_v10_to_v11(cfg: dict):
                    REFOCUS_DEFAULTS["refocus_z_offset"])
 
 
+def _migrate_v11_to_v12(cfg: dict):
+    """v11→v12: Add the scanlist polarity switching order.  "AB" is the
+    historic behaviour — the enabled flips switch on every cycle boundary —
+    so an existing config runs exactly as it did before."""
+    cfg.setdefault("flip_order", ORDER_AB)
+
+
 _MIGRATIONS = [
     (1, _migrate_v0_to_v1),
     (2, _migrate_v1_to_v2),
@@ -483,6 +492,7 @@ _MIGRATIONS = [
     (9, _migrate_v8_to_v9),
     (10, _migrate_v9_to_v10),
     (11, _migrate_v10_to_v11),
+    (12, _migrate_v11_to_v12),
 ]
 
 

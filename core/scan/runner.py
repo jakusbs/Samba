@@ -214,6 +214,10 @@ def _write_hw_metadata(meta, cfg: dict) -> None:
                 meta.attrs[_pk] = bool(v)
             except Exception:
                 _wsa(meta, _pk, str(v))
+    # Switching order of the flips: "AB" (every cycle) or "ABBA" (in pairs).
+    # Same rule — absent on a single scan, which switches nothing.
+    if cfg.get("flip_order") is not None:
+        _wsa(meta, "flip_order", cfg.get("flip_order"))
     # Ferromagnet & full-stack thickness [nm] — for the SOT / spin-Hall
     # efficiency analysis (J = Ic/(w·t_stack), ξ_DL uses t_FM).
     for _tk in ("fm_thickness_nm", "t_stack_nm"):

@@ -11,6 +11,7 @@ from typing import Dict, List
 # dependency-free, and this keeps the defaults, the migration and the widget
 # from drifting apart.  See Samba_main/config.py for the same import.
 from core.current_sweep import CURRENT_SWEEP_DEFAULTS, REFOCUS_DEFAULTS
+from core.polarity import ORDER_AB
 
 
 def _sanitize(obj):
@@ -325,9 +326,12 @@ def make_default_config(name: str = "scan_x") -> dict:
         "act2_directions": [[-10.0, 10.0]],
         "adaptive_settle_enabled": False,
         "adaptive_settle_k": 0.05,
-        # Scanlist polarity control (persisted; was session-only UI state)
+        # Scanlist polarity control (persisted; was session-only UI state).
+        # flip_order picks the switching order of the enabled flips: "AB"
+        # every cycle, "ABBA" in pairs (see core/polarity.py).
         "relay_flip": False,
         "field_flip": False,
+        "flip_order": ORDER_AB,
         # Current sweep — repeat the whole scanlist at several excitation
         # currents, refocusing between them (see core/current_sweep.py).
         **CURRENT_SWEEP_DEFAULTS,
@@ -446,9 +450,11 @@ def _migrate_config(cfg: dict):
         cfg["act2_directions"] = [[cfg.get("act2_start", -10.0), cfg.get("act2_stop", 10.0)]]
     cfg.setdefault("adaptive_settle_enabled", False)
     cfg.setdefault("adaptive_settle_k", 0.05)
-    # Polarity control — old configs keep the historic "starts OFF" behaviour
+    # Polarity control — old configs keep the historic "starts OFF" behaviour,
+    # and "AB" order, which is what they have always run
     cfg.setdefault("relay_flip", False)
     cfg.setdefault("field_flip", False)
+    cfg.setdefault("flip_order", ORDER_AB)
     # Current sweep — disabled on old configs, so one plain scanlist runs
     for _k, _v in CURRENT_SWEEP_DEFAULTS.items():
         cfg.setdefault(_k, _v)

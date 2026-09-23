@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from panels._widgets import NoScrollSpinBox, NoScrollDoubleSpinBox, MokeMetadataGroup
 from panels.hardware_panel import HardwarePanel
 from current_sweep_ui import CurrentSweepGroup, RefocusGroup
+from polarity import ORDER_AB, ORDER_ABBA, normalize_order, order_preview
 
 
 class ScanlistPanel(QWidget):
@@ -30,8 +31,9 @@ class ScanlistPanel(QWidget):
         root = QVBoxLayout(self); root.setContentsMargins(8, 6, 8, 6); root.setSpacing(6)
 
         # ── Top row: polarity + scanlist + current sweep ─────────────────────
-        # Both left-hand boxes are two rows tall so they line up: the polarity
-        # flips stack, and the active config shares row 0 with N scans.
+        # The left-hand boxes line up at the top: the polarity flips stack
+        # above the switching order, and the active config shares row 0 with
+        # N scans.
         top_row = QHBoxLayout(); top_row.setSpacing(8)
 
         pg = QGroupBox("Polarity control"); pl = QVBoxLayout(pg)
@@ -40,9 +42,21 @@ class ScanlistPanel(QWidget):
         self.relay_flip_btn.toggled.connect(lambda c: self.relay_flip_btn.setText("Relay flip: ON" if c else "Relay flip: OFF"))
         self.field_flip_btn = QPushButton("Field flip: OFF"); self.field_flip_btn.setCheckable(True)
         self.field_flip_btn.toggled.connect(lambda c: self.field_flip_btn.setText("Field flip: ON" if c else "Field flip: OFF"))
-        for _b in (self.relay_flip_btn, self.field_flip_btn):
+        # Switching order of whichever flips are enabled — see core/polarity.py.
+        self.abba_btn = QPushButton(f"Switching: {ORDER_AB}"); self.abba_btn.setCheckable(True)
+        self.abba_btn.toggled.connect(lambda c: self.abba_btn.setText(
+            f"Switching: {ORDER_ABBA if c else ORDER_AB}"))
+        self.abba_btn.setToolTip(
+            f"Order the enabled flips visit the two polarity states:\n\n"
+            f"  {ORDER_AB}    {order_preview(ORDER_AB)} …\n"
+            f"  {ORDER_ABBA}  {order_preview(ORDER_ABBA)} …\n\n"
+            "ABBA pairs every A→B step with a B→A step, so a linear drift "
+            "cancels to first order in the A−B difference.\nIt also halves "
+            "the number of field reversals, which matters on a slow magnet.")
+        for _b in (self.relay_flip_btn, self.field_flip_btn, self.abba_btn):
             _b.toggled.connect(lambda _: self.polarity_changed.emit())
         pl.addWidget(self.relay_flip_btn); pl.addWidget(self.field_flip_btn)
+        pl.addWidget(self.abba_btn)
         # Boxes expand with the tab (so no gap opens between the rows) but
         # their contents stay pinned to the top instead of floating.
         pl.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -154,7 +168,8 @@ class ScanlistPanel(QWidget):
 
     # ── Polarity control persistence ──────────────────────────────────────────
     @staticmethod
-    def _load_flip(btn, label: str, on: bool):
+    def _load_flip(btn, label: str, on: bool,
+                   on_text: str = "ON", off_text: str = "OFF"):
         """Set a polarity toggle without emitting toggled().
 
         The caption is refreshed explicitly: the toggled() handler that
@@ -164,7 +179,11 @@ class ScanlistPanel(QWidget):
         blocked = btn.blockSignals(True)
         btn.setChecked(on)
         btn.blockSignals(blocked)
-        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+        btn.setText(f"{label}: {on_text if on else off_text}")
+
+    def flip_order(self) -> str:
+        """"AB" or "ABBA" — the switching order of the enabled flips."""
+        return ORDER_ABBA if self.abba_btn.isChecked() else ORDER_AB
 
     def load_config(self, cfg: dict):
         """Restore the polarity toggles and current sweep (silently)."""
@@ -172,6 +191,9 @@ class ScanlistPanel(QWidget):
                         bool(cfg.get("relay_flip", False)))
         self._load_flip(self.field_flip_btn, "Field flip",
                         bool(cfg.get("field_flip", False)))
+        self._load_flip(self.abba_btn, "Switching",
+                        normalize_order(cfg.get("flip_order")) == ORDER_ABBA,
+                        on_text=ORDER_ABBA, off_text=ORDER_AB)
         self.cur_sweep.load_values(cfg)
         self.refocus.load_values(cfg)
         self.apply_axis_info(cfg)
@@ -181,6 +203,7 @@ class ScanlistPanel(QWidget):
         d = {
             "relay_flip": self.relay_flip_btn.isChecked(),
             "field_flip": self.field_flip_btn.isChecked(),
+            "flip_order": self.flip_order(),
         }
         d.update(self.cur_sweep.get_values())
         d.update(self.refocus.get_values())
@@ -192,6 +215,7 @@ class ScanlistPanel(QWidget):
             "list_name":      self.sl_name.text().strip() or "scanlist",
             "relay_flip":     self.relay_flip_btn.isChecked(),
             "field_flip":     self.field_flip_btn.isChecked(),
+            "flip_order":     self.flip_order(),
             "magnet_current": self.hw.field_spin.value(),
             "metadata":       self.meta.get_values(),
         }
