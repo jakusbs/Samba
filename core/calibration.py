@@ -26,14 +26,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
-from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+from core.plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
                            recent_symmetric_ylim, SCALE_RECENT,
                            RECENT_WINDOW)
-from theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
+from core.theme import PLOT_LEFT_COLORS, PLOT_RIGHT_COLORS
 
-from hardware import (fresh_proxy, is_sim_proxy, get_proxy, safe_read,
+from core.hardware import (fresh_proxy, is_sim_proxy, get_proxy, safe_read,
                       safe_write, trigger_and_read)
 
 

@@ -5,12 +5,23 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.13']
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SAMBA_CONFIG_DIR: ${{ runner.temp }}/samba-config
+      XDG_CONFIG_HOME: ${{ runner.temp }}/samba-xdg
+      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-      # PyQt6 / pytango are stubbed by test_runner.py — only the numeric
-      # stack is needed, keeping CI fast and hardware-free.
-      - run: pip install numpy h5py
+          python-version: ${{ matrix.python }}
+      - run: pip install '.[gui,dev]'
+      - run: ruff check .
+      # Keep stubbed engine tests in a separate process from real Qt tests.
       - run: python test_runner.py -v
+      - run: python -m unittest discover -s tests -v
+      - run: python tests/smoke_application.py main
+      - run: python tests/smoke_application.py cryo

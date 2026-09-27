@@ -11,7 +11,7 @@ Each sync runs in a daemon thread.  The actual file I/O is done in a
 FUSE call can be killed rather than blocking the thread forever.
 
 Usage:
-    from server_sync import sync_setup
+    from core.server_sync import sync_setup
     sync_setup(setup_name, setup_dict, done_cb=lambda ok: ...)
 """
 
@@ -26,72 +26,16 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT_S = 60  # kill the copy process if it hangs longer than this
 
-# Python source run inside the child process.
-# sys.argv[1] is a JSON payload; stdout is a JSON result line.
-_WORKER_SRC = r"""
-import sys, os, shutil, json
-from pathlib import Path
+# Serialise requests to a destination inside this application. The worker also
+# uses unique sidecars, so a different application cannot collide with them.
+_sync_locks = {}
+_sync_locks_guard = threading.Lock()
 
-def _atomic_copy(src, dst):
-    # Copy via a .part sidecar, then rename into place.
-    # A direct copyfile to the NAS leaves a truncated file under the real name
-    # if the transfer is interrupted -- and this worker is SIGKILLed after a
-    # timeout, so that happens whenever the share is slow.  Until the next sync
-    # notices the size mismatch, that partial file looks exactly like data.
-    # os.replace is atomic within a filesystem, so a reader sees either the old
-    # file or the complete new one.  copyfile (not copy2) because SMB mounts
-    # reject the utime() that copy2 makes afterwards.
-    tmp = dst.with_name(dst.name + '.part')
-    try:
-        shutil.copyfile(str(src), str(tmp))
-        os.replace(str(tmp), str(dst))
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
-def sync_dir(src, dst):
-    sp = Path(src)
-    if not sp.exists():
-        return 0, 0
-    dp = Path(dst)
-    dp.mkdir(parents=True, exist_ok=True)
-    copied = skipped = 0
-    for f in sorted(sp.rglob('*')):
-        if not f.is_file():
-            continue
-        if f.name.endswith('.part'):
-            continue                    # our own interrupted transfer
-        df = dp / f.relative_to(sp)
-        df.parent.mkdir(parents=True, exist_ok=True)
-        if not df.exists() or df.stat().st_size != f.stat().st_size:
-            _atomic_copy(f, df)
-            copied += 1
-        else:
-            skipped += 1
-    return copied, skipped
-
-def sync_file(src, dst_dir):
-    sp = Path(src)
-    if not sp.is_file():
-        return
-    dp = Path(dst_dir)
-    dp.mkdir(parents=True, exist_ok=True)
-    df = dp / sp.name
-    if not df.exists() or df.stat().st_size != sp.stat().st_size:
-        _atomic_copy(sp, df)
-
-args  = json.loads(sys.argv[1])
-lines = []
-for d in args.get('dirs', []):
-    c, s = sync_dir(d['src'], d['dst'])
-    lines.append(f"{d['src']}: {c} copied, {s} skipped")
-for f in args.get('files', []):
-    sync_file(f['src'], f['dst'])
-print(json.dumps({'ok': True, 'log': lines}))
-"""
+def _destination_lock(dirs, files):
+    key = tuple(sorted({os.path.realpath(d["dst"]) for d in dirs + files}))
+    with _sync_locks_guard:
+        return _sync_locks.setdefault(key, threading.Lock())
 
 
 def _run_worker(dirs: list, files: list) -> bool:
@@ -102,18 +46,21 @@ def _run_worker(dirs: list, files: list) -> bool:
     """
     payload = json.dumps({'dirs': dirs, 'files': files})
     try:
-        r = subprocess.run(
-            [sys.executable, '-c', _WORKER_SRC, payload],
-            capture_output=True, text=True, timeout=_TIMEOUT_S,
-        )
+        with _destination_lock(dirs, files):
+            r = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(__file__),
+                                             "sync_worker.py"), payload],
+                capture_output=True, text=True, timeout=_TIMEOUT_S,
+            )
         if r.returncode == 0:
             try:
                 result = json.loads(r.stdout.strip())
                 for line in result.get('log', []):
                     log.info('server_sync: %s', line)
-            except Exception:
-                pass
-            return True
+                return bool(result.get("ok", False))
+            except (ValueError, TypeError):
+                log.warning("server_sync: invalid worker response")
+                return False
         log.warning('server_sync failed (exit %d): %s',
                     r.returncode, (r.stderr or r.stdout)[:400])
         return False
@@ -129,7 +76,7 @@ def sync_setup(setup_name: str, setup: dict, done_cb=None) -> None:
     """Start a background sync for *setup_name*.
 
     done_cb(ok: bool) is called from the background thread when finished;
-    use QTimer.singleShot(0, ...) on the Qt side to marshal to the GUI thread.
+    emit a queued Qt signal to marshal updates to the GUI thread.
     Does nothing if server_sync_dir is empty or not set.
     """
     server_root = setup.get('server_sync_dir', '').strip().rstrip('/')

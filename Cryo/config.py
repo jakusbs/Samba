@@ -2,7 +2,7 @@
 config.py — Samba v3
 Constants, hardware defaults, scan config schema, and JSON persistence.
 """
-import copy, json, os
+import copy, json, os, shutil
 import numpy as np
 from pathlib import Path
 from typing import Dict, List
@@ -545,28 +545,7 @@ def load_setup(name: str) -> dict:
     return d
 
 def save_setup(name: str, data: dict):
-    """Save setup config to JSON atomically (write-to-tmp, then rename).
-
-    Writing directly to the final path risks partial-write corruption if the
-    process is interrupted mid-write (power loss, OOM kill, etc.).  Using a
-    temporary sibling file and os.replace() gives an atomic swap on POSIX
-    systems, so the reader always sees either the old complete file or the new
-    complete file — never a half-written one.
-    """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONFIG_DIR / f"{name}.json"
-    tmp_path = CONFIG_DIR / f"{name}.json.tmp"
-    clean = _sanitize({k: v for k, v in data.items() if k != "_load_status"})
-    try:
-        with open(tmp_path, "w") as f:
-            json.dump(clean, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except Exception:
-        # Clean up the temp file if something went wrong before the rename
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
+    """Atomically save a setup; propagate failures to the UI."""
+    from core.persistence import atomic_write_json
+    clean = {k: v for k, v in data.items() if k != "_load_status"}
+    atomic_write_json(CONFIG_DIR / f"{name}.json", _sanitize(clean))

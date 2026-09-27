@@ -34,7 +34,7 @@ class RightPanel(QWidget):
         # ── Header ────────────────────────────────────────────────────────────
         hdr = QWidget(); hl = QHBoxLayout(hdr)
         hl.setContentsMargins(4, 0, 4, 0); hl.setSpacing(6)
-        for txt, w in [("✓", 18), ("Device", 0), ("Channel", 100), ("Axis", 65)]:
+        for txt, w in [("Channels · device / signal", 0)]:
             lb = QLabel(txt); lb.setStyleSheet("color:#6c7086;font-size:10px;")
             if w: lb.setFixedWidth(w)
             hl.addWidget(lb, stretch=(0 if w else 1))

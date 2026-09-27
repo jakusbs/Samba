@@ -39,7 +39,7 @@ PLOT_RIGHT_COLORS = ['#f38ba8', '#f9e2af', '#cba6f7', '#fab387', '#eba0ac']
 # ── Diverging colormaps (signed data → colour range centred on zero) ────────
 DIVERGING_CMAPS = {
     'RdBu_r', 'seismic', 'bwr', 'coolwarm', 'PuOr_r', 'RdYlBu_r',
-    'Spectral_r', 'PiYG', 'BrBG', 'twilight', 'twilight_shifted',
+    'Spectral_r', 'PiYG', 'BrBG',
     # non-reversed twins, in case a config carries them
     'RdBu', 'PuOr', 'RdYlBu', 'Spectral', 'PiYG_r', 'BrBG_r',
 }
@@ -72,3 +72,16 @@ def light_color_for(color) -> str:
         return MOCHA_TO_LATTE.get(key, color)
     except Exception:
         return color
+
+CYCLIC_CMAPS = {"twilight", "twilight_shifted", "hsv"}
+
+# Point-based UI type scales with the display's DPI. Apply to existing styles
+# while older panels are migrated to the shared tokens.
+UI_FONT_PT = 10
+
+
+def readable_stylesheet(style):
+    import re
+    style = re.sub(r"font-size:\s*(\d+)px", lambda m:
+                   f"font-size:{max(UI_FONT_PT, round(int(m[1]) * .75))}pt", style)
+    return style.replace("color:#6c7086", f"color:{MOCHA['subtext0']}")

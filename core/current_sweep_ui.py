@@ -19,9 +19,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from hardware import fresh_proxy, is_sim_proxy, trigger_and_read, TANGO_AVAILABLE
-from nstep import NStepPair
-from current_sweep import (SETTLE_FIXED, SETTLE_PLATEAU, MAX_CURRENTS,
+from core.hardware import fresh_proxy, is_sim_proxy, trigger_and_read, TANGO_AVAILABLE
+from core.nstep import NStepPair
+from core.current_sweep import (SETTLE_FIXED, SETTLE_PLATEAU, MAX_CURRENTS,
                            PlateauDetector, build_current_list,
                            format_current_list, settle_estimate_s, fmt_hms)
 

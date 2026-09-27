@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # Convention: bump the decimal part on every regular commit; the major part
 # only for a release/breaking change.  Independent of SCHEMA_VERSION below,
 # which tracks the on-disk scan-config format.
-APP_VERSION = "13.30"
+from core.version import APP_VERSION
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 12
@@ -567,10 +567,7 @@ def load_setup(name: str) -> dict:
     return d
 
 def save_setup(name: str, data: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    data = {k: v for k, v in data.items() if k != "_load_status"}
-    try:
-        with open(CONFIG_DIR / f"{name}.json", "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        log.error("Config save error: %s", e)
+    """Atomically save a setup; propagate failures to the UI."""
+    from core.persistence import atomic_write_json
+    clean = {k: v for k, v in data.items() if k != "_load_status"}
+    atomic_write_json(CONFIG_DIR / f"{name}.json", clean)

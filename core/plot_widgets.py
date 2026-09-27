@@ -18,17 +18,19 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 from matplotlib.figure import Figure
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel, QPushButton
 from PyQt6.QtCore import QTimer
 
-from config import LEFT_COLORS, RIGHT_COLORS, X_NATURAL, X_TIME
-from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+from core.constants import X_NATURAL, X_TIME, LEFT_COLORS, RIGHT_COLORS
+from core.plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            set_multicolor_ylabel, make_scale_pills,
                            recent_symmetric_ylim, SCALE_RECENT,
                            RECENT_WINDOW, make_kerr_pill, set_kerr_pill)
-from theme import DIVERGING_CMAPS
-import kerr
+from core.theme import DIVERGING_CMAPS
+from core import kerr
+from core.plot_geometry import create_map, update_map, channel_style
+from core.map_interact import MapControls
 
 REDRAW_INTERVAL_MS = 80
 
@@ -81,6 +83,12 @@ class Live2DWidget(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
+        self.map_controls = MapControls(self, self.ax, self.canvas,
+                                        self._map_snapshot, self._set_color_limits)
+        top.addWidget(self.map_controls.button)
+        lay.addWidget(self.map_controls.readout)
+        self._display_factor = 1.0
+        self._previous_factor = 1.0
         self._style_axes()
 
         self._timer = QTimer(self)
@@ -151,8 +159,10 @@ class Live2DWidget(QWidget):
     def _display_data(self) -> Tuple[Optional[np.ndarray], str]:
         """(array to draw, title) — converted to µrad/nrad when the pill is on."""
         f = self._kerr_factor()
+        self._display_factor = f if f is not None else 1.0
         if f is None or self._data is None:
-            return self._data, self._sensor
+            unit = self._units.get(self._sensor, "")
+            return self._data, f"{self._sensor} ({unit})" if unit else self._sensor
         title = (f"{self._sensor} ({self._kerr_unit})" if self._sensor
                  else str(self._kerr_unit))
         return self._data * f, title
@@ -167,9 +177,14 @@ class Live2DWidget(QWidget):
         self._dirty = False
         if self._img is not None and self._data is not None:
             shown, title = self._display_data()
+            if not self.autocolor_cb.isChecked() and self._previous_factor != self._display_factor:
+                scale = self._display_factor / self._previous_factor
+                lo, hi = self._img.get_clim()
+                self._img.set_clim(*sorted((lo * scale, hi * scale)))
+            self._previous_factor = self._display_factor
             if self.autocolor_cb.isChecked():
                 v = shown[np.isfinite(shown)]
-                if len(v) > 1:
+                if len(v):
                     lo, hi = v.min(), v.max()
                     if lo == hi: hi = lo + 1e-12
                     # Diverging colormap + signed data → centre the colour
@@ -178,9 +193,14 @@ class Live2DWidget(QWidget):
                         m = max(abs(lo), abs(hi))
                         lo, hi = -m, m
                     self._img.set_clim(lo, hi)
-            self._img.set_data(shown)
+            update_map(self._img, shown)
+            if self._cb is not None:
+                self._cb.set_label(title, color="#cdd6f4")
             if self.ax.get_title() != title:
                 self.ax.set_title(title, color="#ccccff", fontsize=10)
+        if self._cb is not None:
+            self._cb.set_label(title, color="#cdd6f4")
+        self.map_controls.apply_aspect()
         self.canvas.draw_idle()
 
     def setup(self, x_arr, y_arr, xl: str, yl: str, sensor: str, cmap: str):
@@ -194,11 +214,9 @@ class Live2DWidget(QWidget):
         self.ax.cla(); self._style_axes()
         if self._xarr is None:
             self.canvas.draw_idle(); return
-        ext = [self._xarr[0], self._xarr[-1], self._yarr[0], self._yarr[-1]]
         shown, title = self._display_data()
-        self._img = self.ax.imshow(
-            shown, origin="lower", aspect="auto",
-            extent=ext, cmap=self._cmap, interpolation="nearest")
+        self._img = create_map(self.ax, shown, self._xarr, self._yarr, self._cmap)
+        self._previous_factor = self._display_factor
         if self._cb:
             try: self._cb.remove()
             except Exception: pass
@@ -208,7 +226,20 @@ class Live2DWidget(QWidget):
         self.ax.set_xlabel(self._xlbl, color="#aaaacc")
         self.ax.set_ylabel(self._ylbl, color="#aaaacc")
         self.ax.set_title(title, color="#ccccff", fontsize=10)
+        self._cb.set_label(title, color="#cdd6f4")
+        self.map_controls.apply_aspect()
         self.canvas.draw_idle()
+
+    def _map_snapshot(self):
+        if self._data is None:
+            return None
+        data, label = self._display_data()
+        return data, self._xarr, self._yarr, label
+
+    def _set_color_limits(self, lo, hi):
+        self.autocolor_cb.setChecked(False)
+        self._img.set_clim(lo, hi)
+        self._dirty = True
 
     def update_point(self, ix: int, iy: int, val: float):
         if self._data is None or self._img is None: return
@@ -217,6 +248,8 @@ class Live2DWidget(QWidget):
 
     def switch_sensor(self, new_data: 'np.ndarray', label: str):
         if self._img is None: return
+        if label != self._sensor:
+            self.autocolor_cb.setChecked(True)
         self._data = new_data.copy(); self._sensor = label
         self._kerr_unit = None           # a different channel, different scale
         shown, title = self._display_data()
@@ -226,7 +259,10 @@ class Live2DWidget(QWidget):
     def set_colormap(self, cmap: str):
         self._cmap = cmap
         if self._img:
-            self._img.set_cmap(cmap); self._dirty = True
+            from matplotlib import colormaps
+            from core.theme import MOCHA
+            colors = colormaps[cmap].copy(); colors.set_bad(MOCHA["surface1"])
+            self._img.set_cmap(colors); self._dirty = True
 
     def clear(self):
         self._data = self._xarr = self._yarr = self._img = None
@@ -263,7 +299,8 @@ class Live1DWidget(QWidget):
         self._x_label_nat: str = ""
         self._lines: Dict[str, Tuple]   = {}
         self._dirty = False
-        self._font_pt = 9
+        self._font_pt = 10
+        self._updating_limits = False
         # Kerr-rotation display.  _yd keeps the raw readings in the channel's
         # own unit; the conversion is applied where the lines are drawn, so
         # the toggle never touches the buffers or the recorded data.
@@ -289,6 +326,7 @@ class Live1DWidget(QWidget):
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
         top.addWidget(self.bar, stretch=1)
         top.addWidget(make_light_export_btn(lambda: self.fig, self))
+        controls = QHBoxLayout(); controls.setSpacing(6)
         # Y-scale mode: Full (all data) or Recent (±max|y| of the last N pts)
         # Trailing-point count for the Recent y-scale mode; comes from
         # Setup Defaults so it is configurable without spending toolbar
@@ -296,21 +334,31 @@ class Live1DWidget(QWidget):
         self._recent_window = RECENT_WINDOW
         self._scale_w, self._scale_mode = make_scale_pills(
             lambda: setattr(self, "_dirty", True), self)
-        top.addWidget(self._scale_w)
+        controls.addWidget(self._scale_w)
+        self.follow_cb = QCheckBox("Follow live")
+        self.follow_cb.setChecked(True)
+        self.follow_cb.setToolTip("Turn off to hold the view. Manual pan or zoom also holds it.")
+        self.follow_cb.toggled.connect(lambda _: setattr(self, "_dirty", True))
+        controls.addWidget(self.follow_cb)
+        fit = QPushButton("Fit")
+        fit.clicked.connect(self._fit_view)
+        controls.addWidget(fit)
         self.kerr_btn = make_kerr_pill(self._on_kerr_clicked, self)
-        top.addWidget(self.kerr_btn)
+        controls.addWidget(self.kerr_btn)
         self._refresh_kerr_btn()
         _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
-        top.addWidget(_tx)
+        controls.addWidget(_tx)
         self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
-        top.addWidget(self.fs_spin)
+        controls.addWidget(self.fs_spin)
 
+        controls.addStretch()
         # Left-click a curve to read off the nearest point's value.
         self._readout = ClickReadout(
             self.canvas, lambda: [self.ax1, self.ax2], lambda: self._font_pt)
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
+        lay.addLayout(controls)
         lay.addWidget(self.canvas, stretch=1)
         self._style_axes()
 
@@ -494,6 +542,20 @@ class Live1DWidget(QWidget):
             pass
         self.canvas.draw_idle()
 
+    def _fit_view(self):
+        self.follow_cb.setChecked(True)
+        self._dirty = True
+        self._throttled_draw()
+
+    def _manual_limits_changed(self, _ax):
+        if not self._updating_limits and hasattr(self, "follow_cb"):
+            self.follow_cb.setChecked(False)
+
+    def _watch_limits(self):
+        for ax in (self.ax1, self.ax2):
+            ax.callbacks.connect("xlim_changed", self._manual_limits_changed)
+            ax.callbacks.connect("ylim_changed", self._manual_limits_changed)
+
     def _apply_font(self):
         """Push the current font size onto ticks, axis labels and legends."""
         for ax in [self.ax1, self.ax2]:
@@ -536,6 +598,10 @@ class Live1DWidget(QWidget):
         if self._kerr_unit != before:
             self._refresh_labels()
 
+        if not self.follow_cb.isChecked():
+            self.canvas.draw_idle()
+            return
+        self._updating_limits = True
         # Autoscale.  X always follows the full data range; only the y-scale
         # rule changes with the Full/Recent pill.
         recent = self._scale_mode() == SCALE_RECENT
@@ -568,10 +634,12 @@ class Live1DWidget(QWidget):
                 ylo, yhi = all_y[my].min(), all_y[my].max()
                 pad = max(abs(yhi - ylo) * 0.05, 1e-12)
                 ax.set_ylim(ylo - pad, yhi + pad)
+        self._updating_limits = False
         self.canvas.draw_idle()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def alloc(self, n_pts: int, xl: str, xu: str, all_sensors: List[dict]):
+        self.follow_cb.setChecked(True)
         self._n = n_pts
         self._xd = np.full(n_pts, np.nan)
         self._x_label_nat = f"{xl} ({xu})" if xu else xl
@@ -594,6 +662,10 @@ class Live1DWidget(QWidget):
         else:
             x_arr, x_lbl = self._xd, self._x_label_nat
 
+        self._updating_limits = True
+        held_limits = (self.ax1.get_xlim(), self.ax1.get_ylim(), self.ax2.get_ylim())
+        was_following = self.follow_cb.isChecked()
+        self._updating_limits = True
         self.ax1.cla(); self.ax2.cla(); self._style_axes()
         self._lines = {}
         if getattr(self, "_readout", None) is not None:
@@ -612,13 +684,13 @@ class Live1DWidget(QWidget):
             if unit:
                 self._units[lbl] = unit
             if axis == "Y2":
-                c  = RIGHT_COLORS[ri % len(RIGHT_COLORS)]; ri += 1; ax = self.ax2
+                c, style = channel_style(s); ri += 1; ax = self.ax2
                 right_meta.append((lbl, unit, c))
             else:
-                c  = LEFT_COLORS[li % len(LEFT_COLORS)];  li += 1; ax = self.ax1
+                c, style = channel_style(s); li += 1; ax = self.ax1
                 left_meta.append((lbl, unit, c))
-            line, = ax.plot([], [], color=c, linewidth=1.8,
-                            label=lbl, marker=".", markersize=4)
+            line, = ax.plot([], [], color=c, linewidth=1.8, linestyle=style,
+                            label=lbl, marker=".", markersize=3)
             self._lines[lbl] = (line, ax)
 
         self._left_meta, self._right_meta = left_meta, right_meta
@@ -682,7 +754,14 @@ class Live1DWidget(QWidget):
                 pad = max(abs(xhi - xlo) * 0.02, 1e-12)
                 self.ax1.set_xlim(xlo - pad, xhi + pad)
 
+        if not was_following:
+            self.ax1.set_xlim(held_limits[0]); self.ax1.set_ylim(held_limits[1])
+            self.ax2.set_ylim(held_limits[2])
+        self.ax1.set_autoscale_on(False)
+        self.ax2.set_autoscale_on(False)
         self._layout()
+        self._watch_limits()
+        self._updating_limits = False
 
     def _fill_lines(self, x_arr: Optional[np.ndarray],
                     factors: Optional[Dict[str, float]] = None):

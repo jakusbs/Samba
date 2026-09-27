@@ -39,7 +39,7 @@ def setup_logging(app_name: str = "samba",
 
     if log_dir is None:
         try:
-            from config import CONFIG_DIR
+            from core.config_paths import CONFIG_DIR
             log_dir = Path(CONFIG_DIR) / "logs"
         except Exception:
             log_dir = Path(os.path.expanduser("~/.config/moke_scan/logs"))

@@ -354,13 +354,19 @@ class ReadbackWorker(QThread):
 # ─────────────────────────────────────────────────────────────────────────────
 # CryoMainWindow
 # ─────────────────────────────────────────────────────────────────────────────
-class CryoMainWindow(QMainWindow):
+from core.ui_shell import ApplicationShell
+from core.run_status import RunStatus
+from core.run_state import RunPhase
+
+
+class CryoMainWindow(ApplicationShell, RunStatus, QMainWindow):
     # Used to safely post callables to the main thread from background threads.
     # See also: hardware_panel.py for the same pattern.
     _post_to_main = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
+        self._init_shell("SambaCryo", save_setup, TANGO_AVAILABLE)
         self._post_to_main.connect(lambda fn: fn())
         self.setWindowTitle("Samba Cryo — ETH Zürich")
         try:
@@ -370,7 +376,7 @@ class CryoMainWindow(QMainWindow):
             pass
         # Modest minimum so the window fits smaller laptop screens; the larger
         # *preferred* opening size is applied (screen-clamped) in _restore_geometry.
-        self.setMinimumSize(1180, 640)
+        self.setMinimumSize(980, 640)
 
         self._setups:              Dict[str, dict]          = {}
         self._worker:              Optional[ScanWorker]     = None
@@ -457,6 +463,7 @@ class CryoMainWindow(QMainWindow):
         self._rb_sync_timer.start()
 
         self._restore_geometry()
+        self._restore_shell()
 
         # Read hardware panels once the window is shown
         QTimer.singleShot(400, self._initial_hw_read)
@@ -871,6 +878,7 @@ class CryoMainWindow(QMainWindow):
 
         # ── Always-visible bottom status bar (live scan progress) ────────────
         self._build_status_bar()
+        self._install_shell(main_v, ab, _dir_lbl, browse_btn, _srv_bar, h_split)
 
     # ── Bottom status bar ─────────────────────────────────────────────────────
 
@@ -881,155 +889,19 @@ class CryoMainWindow(QMainWindow):
         "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
     }
 
-    def _tint_status_bar(self, state: str):
-        """Tint the bottom status bar by scan state: green while running,
-        peach while paused (manual or auto), neutral when idle."""
-        sb = getattr(self, "_sb", None)
-        if sb is not None:
-            sb.setStyleSheet(self._SB_TINTS.get(state, self._SB_TINTS["idle"]))
-
-    def _build_status_bar(self):
-        """Seven-field QStatusBar showing live scan-run progress."""
-        sb = QStatusBar()
-        self.setStatusBar(sb)
-        self._sb = sb
-        sb.setStyleSheet(self._SB_TINTS["idle"])
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(8, 0, 8, 0); row.setSpacing(0)
-
-        def _mk_field():
-            lbl = QLabel("—")
-            lbl.setStyleSheet("color:#cdd6f4;font-size:12px;")
-            return lbl
-
-        def _mk_caption(text):
-            lbl = QLabel(text)
-            lbl.setStyleSheet("color:#a6adc8;font-size:12px;")
-            return lbl
-
-        def _mk_sep():
-            lbl = QLabel(" │ ")
-            lbl.setStyleSheet("color:#45475a;font-size:12px;")
-            return lbl
-
-        self._sb_cur     = _mk_field()
-        self._sb_scan    = _mk_field()
-        self._sb_start   = _mk_field()
-        self._sb_elapsed = _mk_field()
-        self._sb_runleft = _mk_field()
-        self._sb_scanleft= _mk_field()
-        self._sb_dead    = _mk_field()
-        self._sb_done    = _mk_field()
-        fields = [
-            # "Current" only moves during a sweep; "—" the rest of the time.
-            ("Current: ",   self._sb_cur),
-            ("Scan: ",      self._sb_scan),
-            ("Start: ",     self._sb_start),
-            ("Elapsed: ",   self._sb_elapsed),
-            ("Run left: ",  self._sb_runleft),
-            ("Scan left: ", self._sb_scanleft),
-            ("Dead: ",      self._sb_dead),
-            ("Done: ",      self._sb_done),
-        ]
-        for i, (cap, lbl) in enumerate(fields):
-            if i:
-                row.addWidget(_mk_sep())
-            row.addWidget(_mk_caption(cap)); row.addWidget(lbl)
-        row.addStretch()
-        sb.addPermanentWidget(container, 1)
-
-        # 1 Hz refresh so Elapsed / Run-left / Scan-left tick between points
-        self._sb_timer = QTimer(self)
-        self._sb_timer.setInterval(1000)
-        self._sb_timer.timeout.connect(self._refresh_status_bar)
-        self._sb_timer.start()
-
-    def _refresh_status_bar(self):
-        """Recompute and display the seven status-bar fields.
-
-        Cheap no-op while idle (leaves the final frame frozen on completion)."""
-        if not self._scan_running:
+    def _tint_status_bar(self, state):
+        if self._closing:
             return
-        now = _time.time()
-        done, total = self._bar_last_done, self._bar_last_total
-        total = max(1, total)
-        scan_elapsed = now - self._scan_start_time if self._scan_start_time else 0.0
-        run_elapsed  = now - self._run_start_time  if self._run_start_time  else 0.0
+        phase = {"running": RunPhase.RUNNING, "paused": RunPhase.PAUSED}.get(state, RunPhase.IDLE)
+        if phase == RunPhase.IDLE and self.run_controller.phase == RunPhase.ERROR:
+            self._show_run_phase(RunPhase.ERROR)
+            return
+        self.run_controller.set_phase(phase)
 
-        # Scan-left: warmup-corrected rate (skip the first point's setup overhead)
-        if done >= 2 and self._scan_first_pt_time > 0:
-            rate = (now - self._scan_first_pt_time) / (done - 1)
-            scan_left = rate * (total - done)
-        elif done >= 1 and scan_elapsed > 0:
-            scan_left = scan_elapsed * (total - done) / done
-        else:
-            scan_left = 0.0
 
-        # Overall fraction across the whole run (each scan weighted equally)
-        frac_in_scan = (done / total) if total else 0.0
-        overall_frac = (self._run_scans_done + frac_in_scan) / max(1, self._run_scans_total)
-        overall_frac = min(max(overall_frac, 0.0), 1.0)
 
-        # Run-left: proportional on whole-run elapsed (includes inter-scan
-        # overhead like field flips / demag / settling that per-point misses)
-        if overall_frac > 0.001:
-            run_left = run_elapsed * (1 - overall_frac) / overall_frac
-        else:
-            run_left = 0.0
 
-        # Dead time: current-scan elapsed not spent integrating
-        active = done * self._bar_int_time
-        dead_pct = (max(0.0, scan_elapsed - active) / scan_elapsed * 100.0
-                    ) if scan_elapsed > 0 else 0.0
 
-        done_pct = overall_frac * 100.0
-        cur_scan = min(self._run_scans_done + 1, self._run_scans_total)
-
-        self._sb_scan.setText(f"{cur_scan}/{self._run_scans_total}")
-        self._sb_elapsed.setText(_sb_fmt(run_elapsed))
-        self._sb_runleft.setText(_sb_fmt(run_left))
-        self._sb_scanleft.setText(_sb_fmt(scan_left))
-        self._sb_dead.setText(f"{dead_pct:.0f}%")
-        self._sb_done.setText(f"{done_pct:.0f}%")
-
-    def _status_bar_run_start(self, cfg: dict, n_scans_total: int):
-        """Reset status-bar state at the start of a scan run."""
-        self._autopause_notified = False   # re-arm the auto-pause popup
-        self._run_start_time     = _time.time()
-        self._run_scans_done     = 0
-        self._run_scans_total    = max(1, int(n_scans_total))
-        self._scan_first_pt_time = 0.0
-        self._bar_int_time       = float(cfg.get("integration_time", 0.1) or 0.1)
-        self._bar_last_done      = 0
-        self._bar_last_total     = 1
-        from datetime import datetime as _dt
-        self._sb_start.setText(_dt.fromtimestamp(self._run_start_time).strftime("%H:%M:%S"))
-        self._sb_scan.setText(f"1/{self._run_scans_total}")
-        if not self._cs_active:
-            self._sb_cur.setText("—")
-        for lbl in (self._sb_elapsed, self._sb_runleft, self._sb_scanleft):
-            lbl.setText("0s")
-        self._sb_dead.setText("0%"); self._sb_done.setText("0%")
-
-    def _status_bar_run_finish(self):
-        """Freeze the status bar at 100% when the whole run completes."""
-        self._run_scans_done = self._run_scans_total
-        self._bar_last_done  = self._bar_last_total
-        self._sb_scan.setText(f"{self._run_scans_total}/{self._run_scans_total}")
-        self._sb_runleft.setText("0s"); self._sb_scanleft.setText("0s")
-        self._sb_done.setText("100%")
-        if self._run_start_time:
-            self._sb_elapsed.setText(_sb_fmt(_time.time() - self._run_start_time))
-
-    def _status_bar_scan_done(self):
-        """One scan-file finished within a multi-scan run; advance the counter.
-
-        Also restamps per-scan timing so the next scan-file's Scan-left /
-        Dead-time estimates start fresh (run-level timing is untouched)."""
-        self._run_scans_done = min(self._run_scans_done + 1, self._run_scans_total)
-        self._scan_first_pt_time = 0.0
-        self._scan_start_time    = _time.time()
 
     def _connect_signals(self):
         # Inline duration estimate in the field-sweep box.  Uses the same
@@ -1051,7 +923,7 @@ class CryoMainWindow(QMainWindow):
         self.cfg_list.save_requested.connect(self._explicit_save)
 
         # Action bar
-        self.start_btn.clicked.connect(self._unified_start)
+        self.start_btn.clicked.connect(self._request_start)
         self.pause_btn.clicked.connect(self._toggle_pause)
         self.abort_btn.clicked.connect(self._unified_abort)
 
@@ -1104,7 +976,7 @@ class CryoMainWindow(QMainWindow):
             plot_cb=self._bd_plot_fit,
         )
 
-        QShortcut(QKeySequence("F5"),       self, activated=self._unified_start)
+        QShortcut(QKeySequence("F5"),       self, activated=self._request_start)
         QShortcut(QKeySequence("Ctrl+L"),   self, activated=self.log_text.clear)
         QShortcut(QKeySequence("Ctrl+R"),   self, activated=self.data_browser.refresh)
 
@@ -1237,7 +1109,7 @@ class CryoMainWindow(QMainWindow):
     def _safe_save(self):
         """Persist setup config, showing errors in status bar (#10)."""
         try:
-            save_setup(CRYO_SETUP, self._active_setup())
+            self._persist_setup(CRYO_SETUP, self._active_setup())
         except Exception as e:
             log.error("Config save failed: %s", e, exc_info=True)
             self.status_lbl.setText(f"⚠ Save failed: {e}")
@@ -1268,7 +1140,7 @@ class CryoMainWindow(QMainWindow):
 
         ZI settling is read in a background thread so the GUI is never blocked.
         """
-        if self._scan_running:
+        if self._scan_running or not self._last_save_ok:
             return
         try:
             cfg   = self._build_full_config()
@@ -1342,7 +1214,8 @@ class CryoMainWindow(QMainWindow):
                 txt += (f"   ·   sweep: {n_cur} currents × {n_scans} cycles + "
                         f"{fmt_hms(settle_each)} settle each "
                         f"≈ {_fmt(grand)} total (+ refocus)")
-            self.status_lbl.setText(txt)
+            if self._last_save_ok and not self._closing:
+                self.status_lbl.setText(txt)
             self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
 
         _show(0.0)
@@ -1366,10 +1239,9 @@ class CryoMainWindow(QMainWindow):
 
     def _explicit_save(self):
         self._save_active_config()
-        # Only show success if _safe_save didn't already set an error
-        if not self.status_lbl.text().startswith("⚠"):
+        if self._last_save_ok:
             self.status_lbl.setText("Config saved ✓")
-            self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;")
+            self.status_lbl.setStyleSheet("color:#a6adc8;")
 
     # ── Metadata bidirectional sync ───────────────────────────────────────────
     def _sync_traj_meta_to_sl(self):
@@ -1486,7 +1358,7 @@ class CryoMainWindow(QMainWindow):
         setup = self._active_setup()
         setup["bd_calibration"]      = vals
         setup["bd_calibration_date"] = date_str
-        save_setup(CRYO_SETUP, setup)
+        self._persist_setup(CRYO_SETUP, setup)
         self.bd_cal_panel.set_status(f"Saved {date_str} for setup 'Cryo'.")
 
     def _bd_cal_load(self):
@@ -1522,7 +1394,7 @@ class CryoMainWindow(QMainWindow):
         setup = self._active_setup()
         setup["calib_autofocus"] = self.calib_panel.get_autofocus_settings()
         try:
-            save_setup(self._active_setup_name, setup)
+            self._persist_setup(self._active_setup_name, setup)
         except Exception as e:
             log.error("Autofocus settings save failed: %s", e, exc_info=True)
 
@@ -1530,7 +1402,7 @@ class CryoMainWindow(QMainWindow):
         """Persist the calibration tab's own time-scan settings per setup."""
         setup = self._active_setup()
         setup["calib_timescan"] = self.calib_panel.get_timescan_settings()
-        save_setup(self._active_setup_name, setup)
+        self._persist_setup(self._active_setup_name, setup)
 
     def _on_defaults_changed(self):
         """Called when Setup Defaults panel values change — persist and apply."""
@@ -1669,7 +1541,7 @@ class CryoMainWindow(QMainWindow):
         setup["server_sync_dir"] = server_path
         self.status_lbl.setText("Syncing to server…")
         def _done(ok):
-            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+            self._post_to_main.emit(lambda: self.status_lbl.setText(
                 "Server sync complete" if ok else "Server sync partial (see log)"))
         sync_setup(self._active_setup_name, setup, done_cb=_done)
 
@@ -1689,6 +1561,9 @@ class CryoMainWindow(QMainWindow):
         # The sweep is checked first: between currents it owns the run while no
         # worker exists at all, so routing on _sl_worker alone would send the
         # abort to the single-scan path and do nothing.
+        self._run_aborted = True
+        if self._scan_running:
+            self.run_controller.set_phase(RunPhase.STOPPING)
         if self._cs_active or (self._sl_worker and self._sl_worker.isRunning()):
             self._abort_scanlist()
         else:
@@ -1788,6 +1663,11 @@ class CryoMainWindow(QMainWindow):
             self._scan_data_retrace = {}
 
     def _setup_live_display(self, cfg, active):
+        from core.plot_export import figure_caption
+        from core.scan.runner import _provenance
+        caption = figure_caption({**cfg, **_provenance()})
+        for plot in (self.plot1d, self.map2d, getattr(self, "map2d_retrace", self.map2d)):
+            plot.fig.samba_caption = caption
         mode, n_x, n_y = self._scan_dims(cfg)
         # Channel units (from the device registry) decide what the θ display
         # may convert; the 1D widget gets them through alloc()'s sensor list.
@@ -1838,6 +1718,7 @@ class CryoMainWindow(QMainWindow):
         worker.scan_done_retrace.connect(lambda fn: setattr(self, "_last_fn_retrace", fn))
         worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        worker.error_msg.connect(self._mark_run_error)
         worker.finished.connect(self._on_worker_finished)
         return worker
 
@@ -2152,6 +2033,8 @@ class CryoMainWindow(QMainWindow):
 
     def _on_worker_finished(self):
         # Append to lab notebook for this completed scan direction
+        if self._closing:
+            return
         if self._last_fn and self._current_scan_cfg and not getattr(self, '_calib_timescan', False):
             setup = self._active_setup()
             nb = _nb_path(setup.get("notebook_dir", "~/moke_data"), "Cryo")
@@ -2202,11 +2085,13 @@ class CryoMainWindow(QMainWindow):
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):
-            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+            self._post_to_main.emit(lambda: self.status_lbl.setText(
                 "Server sync complete" if ok else "Server sync partial (see log)"))
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _toggle_pause(self):
+        if self._closing or not self._may_resume():
+            return
         if not self._scan_running: return
         # Between currents a sweep runs a thermal-settle worker, or no worker
         # at all (refocus, phase transitions) — _cs_paused covers those, and is
@@ -2399,6 +2284,7 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         self._sl_worker.refocus_due.connect(self._on_sl_refocus_due)
+        self._sl_worker.error_msg.connect(self._mark_run_error)
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
         self._scan_start_time = _time.time()
@@ -2666,6 +2552,8 @@ class CryoMainWindow(QMainWindow):
 
     def _cs_finish(self, aborted: bool):
         """End the sweep: restore the source and release the lock."""
+        if self._closing:
+            return
         self._cs_active = False
         self._cs_paused = False
         sweep = self.sl_panel.cur_sweep
@@ -2839,6 +2727,8 @@ class CryoMainWindow(QMainWindow):
     def _on_scanlist_done(self, txt_path):
         # During a current sweep this is one scanlist of several — the run is
         # not over, so the bar must not jump to 100 %.
+        if self._closing:
+            return
         if not self._cs_active:
             self._status_bar_run_finish()
         try:
@@ -2849,11 +2739,13 @@ class CryoMainWindow(QMainWindow):
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):
-            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+            self._post_to_main.emit(lambda: self.status_lbl.setText(
                 "Server sync complete" if ok else "Server sync partial (see log)"))
         sync_setup(self._active_setup_name, _setup, done_cb=_done_sync)
 
     def _on_sl_worker_finished(self):
+        if self._closing:
+            return
         self._sl_worker = None
         if self._cs_active:
             # One current of a sweep is done — the lock stays held and the run
@@ -2979,6 +2871,8 @@ class CryoMainWindow(QMainWindow):
     def _initial_hw_read(self):
         """Read all hardware panels once on startup (fired 400 ms after __init__).
         Staggered to avoid simultaneous ZI reads that cause IMP_LIMIT CORBA errors."""
+        if self._closing:
+            return
         self.traj_panel.hw.refresh()
         QTimer.singleShot(800, self.sl_panel.hw.refresh)
 
@@ -3014,29 +2908,6 @@ class CryoMainWindow(QMainWindow):
             if (x, y) != (self.x(), self.y()):
                 self.move(x, y)
 
-    def closeEvent(self, ev):
-        if self._scan_running:
-            r = QMessageBox.question(self, "Scan running", "Abort and quit?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if r == QMessageBox.StandardButton.No: ev.ignore(); return
-            # 10 s, not 2 s: one point can legitimately take longer than 2 s
-            # (lock-in settling + integration, and far longer on a field or
-            # temperature point), and abandoning the thread mid-HDF5-write is
-            # how a file gets truncated.
-            self._cs_active = False    # no further currents after this
-            self._cs_abort  = True
-            for w in [self._worker, self._sl_worker, self._cs_settle]:
-                if w: w.abort(); w.wait(10000)
-            # _on_worker_finished may never run once the event loop is tearing
-            # down, so release the setup lock here or the rig stays "busy" to
-            # every other computer until the 12 h stale-lock takeover.
-            release_lock(self._active_setup_name)
-        # Stop the readback thread
-        self._rb_worker.stop()
-        self._rb_worker.wait(2000)
-        self._save_active_config()
-        QSettings("ETH-Intermag", "SambaCryo").setValue("geometry", self.saveGeometry())
-        ev.accept()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

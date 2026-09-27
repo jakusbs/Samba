@@ -5551,3 +5551,8 @@ pmoke` narrows to 764, a future date returns nothing, exactly one date folder
 is left visible, and the search takes 6 ms. `test_runner.py` 246 → 251
 (five date cases including `normalize_term` leaving `0.5`, `1.2.3`, `a/b` and
 out-of-range `2026-13-45` untouched).
+
+
+## 13.31 — shared UI and reliability improvements
+
+See [the release and rollout notes](docs/13.31-ui-and-reliability.md). Shared implementation is in `core/ui_shell.py`, `run_state.py`, `run_status.py`, `widgets.py`, `sensor_picker.py`, `plot_geometry.py`, `map_interact.py`, `plot_export.py`, `persistence.py`, `sync_worker.py`, and `models.py`. Core imports are package-qualified; app shims remain for existing launch scripts. Run `python test_runner.py -v`, `python -m unittest discover -s tests -v`, and both `tests/smoke_application.py` flavors in separate processes. Pause and Abort remain click-only (section 62). SetupLock v2 is a separate, coordinated deployment.

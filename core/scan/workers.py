@@ -2,19 +2,19 @@
 scan/workers.py — Samba v3
 ScanWorker (single scan QThread) and ScanlistWorker (N-scan list QThread).
 """
-import copy, os, time, traceback
+import copy, os, time, traceback, threading
 from datetime import datetime
 from typing import Dict, List, Optional
 import numpy as np
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from config import X_TIME
-from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
+from core.constants import X_TIME
+from core.hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
                       safe_write, demagnetize_magnet, TANGO_AVAILABLE)
 from core.scan.runner import ScanRunner
-from current_sweep import refocus_due
-from polarity import (ORDER_AB, flip_phase, normalize_order, order_preview,
+from core.current_sweep import refocus_due
+from core.polarity import (ORDER_AB, flip_phase, normalize_order, order_preview,
                       phase_label, switches_before)
 
 
@@ -86,8 +86,8 @@ class ScanlistWorker(QThread):
         super().__init__()
         # Accept either a single config dict or a per-cycle list of configs.
         # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
-        self.cfg_list = cfg_or_list if isinstance(cfg_or_list, list) else [cfg_or_list]
-        self.setup = setup; self.n_scans = n_scans
+        self.cfg_list = copy.deepcopy(cfg_or_list if isinstance(cfg_or_list, list) else [cfg_or_list])
+        self.setup = copy.deepcopy(setup); self.n_scans = n_scans
         self.list_name = list_name
         self.relay_flip = relay_flip; self.field_flip = field_flip
         # Switching order of the two polarity states — AB (every cycle) or
@@ -95,6 +95,7 @@ class ScanlistWorker(QThread):
         self.flip_order = normalize_order(flip_order)
         self.setup_name = setup_name
         self._abort = False; self._paused = False; self._runner = None
+        self._stop_event = threading.Event()
         # Relay state of cycle 0 — whatever the device is already in.  Every
         # later cycle is this XOR the cycle's phase, so the schedule is a
         # function of the cycle index and cannot drift out of step the way a
@@ -110,6 +111,7 @@ class ScanlistWorker(QThread):
 
     def abort(self):
         self._abort = True
+        self._stop_event.set()
         if self._runner: self._runner.abort()
 
     def pause(self):
@@ -145,7 +147,7 @@ class ScanlistWorker(QThread):
                           "the next scan…")
         self.refocus_due.emit()
         while self._refocus_hold and not self._abort:
-            time.sleep(0.1)
+            self._stop_event.wait(0.1)
 
     def run(self):
         try:
@@ -165,20 +167,24 @@ class ScanlistWorker(QThread):
         while not self._abort:
             cur_val = err = None
             for _ in range(3):
+                if self._abort:
+                    return
                 cur_val, err = safe_read(mag_p, mag_cur)
                 if cur_val is not None:
                     break
-                time.sleep(1.0)
+                self._stop_event.wait(1.0)
             if cur_val is None:
                 self._pause_on_flip_error(f"field flip read failed: {err}")
                 continue
             if abs(cur_val) <= 1e-6:
                 return   # nothing to flip
             for _ in range(3):
+                if self._abort:
+                    return
                 err = safe_write(mag_p, mag_cur, -cur_val)
                 if not err:
                     break
-                time.sleep(1.0)
+                self._stop_event.wait(1.0)
             if err:
                 self._pause_on_flip_error(f"field flip write failed: {err}")
                 continue
@@ -192,7 +198,7 @@ class ScanlistWorker(QThread):
                              "fix the magnet and press Resume")
         self.pause()
         while self.is_paused() and not self._abort:
-            time.sleep(0.1)
+            self._stop_event.wait(0.1)
         if not self._abort:
             self.log_msg.emit("  ↩ Resuming — retrying field flip…")
 
@@ -208,17 +214,17 @@ class ScanlistWorker(QThread):
         last_log = t_flip
         prev_fv, _ = safe_read(mag_p, mag_fld)
         self.log_msg.emit(f"  Settling field (threshold {rate_thr} /0.5s)…")
-        time.sleep(0.5)
+        self._stop_event.wait(0.5)
         while not self._abort:
             while self._paused and not self._abort:
-                time.sleep(0.1)
+                self._stop_event.wait(0.1)
             elapsed = time.time() - t_flip
             if elapsed > timeout:
                 self.log_msg.emit(f"⚠ Field settle timeout after {timeout:.0f} s")
                 return
             fv, ferr = safe_read(mag_p, mag_fld)
             if ferr or fv is None or prev_fv is None:
-                time.sleep(0.5); prev_fv = fv; continue
+                self._stop_event.wait(0.5); prev_fv = fv; continue
             rate = abs(fv - prev_fv)   # change over last 0.5 s
             if time.time() - last_log >= 10.0:
                 self.log_msg.emit(f"  Waiting for field: {fv:+.4f}  "
@@ -229,7 +235,7 @@ class ScanlistWorker(QThread):
                                   f"(Δ={rate:.4f}/0.5s, {elapsed:.1f} s)")
                 return
             prev_fv = fv
-            time.sleep(0.5)
+            self._stop_event.wait(0.5)
 
     def _run_list(self):
         # Polarity devices must be real connections: a cached SimProxy would
@@ -331,7 +337,7 @@ class ScanlistWorker(QThread):
                 v, verr = safe_read(mag_p, mag_fld)
                 if v is not None:
                     field_T = v; break
-                time.sleep(1.0)
+                self._stop_event.wait(1.0)
             if field_T != field_T:   # NaN check
                 self.log_msg.emit(
                     f"⚠ Field readback failed ({verr}) — recording NaN field "

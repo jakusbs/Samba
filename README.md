@@ -14,6 +14,8 @@ line scans and DC hysteresis loops.
 > internals, device-server details, and the full changelog — lives in
 > [`CLAUDE.md`](CLAUDE.md).
 
+Current development changes: [13.31 graphics, packaging and reliability notes](docs/13.31-ui-and-reliability.md).
+
 ---
 
 ## Contents

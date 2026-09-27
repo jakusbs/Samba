@@ -56,10 +56,13 @@ _hw.demagnetize_magnet = MagicMock()
 _hw.is_sim_proxy       = lambda proxy: False      # workers.py polarity guard
 _hw.TANGO_AVAILABLE    = False
 sys.modules['hardware'] = _hw
+sys.modules['core.hardware'] = _hw
 
 # ── Import runner after stubs are in place ────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core', 'scan'))
 import runner as _runner_mod                          # noqa: E402
+_runner_mod.MAX_RETRIES = 2
+_runner_mod.RETRY_DELAY = .005
 from runner import ScanRunner, AUTO_PAUSE_THRESHOLD   # noqa: E402
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -71,7 +74,7 @@ def _noop(*a, **kw):
 
 def _make_runner():
     """Minimal ScanRunner with no Qt / config needed."""
-    r = ScanRunner.__new__(ScanRunner)
+    r = ScanRunner({}, {})
     r._abort   = False
     r._paused  = False
     r._trigger_consec_fails = {}
@@ -912,7 +915,7 @@ class TestFieldAxisUnits(unittest.TestCase):
 
     def _open(self, cfg_extra):
         import tempfile, h5py
-        r = ScanRunner.__new__(ScanRunner)
+        r = ScanRunner({}, {})
         r._abort = False; r._paused = False
         cfg = {"name": "t", "integration_time": 0.1, "settle_time": 0.0,
                "move_timeout": 15.0, "field_segments": [[0.0, 1.0, 4]]}

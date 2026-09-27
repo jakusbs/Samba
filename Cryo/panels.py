@@ -1,3 +1,7 @@
+from core.widgets import ResponsiveRow
+from core.widgets import (NoScrollComboBox, NoScrollSpinBox, NoScrollDoubleSpinBox,
+    MokeMetadataGroup as _SharedMetadata, _NoUnderscoreValidator)
+from core.sensor_picker import SensorPickerRow
 """
 panels.py — Samba v3
 All reusable UI panels and row widgets:
@@ -49,14 +53,8 @@ def _fmt_duration(sec: float) -> str:
     return f"{sec / 3600:.1f} h"
 
 
-class NoScrollComboBox(QComboBox):
-    def wheelEvent(self, ev): ev.ignore()
 
-class NoScrollSpinBox(QSpinBox):
-    def wheelEvent(self, ev): ev.ignore()
 
-class NoScrollDoubleSpinBox(QDoubleSpinBox):
-    def wheelEvent(self, ev): ev.ignore()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SensorPickerRow — dropdown-based: [✓] [Device ▾] [Channel ▾] [Axis ▾] [×]
@@ -65,125 +63,6 @@ class NoScrollDoubleSpinBox(QDoubleSpinBox):
 AXIS_OPTIONS = ["Y1", "Y2", "X", "hidden"]
 
 
-class SensorPickerRow(QWidget):
-    changed          = pyqtSignal()
-    delete_requested = pyqtSignal()
-
-    def __init__(self, registry: List[dict], device_name: str = "",
-                 channel_attr: str = "", axis: str = "Y1",
-                 enabled: bool = False, parent=None):
-        super().__init__(parent)
-        self._registry = registry
-        lay = QHBoxLayout(self); lay.setContentsMargins(2, 2, 2, 2); lay.setSpacing(6)
-
-        self.ck = QCheckBox(); self.ck.setChecked(enabled)
-        self.ck.stateChanged.connect(lambda _: self.changed.emit())
-
-        # Device dropdown
-        self.dev_combo = NoScrollComboBox()
-        self.dev_combo.setMinimumWidth(140)
-        dev_names = [d["name"] for d in registry]
-        self.dev_combo.addItems(dev_names)
-        if device_name in dev_names:
-            self.dev_combo.setCurrentText(device_name)
-        elif dev_names:
-            self.dev_combo.setCurrentIndex(0)
-        self.dev_combo.currentIndexChanged.connect(self._on_device_changed)
-
-        # Channel dropdown (populated based on selected device)
-        self.ch_combo = NoScrollComboBox()
-        self.ch_combo.setMinimumWidth(100)
-        self._populate_channels(channel_attr)
-        self.ch_combo.currentIndexChanged.connect(lambda _: self.changed.emit())
-
-        # Axis dropdown
-        self.axis_combo = NoScrollComboBox(); self.axis_combo.addItems(AXIS_OPTIONS)
-        self.axis_combo.setCurrentText(axis if axis in AXIS_OPTIONS else "Y1")
-        self.axis_combo.setFixedWidth(65)
-        self.axis_combo.currentIndexChanged.connect(lambda _: self.changed.emit())
-
-        # Delete button
-        del_btn = QPushButton("×"); del_btn.setFixedWidth(22); del_btn.setFixedHeight(22)
-        del_btn.setStyleSheet("QPushButton{color:#f38ba8;font-weight:bold;border:1px solid #45475a;"
-                              "border-radius:3px;padding:0;background:#313244;}"
-                              "QPushButton:hover{background:#45475a;}")
-        del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        del_btn.clicked.connect(self.delete_requested.emit)
-
-        lay.addWidget(self.ck)
-        lay.addWidget(self.dev_combo, stretch=2)
-        lay.addWidget(self.ch_combo, stretch=1)
-        lay.addWidget(self.axis_combo)
-        lay.addWidget(del_btn)
-
-    def _on_device_changed(self, _):
-        self._populate_channels()
-        self.changed.emit()
-
-    def _populate_channels(self, select_attr: str = ""):
-        """Fill channel dropdown from the selected device's channels."""
-        self.ch_combo.blockSignals(True)
-        self.ch_combo.clear()
-        dev = self._get_device()
-        if dev:
-            for ch in dev.get("channels", []):
-                label = ch.get("label", ch.get("attr", "?"))
-                self.ch_combo.addItem(label, ch.get("attr", ""))
-            # Try to select the requested attr
-            if select_attr:
-                for i in range(self.ch_combo.count()):
-                    if self.ch_combo.itemData(i) == select_attr:
-                        self.ch_combo.setCurrentIndex(i)
-                        break
-        self.ch_combo.blockSignals(False)
-
-    def _get_device(self) -> dict:
-        """Look up the selected device in the registry."""
-        name = self.dev_combo.currentText()
-        for d in self._registry:
-            if d["name"] == name:
-                return d
-        return {}
-
-    def _get_channel(self) -> dict:
-        """Look up the selected channel in the device."""
-        dev = self._get_device()
-        attr = self.ch_combo.currentData()
-        for ch in dev.get("channels", []):
-            if ch.get("attr") == attr:
-                return ch
-        return {}
-
-    def get(self) -> dict:
-        """Return a full sensor dict compatible with the scan engine.
-        Includes device_name and channel_attr for config persistence."""
-        dev = self._get_device()
-        ch  = self._get_channel()
-        axis = self.axis_combo.currentText()
-        label = ch.get("label", self.ch_combo.currentText())
-        return {
-            "label":           label,
-            "device":          dev.get("tango_path", ""),
-            "attribute":       ch.get("attr", self.ch_combo.currentData() or ""),
-            "unit":            ch.get("unit", ""),
-            "enabled":         self.ck.isChecked(),
-            "y_axis":          axis if axis in ("Y1", "Y2") else "Y1",
-            "plot_visible":    axis != "hidden",
-            "trigger_cmd":     dev.get("trigger_cmd", ""),
-            "integ_time_attr": dev.get("integ_time_attr", ""),
-            "settling_attr":   dev.get("settling_attr", ""),
-            "plot_axis":       axis,
-            # Registry keys — used to restore dropdowns on config load
-            "device_name":     dev.get("name", ""),
-            "channel_attr":    ch.get("attr", self.ch_combo.currentData() or ""),
-        }
-
-    def get_axis(self) -> str:
-        return self.axis_combo.currentText()
-
-    def update_registry(self, registry: List[dict]):
-        """Update registry reference (e.g. after registry edit)."""
-        self._registry = registry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -615,15 +494,6 @@ class HardwarePanel(QGroupBox):
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: block underscores in QLineEdit
 # ─────────────────────────────────────────────────────────────────────────────
-class _NoUnderscoreValidator:
-    """Mixin: strip underscores from typed/pasted text."""
-    @staticmethod
-    def install(le: QLineEdit):
-        le.textChanged.connect(lambda t: (
-            le.blockSignals(True),
-            le.setText(t.replace("_", "")),
-            le.blockSignals(False),
-        ) if "_" in t else None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -635,222 +505,7 @@ INCIDENCES = ["PMOKE", "LMOKE+", "LMOKE", "TMOKE"]
 DEFAULT_MIRROR_SHIFT = 12.50
 
 
-class MokeMetadataGroup(QGroupBox):
-    """Metadata fields: operator, sample, device, notes, incidence, polarization,
-    λ/2, λ/4, noDC, R4W, R2W.  Emits `changed` whenever any value changes."""
-    changed = pyqtSignal()
-
-    def __init__(self, title: str = "Metadata", parent=None):
-        super().__init__(title, parent)
-        top = QHBoxLayout(self)
-        top.setSpacing(8); top.setContentsMargins(4, 4, 4, 4)
-
-        # ── Left: Op / Sample+Device / Notes / R4W+R2W ───────────────────────
-        left = QGridLayout(); left.setSpacing(2)
-        left.setColumnStretch(1, 1); left.setColumnStretch(3, 1)
-
-        # Row 0: Operator + t_FM + t_Stack on one line, spanning the same width
-        # as the Notes field below so the thickness fields don't push the panel
-        # out into an extra column.
-        op_row = QHBoxLayout(); op_row.setSpacing(4)
-        op_row.addWidget(QLabel("Op:"))
-        self.meta_operator = QLineEdit(); self.meta_operator.setPlaceholderText("Name")
-        self.meta_operator.setMinimumWidth(50)
-        _NoUnderscoreValidator.install(self.meta_operator)
-        op_row.addWidget(self.meta_operator, 1)   # stretches; spinboxes stay fixed
-        op_row.addWidget(QLabel("t_FM:"))
-        self.tfm_spin = NoScrollDoubleSpinBox()
-        self.tfm_spin.setRange(0, 1000); self.tfm_spin.setDecimals(2)
-        self.tfm_spin.setSuffix(" nm"); self.tfm_spin.setFixedWidth(78)
-        self.tfm_spin.setToolTip("Ferromagnet thickness (for SOT efficiency ξ_DL)")
-        op_row.addWidget(self.tfm_spin)
-        op_row.addWidget(QLabel("t_S:"))
-        self.tstack_spin = NoScrollDoubleSpinBox()
-        self.tstack_spin.setRange(0, 100000); self.tstack_spin.setDecimals(2)
-        self.tstack_spin.setSuffix(" nm"); self.tstack_spin.setFixedWidth(78)
-        self.tstack_spin.setToolTip(
-            "Full (current-carrying) stack thickness — for J = Ic/(w·t_stack)")
-        op_row.addWidget(self.tstack_spin)
-        left.addLayout(op_row, 0, 0, 1, 4)
-
-        left.addWidget(QLabel("Sample:"), 1, 0)
-        self.meta_sample = QLineEdit(); self.meta_sample.setPlaceholderText("Sample ID")
-        _NoUnderscoreValidator.install(self.meta_sample)
-        left.addWidget(self.meta_sample, 1, 1)
-        left.addWidget(QLabel("Dev:"), 1, 2)
-        self.meta_device = QLineEdit(); self.meta_device.setPlaceholderText("Device ID")
-        _NoUnderscoreValidator.install(self.meta_device)
-        left.addWidget(self.meta_device, 1, 3)
-
-        left.addWidget(QLabel("R4W:"), 2, 0)
-        self.r4w_spin = NoScrollDoubleSpinBox()
-        self.r4w_spin.setRange(0, 10_000_000); self.r4w_spin.setDecimals(3)
-        self.r4w_spin.setSuffix(" Ω"); self.r4w_spin.setMinimumWidth(80)
-        left.addWidget(self.r4w_spin, 2, 1)
-        left.addWidget(QLabel("R2W:"), 2, 2)
-        self.r2w_spin = NoScrollDoubleSpinBox()
-        self.r2w_spin.setRange(0, 10_000_000); self.r2w_spin.setDecimals(3)
-        self.r2w_spin.setSuffix(" Ω"); self.r2w_spin.setMinimumWidth(80)
-        left.addWidget(self.r2w_spin, 2, 3)
-
-        left.addWidget(QLabel("Notes:"), 3, 0)
-        self.meta_notes = QLineEdit(); self.meta_notes.setPlaceholderText("…")
-        _NoUnderscoreValidator.install(self.meta_notes)
-        left.addWidget(self.meta_notes, 3, 1, 1, 3)
-
-        top.addLayout(left, stretch=1)
-
-        # ── Right: Incidence / Polarization / checkboxes ──────────────────────
-        right = QGridLayout(); right.setSpacing(2)
-
-        # Per-incidence mirror-shift memory — set up before the combo exists so
-        # a signal fired during construction can never see them missing.
-        self._shift_by_inc = {inc: DEFAULT_MIRROR_SHIFT for inc in INCIDENCES}
-        self._cur_inc = INCIDENCES[0]
-        self._inc_loading = False
-
-        # Row 0: Incidence
-        right.addWidget(QLabel("Incidence:"), 0, 0)
-        self.incidence_combo = NoScrollComboBox()
-        self.incidence_combo.addItems(INCIDENCES)
-        self.incidence_combo.currentTextChanged.connect(self._on_incidence_changed)
-        right.addWidget(self.incidence_combo, 0, 1)
-
-        # Row 1: mirror shift — always visible, remembered per incidence
-        self._mirror_shift_lbl = QLabel("Mirror shift:")
-        self.mirror_shift = NoScrollDoubleSpinBox()
-        self.mirror_shift.setRange(-50, 50); self.mirror_shift.setDecimals(2)
-        self.mirror_shift.setValue(DEFAULT_MIRROR_SHIFT)
-        self.mirror_shift.setSuffix(" mm")
-        self.mirror_shift.setFixedWidth(85)
-        self.mirror_shift.setToolTip(
-            "Mirror shift — stored separately for each incidence, so switching "
-            "incidence brings back the value last used with it.")
-        self.mirror_shift.valueChanged.connect(self._on_shift_edited)
-        right.addWidget(self._mirror_shift_lbl, 1, 0)
-        right.addWidget(self.mirror_shift, 1, 1)
-
-        # Row 2: Polarization + custom
-        right.addWidget(QLabel("Polarization:"), 2, 0)
-        self.pol_combo = NoScrollComboBox()
-        self.pol_combo.addItems(["s", "45°", "p", "other"])
-        self.pol_combo.currentTextChanged.connect(self._on_pol_changed)
-        right.addWidget(self.pol_combo, 2, 1)
-        self.pol_custom = QLineEdit(); self.pol_custom.setPlaceholderText("custom")
-        self.pol_custom.setFixedWidth(70)
-        self.pol_custom.setVisible(False)
-        _NoUnderscoreValidator.install(self.pol_custom)
-        right.addWidget(self.pol_custom, 2, 2, 1, 2)
-
-        # Row 3: checkboxes λ/2, λ/4, noDC — all in one line
-        cb_row = QHBoxLayout(); cb_row.setSpacing(10)
-        self.lam2_cb = QCheckBox("λ/2"); cb_row.addWidget(self.lam2_cb)
-        self.lam4_cb = QCheckBox("λ/4"); cb_row.addWidget(self.lam4_cb)
-        cb_row.addSpacing(12)
-        self.nodc_cb = QCheckBox("noDC"); cb_row.addWidget(self.nodc_cb)
-        cb_row.addStretch()
-        right.addLayout(cb_row, 3, 0, 1, 4)
-
-        top.addLayout(right)
-
-        # Connect everything to changed signal
-        for w in [self.meta_operator, self.meta_sample, self.meta_device, self.meta_notes, self.pol_custom]:
-            w.textChanged.connect(self.changed.emit)
-        for w in [self.incidence_combo, self.pol_combo]:
-            w.currentTextChanged.connect(self.changed.emit)
-        for w in [self.lam2_cb, self.lam4_cb, self.nodc_cb]:
-            w.toggled.connect(self.changed.emit)
-        self.mirror_shift.valueChanged.connect(self.changed.emit)
-        self.r4w_spin.valueChanged.connect(self.changed.emit)
-        self.r2w_spin.valueChanged.connect(self.changed.emit)
-        self.tfm_spin.valueChanged.connect(self.changed.emit)
-        self.tstack_spin.valueChanged.connect(self.changed.emit)
-
-    # ── Incidence / mirror-shift helpers ──────────────────────────────────────
-    def _on_incidence_changed(self, text):
-        """Park the shift under the incidence being left, then restore the one
-        remembered for the incidence just selected."""
-        if self._inc_loading:
-            return
-        if self._cur_inc and self._cur_inc != text:
-            self._shift_by_inc[self._cur_inc] = self.mirror_shift.value()
-        self._cur_inc = text
-        val = self._shift_by_inc.get(text, DEFAULT_MIRROR_SHIFT)
-        # The combo's own currentTextChanged → changed.emit covers the save;
-        # blocking here keeps it to a single emit per switch.
-        self.mirror_shift.blockSignals(True)
-        self.mirror_shift.setValue(val)
-        self.mirror_shift.blockSignals(False)
-
-    def _on_shift_edited(self, value: float):
-        if not self._inc_loading and self._cur_inc:
-            self._shift_by_inc[self._cur_inc] = float(value)
-
-    def _on_pol_changed(self, text):
-        self.pol_custom.setVisible(text == "other")
-
-    # ── Get / Load ────────────────────────────────────────────────────────────
-    def get_values(self) -> dict:
-        pol = self.pol_combo.currentText()
-        if pol == "other":
-            pol = self.pol_custom.text().strip() or "other"
-        inc = self.incidence_combo.currentText()
-        ms  = self.mirror_shift.value()
-        shifts = dict(self._shift_by_inc); shifts[inc] = ms
-        return {
-            "mirror_shift_by_incidence": shifts,
-            "operator":     self.meta_operator.text().strip(),
-            "sample_id":    self.meta_sample.text().strip(),
-            "device_id":    self.meta_device.text().strip(),
-            "notes":        self.meta_notes.text().strip(),
-            "incidence":    inc,
-            "mirror_shift": ms,
-            "polarization": pol,
-            "lam2":         self.lam2_cb.isChecked(),
-            "lam4":         self.lam4_cb.isChecked(),
-            "noDC":         self.nodc_cb.isChecked(),
-            "r_4wire_ohm": self.r4w_spin.value(),
-            "r_2wire_ohm": self.r2w_spin.value(),
-            "fm_thickness_nm": self.tfm_spin.value(),
-            "t_stack_nm": self.tstack_spin.value(),
-        }
-
-    def load_values(self, cfg: dict):
-        self.meta_operator.setText(cfg.get("operator", ""))
-        self.meta_sample.setText(cfg.get("sample_id", ""))
-        self.meta_device.setText(cfg.get("device_id", ""))
-        self.meta_notes.setText(cfg.get("notes", ""))
-        inc = cfg.get("incidence", "PMOKE")
-        self._inc_loading = True
-        try:
-            idx = self.incidence_combo.findText(inc)
-            if idx >= 0: self.incidence_combo.setCurrentIndex(idx)
-            saved = cfg.get("mirror_shift_by_incidence") or {}
-            self._shift_by_inc = {
-                i: float(saved.get(i, DEFAULT_MIRROR_SHIFT)) for i in INCIDENCES}
-            ms = float(cfg.get("mirror_shift",
-                               self._shift_by_inc.get(inc, DEFAULT_MIRROR_SHIFT)))
-            self._cur_inc = inc if inc in self._shift_by_inc else INCIDENCES[0]
-            self._shift_by_inc[self._cur_inc] = ms
-            self.mirror_shift.setValue(ms)
-        finally:
-            self._inc_loading = False
-        pol = cfg.get("polarization", "s")
-        
-        idx = self.pol_combo.findText(pol)
-        if idx >= 0:
-            self.pol_combo.setCurrentIndex(idx)
-        else:
-            self.pol_combo.setCurrentIndex(self.pol_combo.findText("other"))
-            self.pol_custom.setText(pol)
-        self.lam2_cb.setChecked(cfg.get("lam2", False))
-        self.lam4_cb.setChecked(cfg.get("lam4", False))
-        self.nodc_cb.setChecked(cfg.get("noDC", False))
-        self.r4w_spin.setValue(cfg.get("r_4wire_ohm", cfg.get("r_4wire_kohm", 0.0) * 1000))
-        self.r2w_spin.setValue(cfg.get("r_2wire_ohm", cfg.get("r_2wire_kohm", 0.0) * 1000))
-        self.tfm_spin.setValue(cfg.get("fm_thickness_nm", 0.0))
-        self.tstack_spin.setValue(cfg.get("t_stack_nm", 0.0))
-
+class MokeMetadataGroup(_SharedMetadata):
     def build_scan_name(self, amplitude_mA: float = 0.0, freq_Hz: float = 0.0,
                          config_name: str = "") -> str:
         """Construct scanlist auto-name from metadata fields.
@@ -881,6 +536,7 @@ class MokeMetadataGroup(QGroupBox):
         if v["lam2"]:  parts.append("lam2")
         if v["lam4"]:  parts.append("lam4")
         return "_".join(parts)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1009,7 +665,7 @@ class RightPanel(QWidget):
         # ── Header ────────────────────────────────────────────────────────────
         hdr = QWidget(); hl = QHBoxLayout(hdr)
         hl.setContentsMargins(4, 0, 4, 0); hl.setSpacing(6)
-        for txt, w in [("✓", 18), ("Device", 0), ("Channel", 100), ("Axis", 65)]:
+        for txt, w in [("Channels · device / signal", 0)]:
             lb = QLabel(txt); lb.setStyleSheet("color:#6c7086;font-size:10px;")
             if w: lb.setFixedWidth(w)
             hl.addWidget(lb, stretch=(0 if w else 1))
@@ -1759,7 +1415,7 @@ class TrajectoryPanel(QWidget):
         sp_l.setContentsMargins(0, 0, 0, 0); sp_l.setSpacing(4)
 
         # ActuatorGroups are now checkable — the title checkbox IS the on/off toggle.
-        act_row = QHBoxLayout(); act_row.setSpacing(6)
+        act_row = ResponsiveRow(); act_row.setSpacing(6)
         self.act1_grp = ActuatorGroup(
             "X axis",
             "smaract2/control/IR-controller", "x", "X", "nm",
@@ -1818,7 +1474,7 @@ class TrajectoryPanel(QWidget):
         fw_root.addLayout(fsub_row)
 
         # Main horizontal row
-        horiz = QHBoxLayout(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
+        horiz = ResponsiveRow(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
 
         # ── Column 1: field-sweep params ──────────────────────────────────────
         # Two inner columns so the width is actually used and the box stays
@@ -1971,7 +1627,7 @@ class TrajectoryPanel(QWidget):
         # mg = MokeMetadataGroup: operator, sample, notes, incidence, polarization, λ/2, λ/4, noDC
         # hw = HardwarePanel: current source controls (left) + field/relay controls (right)
         # Width is controlled by stretch factors and setMaximumWidth on hw.
-        bot = QHBoxLayout(); bot.setSpacing(4)
+        bot = ResponsiveRow(); bot.setSpacing(4)
 
         # tg — Timing group
         tg  = QGroupBox("Timing"); tl = QGridLayout(tg)
@@ -2500,7 +2156,7 @@ class ScanlistPanel(QWidget):
         # The left-hand boxes line up at the top: the polarity flips stack
         # above the switching order, and the active config shares row 0 with
         # N scans.
-        top_row = QHBoxLayout(); top_row.setSpacing(8)
+        top_row = ResponsiveRow(); top_row.setSpacing(8)
 
         pg = QGroupBox("Polarity control"); pl = QVBoxLayout(pg)
         pl.setSpacing(6); pl.setContentsMargins(8, 8, 8, 8)
@@ -2571,7 +2227,7 @@ class ScanlistPanel(QWidget):
         root.addWidget(self.cur_sweep, stretch=1)
 
         # ── Bottom row: Timing + Metadata + Hardware (matches Trajectory) ────
-        bot = QHBoxLayout(); bot.setSpacing(4)
+        bot = ResponsiveRow(); bot.setSpacing(4)
 
         tg = QGroupBox("Timing"); tl = QGridLayout(tg)
         tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)

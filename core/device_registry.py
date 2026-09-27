@@ -259,12 +259,8 @@ def load_registry() -> List[dict]:
 
 def save_registry(devices: List[dict]):
     """Save device registry to disk."""
-    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(REGISTRY_FILE, "w") as f:
-            json.dump(devices, f, indent=2)
-    except Exception as e:
-        print(f"Registry save error: {e}")
+    from core.persistence import atomic_write_json
+    atomic_write_json(REGISTRY_FILE, devices)
 
 
 def registry_to_sensors(registry: List[dict], selections: List[dict]) -> List[dict]:
@@ -621,7 +617,11 @@ class DeviceRegistryPanel(QWidget):
     # ── Save / access ─────────────────────────────────────────────────────
     def _save(self):
         self._save_current()
-        save_registry(self._devices)
+        try:
+            save_registry(self._devices)
+        except Exception as exc:
+            QMessageBox.warning(self, "Registry save failed", str(exc))
+            return
         self.registry_changed.emit()
 
     def get_registry(self) -> List[dict]:

@@ -4,28 +4,28 @@ setup_lock.py — Client-side setup locking for Samba (shared core)
 Provides acquire_lock() / release_lock() that talk to the Setup_lock
 TANGO device server (built with Pogo).
 
-The server just has 6 attributes:
-  GreenBusy, IrBusy, CryoBusy     (DevBoolean, READ_WRITE)
-  GreenInfo,  IrInfo,  CryoInfo   (DevString,  READ_WRITE)
+The companion SetupLock 2 server has AcquireLease, RenewLease and ReleaseLease
+commands plus six compatibility attributes. All workstations should be upgraded
+for owner-checked admission; legacy clients remain advisory.
 
-No custom commands needed — we read/write the attributes directly.
+An unavailable optional server preserves the historic fail-open behavior and
+is explicitly shown as Unprotected in the acquisition header.
 
-If the server is unreachable, locks are silently skipped (fail-open)
-so Samba always works even without the lock server running.
-
-Stale-lock recovery: the info stamp carries a full date+time.  If a lock
-is older than STALE_LOCK_HOURS (the holder crashed or lost power without
-releasing), acquire_lock() logs a warning and takes the lock over instead
-of locking the setup out until someone clears it manually in Jive.
+New servers provide atomic owner-checked leases renewed while a run is active.
+Legacy servers remain advisory and are identified in the UI. A busy legacy
+lock is never automatically stolen based on age alone.
 
 Usage in samba.py:
-    from setup_lock import acquire_lock, release_lock
+    from core.setup_lock import acquire_lock, release_lock
 
     ok, msg = acquire_lock("Green")   # (True, "") or (False, "pc3:412 @ ...")
     release_lock("Green")
 """
 
 import logging
+import json
+import threading
+import uuid
 import os
 import re
 import socket
@@ -44,8 +44,8 @@ except ImportError:
 # ── Configuration ─────────────────────────────────────────────────────────────
 LOCK_DEVICE = "hpp-N42/samba/lock"       # adjust to match your TANGO DB
 
-# A lock whose stamp is older than this is considered abandoned (holder
-# crashed without releasing) and may be taken over.
+# Kept for old tooling that imports this constant. Age-based takeover is no
+# longer used: only the server can expire an owner-checked lease.
 STALE_LOCK_HOURS = 12.0
 
 # Map setup name → attribute names on the Pogo device
@@ -94,79 +94,133 @@ def _get_proxy():
         return None
 
 
-def acquire_lock(setup_name: str) -> Tuple[bool, str]:
-    """
-    Try to lock *setup_name* (Green / IR / Cryo).
+LEASE_SECONDS = 180
+RENEW_SECONDS = 30
+_held = {}
+_health = {}
+_guard = threading.RLock()
 
-    Returns:
-        (True, "")              — lock acquired
-        (False, "<who has it>") — already locked by someone else
-        (True, "")              — lock server unreachable (fail-open)
-    """
+
+def lock_status(setup_name):
+    """Human-readable protection mode for the acquisition header."""
+    with _guard:
+        return _health.get(setup_name, (True, "Lock not acquired"))[1]
+
+
+def lock_health(setup_name):
+    """False after renewal failure; the UI must pause before proceeding."""
+    with _guard:
+        return _health.get(setup_name, (True, "Lock not acquired"))
+
+
+def _supports_leases(dp):
+    try:
+        dp.command_query("AcquireLease")
+        return True
+    except AttributeError:
+        return False
+    except Exception as exc:
+        reasons = [str(getattr(e, "reason", "")) for e in getattr(exc, "args", ())]
+        if "API_CommandNotFound" in str(exc) or "API_CommandNotFound" in reasons:
+            return False
+        raise
+
+
+def _renew_loop(setup_name, token, stopped):
+    while not stopped.wait(RENEW_SECONDS):
+        try:
+            dp = _get_proxy()
+            ok = dp is not None and dp.command_inout("RenewLease", json.dumps(
+                {"setup": setup_name, "owner": token, "ttl": LEASE_SECONDS}))
+            message = "Lease protected" if ok else "Setup ownership lost — acquisition paused"
+        except Exception as exc:
+            ok, message = False, f"Lease renewal failed — acquisition paused: {exc}"
+        with _guard:
+            if _held.get(setup_name, {}).get("token") != token:
+                return
+            _health[setup_name] = (bool(ok), message)
+        if not ok:
+            log.error("setup_lock: %s", message)
+
+
+def acquire_lock(setup_name: str) -> Tuple[bool, str]:
+    """Acquire an atomic renewable lease, or visibly degrade on old servers."""
+    if setup_name not in _ATTR_MAP:
+        return False, f"Unknown setup: {setup_name}"
+    with _guard:
+        if setup_name in _held:
+            return lock_health(setup_name)[0], lock_health(setup_name)[1]
     dp = _get_proxy()
     if dp is None:
+        with _guard:
+            _health[setup_name] = (True, "Unprotected — lock service unavailable")
         return True, ""
-
-    busy_attr, info_attr = _ATTR_MAP.get(setup_name, (None, None))
-    if busy_attr is None:
-        return True, ""
-
     try:
-        # Check if already locked
-        if dp.read_attribute(busy_attr).value:
-            info = dp.read_attribute(info_attr).value
-            age = _stamp_age_hours(info)
-            if age is not None and age > STALE_LOCK_HOURS:
-                # The holder almost certainly crashed without releasing —
-                # take the lock over instead of locking the setup out.
-                log.warning("setup_lock: '%s' lock by %s is %.1f h old "
-                            "(> %.0f h) — treating as stale and taking over",
-                            setup_name, info, age, STALE_LOCK_HOURS)
-            else:
-                return False, info or "unknown"
+        if _supports_leases(dp):
+            token = f"{_make_stamp()} / {uuid.uuid4().hex}"
+            result = json.loads(dp.command_inout("AcquireLease", json.dumps(
+                {"setup": setup_name, "owner": token, "ttl": LEASE_SECONDS})))
+            if not result.get("acquired"):
+                return False, result.get("owner", "another workstation")
+            stopped = threading.Event()
+            with _guard:
+                _held[setup_name] = {"token": token, "lease": True, "stop": stopped}
+                _health[setup_name] = (True, "Lease protected")
+            threading.Thread(target=_renew_loop, args=(setup_name, token, stopped),
+                             daemon=True, name=f"lease-{setup_name}").start()
+            return True, ""
 
-        # Acquire: write info first, then flip busy.
-        # Include pid so the stamp is unique even on the same host.
-        stamp = _make_stamp()
+        # Backward compatibility is advisory only. Never clear a competing
+        # stamp, and never take over a busy legacy lock based solely on age.
+        busy_attr, info_attr = _ATTR_MAP[setup_name]
+        if dp.read_attribute(busy_attr).value:
+            return False, dp.read_attribute(info_attr).value or "another workstation"
+        stamp = _make_stamp() + " / " + uuid.uuid4().hex
         dp.write_attribute(info_attr, stamp)
         dp.write_attribute(busy_attr, True)
-
-        # Verify we won the race: wait briefly and re-read the info attribute.
-        # If another client wrote its own stamp in the same window, we lost.
         _time.sleep(0.05)
         actual = dp.read_attribute(info_attr).value
         if actual != stamp:
-            # Another client snuck in — release and report who has it.
-            try:
-                dp.write_attribute(busy_attr, False)
-                dp.write_attribute(info_attr, "")
-            except Exception:
-                pass
-            return False, actual or "unknown"
-
-        log.info("setup_lock: acquired '%s' as %s", setup_name, stamp)
+            return False, actual or "another workstation"
+        with _guard:
+            _held[setup_name] = {"token": stamp, "lease": False}
+            _health[setup_name] = (True, "Advisory lock — upgrade the lock server")
+        log.warning("setup_lock: legacy advisory mode; atomic leases unavailable")
         return True, ""
-    except Exception as e:
-        log.warning("setup_lock: acquire failed for '%s' (%s) — proceeding anyway", setup_name, e)
-        return True, ""
+    except Exception as exc:
+        # A reachable service with an uncertain acquisition result is not
+        # equivalent to a missing optional service: do not start a second run.
+        log.error("setup_lock: acquisition failed: %s", exc)
+        return False, f"Lock acquisition failed: {exc}"
 
 
 def release_lock(setup_name: str):
-    """Release the lock for *setup_name*.  Silently ignores errors."""
+    """Release only this client's ownership; expired leases need no cleanup."""
+    with _guard:
+        held = _held.pop(setup_name, None)
+    if not held:
+        return
+    if held.get("stop") is not None:
+        held["stop"].set()
     dp = _get_proxy()
-    if dp is None:
-        return
-
-    busy_attr, info_attr = _ATTR_MAP.get(setup_name, (None, None))
-    if busy_attr is None:
-        return
-
     try:
-        dp.write_attribute(busy_attr, False)
-        dp.write_attribute(info_attr, "")
-        log.info("setup_lock: released '%s'", setup_name)
-    except Exception as e:
-        log.warning("setup_lock: release failed for '%s' (%s)", setup_name, e)
+        if dp is None:
+            raise RuntimeError("lock service unavailable")
+        if held["lease"]:
+            dp.command_inout("ReleaseLease", json.dumps(
+                {"setup": setup_name, "owner": held["token"]}))
+        else:
+            busy_attr, info_attr = _ATTR_MAP[setup_name]
+            if dp.read_attribute(info_attr).value == held["token"]:
+                dp.write_attribute(busy_attr, False)
+                # The legacy server clears info together with busy; a second
+                # unconditional info write could erase the next owner's stamp.
+        with _guard:
+            _health[setup_name] = (True, "Lock released")
+    except Exception as exc:
+        log.warning("setup_lock: release failed: %s", exc)
+        with _guard:
+            _health[setup_name] = (True, "Release unconfirmed — lease will expire")
 
 
 def check_lock(setup_name: str) -> Tuple[bool, str]:

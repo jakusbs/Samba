@@ -13,8 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 
-import bd_fit
-
+from core import bd_fit
 TICKS = [0, 5, 10, 15, 20, 25]
 
 

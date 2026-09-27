@@ -436,7 +436,7 @@ def render_light_figure(fig):
     """
     import pickle
     from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from theme import light_color_for, LIGHT_INK, LIGHT_INK_SOFT
+    from core.theme import light_color_for, LIGHT_INK, LIGHT_INK_SOFT
 
     import matplotlib.colors as mcolors
     fig2 = pickle.loads(pickle.dumps(fig))
@@ -496,14 +496,21 @@ def render_light_figure(fig):
 def export_figure_light(fig, parent=None):
     """File dialog + save a light-styled copy of *fig* (PNG/PDF/SVG)."""
     from PyQt6.QtWidgets import QFileDialog, QMessageBox
-    path, _ = QFileDialog.getSaveFileName(
+    from core.plot_export import ask_export_options, prepare_export
+    options = ask_export_options(fig, parent)
+    if options is None:
+        return
+    path, chosen = QFileDialog.getSaveFileName(
         parent, "Export figure (light style)", "",
         "PNG image (*.png);;PDF (*.pdf);;SVG (*.svg)")
     if not path:
         return
     try:
-        fig2, canvas = render_light_figure(fig)
-        fig2.savefig(path, dpi=200, facecolor="white", bbox_inches="tight")
+        from pathlib import Path
+        if not Path(path).suffix:
+            path += ".pdf" if "PDF" in chosen else ".svg" if "SVG" in chosen else ".png"
+        fig2, canvas = prepare_export(fig, options)
+        fig2.savefig(path, dpi=options.dpi, facecolor="white")
     except Exception as e:
         QMessageBox.warning(parent, "Export failed", str(e)[:300])
 
@@ -512,7 +519,7 @@ def make_light_export_btn(fig_getter, parent=None):
     """A compact '⬇ Light' button that exports the figure on a white
     background (for papers/slides — the on-screen dark theme prints badly)."""
     from PyQt6.QtWidgets import QPushButton
-    btn = QPushButton("⬇ Light")
+    btn = QPushButton("Export…")
     btn.setToolTip("Export this plot on a white background\n"
                    "(dark curve colours mapped to print-safe ones).")
     btn.setStyleSheet(

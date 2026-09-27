@@ -1,3 +1,4 @@
+from core.widgets import ResponsiveRow
 """
 panels/scanlist.py — Samba v3
 ScanlistPanel — N-scan list with polarity control and current sweep.
@@ -34,7 +35,7 @@ class ScanlistPanel(QWidget):
         # The left-hand boxes line up at the top: the polarity flips stack
         # above the switching order, and the active config shares row 0 with
         # N scans.
-        top_row = QHBoxLayout(); top_row.setSpacing(8)
+        top_row = ResponsiveRow(); top_row.setSpacing(8)
 
         pg = QGroupBox("Polarity control"); pl = QVBoxLayout(pg)
         pl.setSpacing(6); pl.setContentsMargins(8, 8, 8, 8)
@@ -103,7 +104,7 @@ class ScanlistPanel(QWidget):
         root.addWidget(self.cur_sweep, stretch=1)
 
         # ── Bottom row: Timing + Metadata + Hardware (matches Trajectory) ────
-        bot = QHBoxLayout(); bot.setSpacing(4)
+        bot = ResponsiveRow(); bot.setSpacing(4)
 
         tg = QGroupBox("Timing"); tl = QGridLayout(tg)
         tl.setSpacing(3); tl.setContentsMargins(6, 6, 6, 6)

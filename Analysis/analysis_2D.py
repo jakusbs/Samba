@@ -722,8 +722,8 @@ def plot_2D_compare_auto(data, pltkeys, px_x, px_y, fs=14, cmap_first='magma',fi
     
     plt.tight_layout(rect=[0, 0, 1, 0.98])  # Leave space for suptitle
     if savepath:
-        plt.savefig(savepath+ '\\'+plotname+'.png',pad_inches = 0.1)
-        plt.savefig(savepath+ '\\'+plotname+'.eps',pad_inches = 0.1)
+        plt.savefig(os.path.join(savepath, (figname or 'comparison') + '.png'),pad_inches = 0.1)
+        plt.savefig(os.path.join(savepath, (figname or 'comparison') + '.eps'),pad_inches = 0.1)
     plt.show()
 
 
@@ -1805,10 +1805,10 @@ def compare_shifted_reflectivity(d_old, d, I_ch='averagein3value'):
         plt.grid()
         plt.show()
         
-def data_to_csv(D,name):
-    csv_filename = name + '.csv'
-    df = pd.DataFrame(D) 
-
-    
-    df.to_csv(self.path1 +'//'+ csv_filename, index=False,sep=';')
-    print('Data saved at %s' %self.path1)
+def data_to_csv(D, name, output_dir="."):
+    """Export columns to a semicolon-separated CSV and return its path."""
+    import pandas as pd
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, name + '.csv')
+    pd.DataFrame(D).to_csv(path, index=False, sep=';')
+    return path

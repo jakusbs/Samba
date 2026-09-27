@@ -13,6 +13,7 @@ or driving a stage past its configured travel.  Anything a physicist might
 legitimately want stays allowed.
 """
 from typing import Optional
+import math
 
 MAX_POINTS_1D = 10_000
 MAX_POINTS_2D = 500_000     # 1000×500 ≈ a generous upper bound for spatial maps
@@ -63,6 +64,16 @@ def validate_scan_config(cfg: dict, setup: Optional[dict] = None) -> Optional[st
             return (f"Total scan points ({total:,}) = {n_x}×{n_y} exceeds the "
                     f"safety limit of {MAX_POINTS_2D:,}.\n"
                     "Reduce n_pts or scan range.")
+
+        for prefix, enabled in (("act1", cfg.get("scan_x", True)),
+                                ("act2", cfg.get("scan_y", False))):
+            if not enabled:
+                continue
+            lo, hi = (float(cfg.get(f"{prefix}_{edge}", 0)) for edge in ("start", "stop"))
+            if not (math.isfinite(lo) and math.isfinite(hi)):
+                return "Axis endpoints must be finite."
+            if scan_2d and int(cfg.get(f"{prefix}_npts", 1)) > 1 and lo == hi:
+                return "A 2D map needs a nonzero range on each multi-point axis. Use a 1D scan for repeated measurements at one position."
 
         # Soft travel limits — a mistyped stop position is the cheapest way to
         # drive a stage into the sample holder.  TR-MOKE sweeps a delay
@@ -123,7 +134,7 @@ def validate_scan_config(cfg: dict, setup: Optional[dict] = None) -> Optional[st
                     f"{MAX_POINTS_1D:,}.")
 
     integ = float(cfg.get("integration_time", 0.1))
-    if integ <= 0:
+    if not math.isfinite(integ) or integ <= 0:
         return f"Integration time must be > 0 (got {integ})."
 
     return None     # all OK

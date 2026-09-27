@@ -30,13 +30,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
 
-from config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS, CONFIG_DIR
-from plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+from core.constants import LEFT_COLORS, RIGHT_COLORS, COLORMAPS
+from core.config_paths import CONFIG_DIR
+from core.plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
                            fix_toolbar_icons, make_light_export_btn,
                            make_kerr_pill, set_kerr_pill)
-from theme import DIVERGING_CMAPS
-import kerr
-import scan_index
+from core.theme import DIVERGING_CMAPS
+from core import kerr
+from core import scan_index
+from core.plot_geometry import create_map, channel_style
+from core.map_interact import MapControls
 
 # Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
 # instead of any stored actuator/field/time axis. Not a real dataset name.
@@ -48,6 +51,9 @@ _SKIP_RAW_META = {"sensors_json", "scan_name", "n_x", "n_y",
                   "integration_time", "settle_time"}
 
 INDEX_KEY = "__index__"
+_AXIS_NAMES = frozenset({"x", "y", "x_actual", "y_actual", "actuator_x",
+                         "actuator_y", "field", "field_T", "field_mT",
+                         "time", "elapsed_time", "timestamp"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,6 +66,7 @@ class ScanFile:
         self.path = path
         self.basename = os.path.basename(path)
         self.valid = False
+        self.error = ""
         self.meta: Dict = {}
         # Every /metadata attribute not already in the curated `meta` dict, so
         # nothing written to the file is invisible in the browser.
@@ -222,7 +229,8 @@ class ScanFile:
                                 f["measurement"][key].attrs.get("label", key))
 
                 self.valid = True
-        except Exception:
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
             self.valid = False
 
     def read_1d(self, x_key: str = "auto", y_key: str = "auto") -> Optional[Dict]:
@@ -295,7 +303,7 @@ class ScanFile:
                         if x_key == "auto":
                             x_key = meas.attrs.get("axes", "x_actual")
                             if x_key not in meas:
-                                for c in ["x_actual", "field_T", "time"]:
+                                for c in ["x_actual", "x", "field_T", "field_mT", "time"]:
                                     if c in meas:
                                         x_key = c; break
                         if y_key == "auto":
@@ -475,6 +483,13 @@ class BrowserPlotWidget(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addLayout(top)
         lay.addWidget(self.canvas, stretch=1)
+        self._map_data = None
+        self._map_artist = None
+        self.map_controls = MapControls(self, self.ax, self.canvas,
+                                        lambda: self._map_data, self._set_color_limits)
+        top.addWidget(self.map_controls.button)
+        lay.addWidget(self.map_controls.readout)
+        self.map_controls.button.hide(); self.map_controls.readout.hide()
         self._cb     = None
         self._is_2d  = False
         self._style()
@@ -549,12 +564,19 @@ class BrowserPlotWidget(QWidget):
             self._cb.ax.tick_params(labelsize=self._font_pt)
         self.canvas.draw_idle()
 
+    def _set_color_limits(self, lo, hi):
+        if self._map_artist is not None:
+            self._map_artist.set_clim(lo, hi)
+            self.canvas.draw_idle()
+
     def clear(self):
         if self._cb:
             try: self._cb.remove()
             except Exception: pass
             self._cb = None
         self._is_2d = False
+        self._map_data = self._map_artist = None
+        self.map_controls.button.hide(); self.map_controls.readout.hide()
         self.ax.cla(); self._style()
         if getattr(self, "_readout", None) is not None:
             self._readout.note_axes_cleared()
@@ -568,8 +590,9 @@ class BrowserPlotWidget(QWidget):
         self.clear()
         colors = LEFT_COLORS + RIGHT_COLORS
         for i, ds in enumerate(datasets):
-            c = ds.get("color", colors[i % len(colors)])
-            self.ax.plot(ds["x"], ds["y"], color=c, linewidth=1.5,
+            c, style = channel_style({"label": ds.get("legend", ds.get("y_label", str(i)))})
+            c = ds.get("color", c)
+            self.ax.plot(ds["x"], ds["y"], color=c, linewidth=1.5, linestyle=style,
                          label=ds.get("legend", ds.get("y_label", f"#{i}")),
                          marker=".", markersize=3)
         if datasets:
@@ -590,7 +613,6 @@ class BrowserPlotWidget(QWidget):
                 x_label: str, y_label: str, sensor_label: str,
                 cmap: str = "RdBu_r"):
         self.clear()
-        ext = [x_arr[0], x_arr[-1], y_arr[0], y_arr[-1]]
         v   = data[np.isfinite(data)]
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
@@ -600,9 +622,16 @@ class BrowserPlotWidget(QWidget):
         if cmap in DIVERGING_CMAPS and vmin < 0.0 < vmax:
             m = max(abs(vmin), abs(vmax))
             vmin, vmax = -m, m
-        img = self.ax.imshow(data, origin="lower", aspect="auto",
-                             extent=ext, cmap=cmap, interpolation="nearest",
-                             vmin=vmin, vmax=vmax)
+        try:
+            img = create_map(self.ax, data, x_arr, y_arr, cmap, vmin=vmin, vmax=vmax)
+        except ValueError as exc:
+            self.ax.text(.5, .5, f"Map coordinates unavailable: {exc}",
+                         transform=self.ax.transAxes, ha="center", wrap=True, color="#cdd6f4")
+            self.canvas.draw_idle()
+            return
+        self._map_artist = img
+        self._map_data = (data, x_arr, y_arr, sensor_label)
+        self.map_controls.button.show(); self.map_controls.readout.show()
         self._is_2d = True
         self._cb = self.fig.colorbar(img, ax=self.ax)
         self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc",
@@ -611,6 +640,8 @@ class BrowserPlotWidget(QWidget):
         self.ax.set_xlabel(x_label, color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_ylabel(y_label, color="#aaaacc", fontsize=self._font_pt)
         self.ax.set_title(sensor_label, color="#ccccff", fontsize=self._font_pt)
+        self._cb.set_label(sensor_label, color="#cdd6f4", fontsize=self._font_pt)
+        self.map_controls.apply_aspect()
         self.canvas.draw_idle()
 
 
@@ -1437,6 +1468,8 @@ class DataBrowserPanel(QWidget):
             # timer it can fire while they are looking at it.
             self.plot.clear()
             return
+        from core.plot_export import figure_caption
+        self.plot.fig.samba_caption = figure_caption({**sf.raw_meta, **sf.meta, "bd_calibration": sf.bd_calibration})
         x_key = self.x_combo.currentData()
         y_key = self.y_combo.currentData()
         is_dc = sf.meta.get("is_dc_hyst", False)

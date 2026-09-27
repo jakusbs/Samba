@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "samba-intermag"
+version = "13.31"
+description = "Intermag laboratory acquisition and analysis"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "h5py>=3.9"]
+
+[project.optional-dependencies]
+gui = ["PyQt6>=6.5", "matplotlib>=3.8"]
+hardware = ["pytango>=9.4"]
+analysis = ["scipy>=1.10", "pandas>=2", "matplotlib>=3.8"]
+dev = ["ruff>=0.11"]
+
+[project.scripts]
+samba = "core.launch:main"
+samba-cryo = "core.launch:cryo"
+
+[tool.setuptools.packages.find]
+include = ["core*", "Samba_main*", "Cryo*", "Analysis*"]
+
+[tool.setuptools.package-data]
+Samba_main = ["*.png", "*.svg", "*.ico"]
+Cryo = ["*.png", "*.svg", "*.ico"]
+
+[tool.ruff.lint]
+select = ["E9", "F821", "F822", "F823"]

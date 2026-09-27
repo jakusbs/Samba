@@ -1,3 +1,4 @@
+from core.widgets import ResponsiveRow
 """
 panels/trajectory.py — Samba v3
 TrajectoryPanel, ActuatorGroup, FieldSegmentList — scan trajectory controls.
@@ -405,7 +406,7 @@ class TrajectoryPanel(QWidget):
         sp_l.setContentsMargins(0, 0, 0, 0); sp_l.setSpacing(4)
 
         # ActuatorGroups are now checkable — the title checkbox IS the on/off toggle.
-        act_row = QHBoxLayout(); act_row.setSpacing(6)
+        act_row = ResponsiveRow(); act_row.setSpacing(6)
         self.act1_grp = ActuatorGroup(
             "X axis", "X", "nm", 0, 50000, 51,
             step_prefix="Δx", enabled=True)
@@ -493,7 +494,7 @@ class TrajectoryPanel(QWidget):
         fw_root.addLayout(fsub_row)
 
         # Main horizontal row
-        horiz = QHBoxLayout(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
+        horiz = ResponsiveRow(); horiz.setSpacing(5); horiz.setContentsMargins(0, 0, 0, 0)
 
         # ── Column 1: AC params ───────────────────────────────────────────────
         # Two inner columns so the width is actually used and the box stays
@@ -623,7 +624,7 @@ class TrajectoryPanel(QWidget):
         self._on_submode_changed(0)   # apply initial highlight
 
         # ── TR-MOKE panel — DG645 front-panel style control ─────────────────
-        self.trmoke_w = QWidget(); tr_root = QHBoxLayout(self.trmoke_w)
+        self.trmoke_w = QWidget(); tr_root = ResponsiveRow(self.trmoke_w)
         tr_root.setContentsMargins(0, 0, 0, 0); tr_root.setSpacing(5)
 
         # ── Column 1: Channel selector + delay readback ──────────────────────
@@ -1005,7 +1006,7 @@ class TrajectoryPanel(QWidget):
         # mg = MokeMetadataGroup: operator, sample, notes, incidence, polarization, λ/2, λ/4, noDC
         # hw = HardwarePanel: current source controls (left) + field/relay controls (right)
         # Width is controlled by stretch factors and setMaximumWidth on hw.
-        bot = QHBoxLayout(); bot.setSpacing(4)
+        bot = ResponsiveRow(); bot.setSpacing(4)
 
         # tg — Timing group
         tg  = QGroupBox("Timing"); tl = QGridLayout(tg)

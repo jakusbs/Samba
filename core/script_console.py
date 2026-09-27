@@ -170,8 +170,8 @@ class ScriptConsolePanel(QWidget):
         import numpy as np
         import h5py
         import os as _os
-        from hardware import get_proxy, safe_read, safe_write, safe_read_str
-        from scan import ScanRunner
+        from core.hardware import get_proxy, safe_read, safe_write, safe_read_str
+        from core.scan import ScanRunner
 
         # Restricted os shim — expose only read/path operations.
         # Full os access (os.system, os.popen, os.execv, etc.) is excluded.
