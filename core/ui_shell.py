@@ -155,6 +155,11 @@ class ApplicationShell:
             if not self._scan_running and self.run_controller.phase != RunPhase.ERROR:
                 self.run_controller.set_phase(RunPhase.IDLE)
 
+    def _mark_run_aborted(self):
+        self._run_aborted = True
+        if not self._closing:
+            self.run_controller.set_phase(RunPhase.STOPPING)
+
     def _mark_run_error(self, message):
         self._run_aborted = True
         self.run_controller.set_phase(RunPhase.ERROR, str(message))

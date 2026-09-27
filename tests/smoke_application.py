@@ -77,6 +77,11 @@ with patch.object(module, 'sync_setup', side_effect=sync):
     window._manual_sync()
     assert until(lambda: any('sync complete' in t.lower() for t, _ in updates)), updates
 assert all(on_gui for _, on_gui in updates), updates
+# A completed scanlist enables Start again before the next run.
+window._scan_running = True
+window._set_running(True)
+window._on_sl_worker_finished()
+assert not window._scan_running and window.start_btn.isEnabled()
 # Model a writer that needs time to finish its last write after cancellation.
 class Writer(QThread):
     def __init__(self):
@@ -88,6 +93,10 @@ class Writer(QThread):
 writer = Writer(); window._worker = writer; writer.start()
 window._scan_running = True
 window._set_running(True)
+window._sb_done.setText('25%')
+window._abort_scan()
+window._status_bar_run_finish()
+assert window._sb_done.text() == '25%'
 released = []
 with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), \
      patch('core.ui_shell.release_lock', side_effect=lambda name: released.append(name)):

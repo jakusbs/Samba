@@ -1783,6 +1783,7 @@ class MainWindow(ApplicationShell, RunStatus, QMainWindow):
         worker.scan_done.connect(lambda fn: setattr(self, "_last_fn", fn))
         worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        worker.scan_aborted.connect(self._mark_run_aborted)
         worker.error_msg.connect(self._mark_run_error)
         worker.finished.connect(self._on_worker_finished)
 
@@ -2122,6 +2123,7 @@ class MainWindow(ApplicationShell, RunStatus, QMainWindow):
 
     def _abort_scan(self):
         if not self._scan_running: return
+        self._mark_run_aborted()
         self._zero_armed = False   # Abort must never start new stage motion
         if self._worker: self._worker.abort()
         self.status_lbl.setText("Aborting…")
@@ -2254,6 +2256,7 @@ class MainWindow(ApplicationShell, RunStatus, QMainWindow):
         self._sl_worker.error_msg.connect(
             lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
         self._sl_worker.refocus_due.connect(self._on_sl_refocus_due)
+        self._sl_worker.scan_aborted.connect(self._mark_run_aborted)
         self._sl_worker.error_msg.connect(self._mark_run_error)
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
@@ -2761,11 +2764,12 @@ class MainWindow(ApplicationShell, RunStatus, QMainWindow):
             self._cs_step()
             return
         release_lock(self._active_setup_name)
-        self._set_running(False)
         self._scan_running = False
+        self._set_running(False)
 
     def _abort_scanlist(self):
         if not self._scan_running: return
+        self._mark_run_aborted()
         self._zero_armed = False   # Abort must never start new stage motion
         if self._cs_active:
             # Stop the whole sweep, not just the scanlist in progress.  The
