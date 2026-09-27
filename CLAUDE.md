@@ -5551,3 +5551,70 @@ pmoke` narrows to 764, a future date returns nothing, exactly one date folder
 is left visible, and the search takes 6 ms. `test_runner.py` 246 → 251
 (five date cases including `normalize_term` leaving `0.5`, `1.2.3`, `a/b` and
 out-of-range `2026-13-45` untouched).
+
+---
+
+## 81. Recent Changes (September 2026) — Dir: and Server: Share the Action Bar Row
+
+Branch `feat/dir-server-one-line` (251 tests). App version → **v13.32**.
+Both apps. User request after trying the 13.31 branch: of everything in it,
+the only wanted change was putting the two path fields on one line.
+
+### The merge
+The save directory lived in the action bar and the server sync path in its own
+`_srv_bar` strip directly below it — two rows for two text fields. The server
+block (label, path field, browse, `↑ Sync`) moved into the action bar after a
+separator, and the standalone bar was deleted:
+
+```
+[Green][IR] │ ▶Start ⏸Pause ⏹Abort │ Dir:[…][…] │ Server:[…][…][↑ Sync]
+```
+
+- **`server_dir` gets stretch 2 against `save_dir`'s 1.** The GVFS SMB path is
+  ~110 characters (`/run/user/1001/gvfs/smb-share:server=nas22.ethz.ch,share=…`)
+  while the save directory is a short `~/moke_data`, so an even split would
+  waste the space on the field that does not need it.
+- `save_dir`'s minimum width drops 180 → 130 and `server_dir` takes 170, so the
+  row still fits at the app's 1180 px minimum: measured Dir 155 px / Server
+  309 px (Samba_main) and 162 / 325 (Cryo), nothing clipped, nothing
+  overlapping.
+- Geometry unified to the action bar's 28 px (the server widgets were 24 px)
+  so the two fields read as siblings. The server text stays dimmer
+  (`#a6adc8`) because a blank path is meaningful — it disables syncing.
+- Only `self.server_dir` was referenced outside the old bar; `_srv_bar`,
+  `_srv_browse` and `_sync_btn` were all locals, so nothing else had to change.
+
+**38 px of height reclaimed** in both apps — content now starts at y=54 instead
+of y=92 — and it lands in the bottom tab area, which §68 notes is the half
+that cannot spare a row.
+
+### Version numbering: 13.31 is skipped
+`APP_VERSION` goes 13.30 → **13.32**. The `codex/samba-ui-reliability` branch
+already publishes itself as 13.31, and `APP_VERSION` is written into every scan
+file as `samba_version` provenance (§60) — two different codebases stamping the
+same version into data would defeat the point of recording it. If that branch
+is ever merged it keeps 13.31; main skips it.
+
+### Verification
+Offscreen-Qt harness over the **real** windows of both apps at 1180 / 1400 /
+1920 px (22 checks): both fields on one row (equal y), both usable at the
+minimum width, no overflow past the window edge, no overlap, equal heights,
+exactly one Sync button and it is on the same row and inside the window, the
+old `server_bar` object gone, and a ~110-character server path round-tripping
+through the field. Rendered PNGs inspected. `python test_runner.py` 251 OK;
+`pyflakes` clean on both files apart from the pre-existing f-string warning
+noted in §72.
+
+### Not taken from 13.31
+The rest of `codex/samba-ui-reliability` was declined. Several **non-visual**
+fixes in it are separable and still worth porting — see the notes in that
+branch's `docs/13.31-ui-and-reliability.md`; the ones verified as real against
+main are the two `NameError` crashes in `Analysis/analysis_2D.py`
+(`data_to_csv` references `self.path1` from a module-level function and is
+entirely broken; `plot_2D_compare_auto` uses an undefined `plotname` and
+hardcodes Windows `\\` separators), the abort-responsive settling sleep in
+`ScanRunner`, and the NAS-sync same-size revision detection (`server_sync`
+currently skips any file whose destination has an equal byte count, so an
+HDF5 revised in place at the same size is never uploaded). The abort-progress
+and thread-aware-close fixes are **not** separable — they are built on the new
+`core/ui_shell.py` `RunPhase` machinery.

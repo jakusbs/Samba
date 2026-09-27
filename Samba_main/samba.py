@@ -530,14 +530,17 @@ class MainWindow(QMainWindow):
 
         ab.addWidget(_sep())
 
-        # ── 3. Save directory ─────────────────────────────────────────────
+        # ── 3. Save directory + server sync ───────────────────────────────
+        # Both path fields share this row so they cost one row of height
+        # instead of two.  save_dir gets stretch 1 and server_dir stretch 2:
+        # the GVFS SMB path is ~110 characters, so it needs the wider share.
         ab.addSpacing(4)
         _dir_lbl = QLabel("Dir:")
         _dir_lbl.setStyleSheet("color:#89b4fa;font-size:11px;font-weight:bold;")
         ab.addWidget(_dir_lbl)
         ab.addSpacing(4)
         self.save_dir = QLineEdit(os.path.expanduser("~/moke_data"))
-        self.save_dir.setMinimumWidth(180)
+        self.save_dir.setMinimumWidth(130)
         self.save_dir.setFixedHeight(28)
         self.save_dir.setPlaceholderText("Save directory…")
         self.save_dir.setStyleSheet(
@@ -562,28 +565,27 @@ class MainWindow(QMainWindow):
         browse_btn.clicked.connect(self._browse_save_dir)
         ab.addWidget(browse_btn)
 
-        main_v.addWidget(action_bar)
+        ab.addWidget(_sep())
 
-        # ── Server sync bar ───────────────────────────────────────────────────
-        _srv_bar = QWidget(); _srv_bar.setFixedHeight(34)
-        _srv_bar.setObjectName("server_bar")
-        _srv_bar.setStyleSheet(
-            "#server_bar{background:#0e0e1e;border:1px solid #313244;border-radius:6px;}")
-        _srv_row = QHBoxLayout(_srv_bar)
-        _srv_row.setContentsMargins(8, 4, 8, 4); _srv_row.setSpacing(4)
+        # Server sync — same row as Dir:.  Geometry matches the save-directory
+        # field so the two read as siblings; the text stays dimmer because the
+        # server path is optional (blank disables syncing).
         _srv_lbl = QLabel("Server:")
         _srv_lbl.setStyleSheet("color:#89b4fa;font-size:11px;font-weight:bold;")
-        _srv_row.addWidget(_srv_lbl)
+        ab.addWidget(_srv_lbl)
+        ab.addSpacing(4)
         self.server_dir = QLineEdit()
-        self.server_dir.setFixedHeight(24)
+        self.server_dir.setMinimumWidth(170)
+        self.server_dir.setFixedHeight(28)
         self.server_dir.setPlaceholderText("Server sync directory (leave blank to disable)…")
         self.server_dir.setStyleSheet(
             "QLineEdit{background:#1e1e2e;border:1px solid #45475a;border-radius:4px;"
-            "padding:2px 6px;color:#a6adc8;font-size:10px;}"
+            "padding:2px 6px;color:#a6adc8;font-size:11px;}"
             "QLineEdit:focus{border:1px solid #89b4fa;}")
-        _srv_row.addWidget(self.server_dir, stretch=1)
+        ab.addWidget(self.server_dir, stretch=2)
+        ab.addSpacing(4)
         _srv_browse = QPushButton("…")
-        _srv_browse.setFixedSize(24, 24)
+        _srv_browse.setFixedSize(28, 28)
         _srv_browse.setToolTip("Browse for server sync directory")
         _srv_browse.setStyleSheet(
             "QPushButton{background:#252538;border:1px solid #45475a;border-radius:4px;"
@@ -592,10 +594,10 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed{background:#252538;}")
         _srv_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         _srv_browse.clicked.connect(self._browse_server_dir)
-        _srv_row.addWidget(_srv_browse)
-        _srv_row.addSpacing(8)
+        ab.addWidget(_srv_browse)
+        ab.addSpacing(4)
         _sync_btn = QPushButton("↑ Sync")
-        _sync_btn.setFixedHeight(24); _sync_btn.setMinimumWidth(66)
+        _sync_btn.setFixedHeight(28); _sync_btn.setMinimumWidth(66)
         _sync_btn.setToolTip("Sync data to server now")
         _sync_btn.setStyleSheet(
             "QPushButton{background:#1e1e2e;border:1px solid #89b4fa;border-radius:4px;"
@@ -604,8 +606,9 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed{background:#1e1e2e;}")
         _sync_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         _sync_btn.clicked.connect(self._manual_sync)
-        _srv_row.addWidget(_sync_btn)
-        main_v.addWidget(_srv_bar)
+        ab.addWidget(_sync_btn)
+
+        main_v.addWidget(action_bar)
 
         # ── Main content ─────────────────────────────────────────────────────
         v_split = QSplitter(Qt.Orientation.Vertical)
