@@ -10,9 +10,9 @@ jobs:
         python: ['3.10', '3.13']
     env:
       QT_QPA_PLATFORM: offscreen
-      SAMBA_CONFIG_DIR: ${{ runner.temp }}/samba-config
-      XDG_CONFIG_HOME: ${{ runner.temp }}/samba-xdg
-      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+      SAMBA_CONFIG_DIR: /tmp/samba-config
+      XDG_CONFIG_HOME: /tmp/samba-xdg
+      MPLCONFIGDIR: /tmp/samba-matplotlib
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
