@@ -1,3 +1,12 @@
 **/__pycache__/
 *.pyc
 *.pyo
+
+# Device-server sources live in the separate TANGO_Devices repo (§30).  Local
+# working copies sit here on lab machines; a stray `git add -A` would re-commit
+# ~39 MB that was deliberately removed.
+Samba_main/tango_devices/
+Cryo/tango_device_cryo/
+
+# Written by install.sh — records the chosen conda env, per machine.
+.install_config

@@ -29,7 +29,7 @@ v3.3 — Async trigger + corrected timestamps:
   • 10 ms guard delay between state→done and readout prevents reading a stale
     output buffer on devices that report "not RUNNING" before registers update.
 """
-import copy, os, re, time, traceback
+import copy, os, re, threading, time, traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -273,6 +273,12 @@ class ScanRunner:
         self.setup = setup
         self._abort  = False
         self._paused = False
+        # Settling/integration waits block on this instead of time.sleep, so
+        # abort() wakes them immediately.  Without it, aborting a scan with a
+        # long settle or integration time sat out the full sleep on every
+        # remaining step — with a 20 s integration that is 20 s per point
+        # before the loop even looks at the abort flag again.
+        self._stop_event = threading.Event()
         # Set by run(); used by _write_point for failure reporting
         self._lg = lambda *a: None
         self._st = lambda *a: None
@@ -281,7 +287,21 @@ class ScanRunner:
         # auto-pause status message so the user knows what to open in Jive.
         self._last_bad_devs: List[str] = []
 
-    def abort(self):     self._abort  = True
+    def abort(self):
+        self._abort = True
+        self._stop_event.set()
+
+    def _sleep(self, seconds) -> bool:
+        """Sleep, but return at once if the scan is aborted.
+
+        Returns False when the scan has been aborted (the caller is already
+        inside an abort-checked loop in every current call site, so the
+        return value is advisory).
+        """
+        if not self._abort:
+            self._stop_event.wait(max(0.0, float(seconds)))
+        return not self._abort
+
     def pause(self):     self._paused = True
     def resume(self):    self._paused = False
     def is_paused(self): return self._paused
@@ -656,10 +676,10 @@ class ScanRunner:
                     for ix, x_pos in enumerate(x_plan):
                         if self._abort: break
                         while self._paused:
-                            time.sleep(0.05)
+                            self._sleep(0.05)
                             if self._abort: break
                         x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
-                        if settle > 0: time.sleep(settle)
+                        if settle > 0: self._sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
                             _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
@@ -678,10 +698,10 @@ class ScanRunner:
                         ix = n_x - 1 - j   # spatial index same as trace
                         if self._abort: break
                         while self._paused:
-                            time.sleep(0.05)
+                            self._sleep(0.05)
                             if self._abort: break
                         x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
-                        if settle > 0: time.sleep(settle)
+                        if settle > 0: self._sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
                             _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
@@ -707,17 +727,17 @@ class ScanRunner:
                 for ix, x_pos in enumerate(x_plan):
                     if self._abort: break
                     x_read = self._move(act1_p, fast_attr, x_pos, move_t, log=lg, tol=x_tol)
-                    if settle > 0: time.sleep(settle)
+                    if settle > 0: self._sleep(settle)
                     st(f"Moving {cfg['act1_label']} → {x_pos:.4g}")
 
                     # ── Trace sweep (y+) ─────────────────────────────────────
                     for iy, y_pos in enumerate(y_plan):
                         if self._abort: break
                         while self._paused:
-                            time.sleep(0.05)
+                            self._sleep(0.05)
                             if self._abort: break
                         self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
-                        if settle > 0: time.sleep(settle)
+                        if settle > 0: self._sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
                             _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
@@ -736,10 +756,10 @@ class ScanRunner:
                         iy = n_y - 1 - j   # spatial index same as trace
                         if self._abort: break
                         while self._paused:
-                            time.sleep(0.05)
+                            self._sleep(0.05)
                             if self._abort: break
                         self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
-                        if settle > 0: time.sleep(settle)
+                        if settle > 0: self._sleep(settle)
                         vals, t_trigger = self._acquire_point_retry(
                             devp, dev_sensors, trigger_devs, int_time, t0,
                             _RUNNING, cfg, _zi_timeout_ms, max_lockin_settling,
@@ -791,16 +811,16 @@ class ScanRunner:
                 for iy, y_pos in zip(iy_seq, y_seq):
                     if self._abort: break
                     while self._paused:
-                        time.sleep(0.05)
+                        self._sleep(0.05)
                         if self._abort: break
 
                     self._move(act2_p, cfg["act2_attr"], y_pos, move_t, log=lg, tol=y_tol)
                     if settle > 0:
-                        time.sleep(settle)
+                        self._sleep(settle)
                     if _adap_k > 0 and _prev_y_pos is not None:
                         extra = _adap_k * abs(y_pos - _prev_y_pos)
                         if extra > 0:
-                            time.sleep(extra)
+                            self._sleep(extra)
                     _prev_y_pos = y_pos
 
                     x_actual[iy, ix] = x_read   # X coordinate (column-constant)
@@ -858,7 +878,7 @@ class ScanRunner:
                 for ix, x_pos in zip(ix_seq, x_seq):
                     if self._abort: break
                     while self._paused:
-                        time.sleep(0.05)
+                        self._sleep(0.05)
                         if self._abort: break
 
                     if hdf_scan == "FIELD":
@@ -890,17 +910,17 @@ class ScanRunner:
                                f"could not be written to {_field_dev}: "
                                f"{_mag_err} — fix it and press Resume")
                             while self._paused and not self._abort:
-                                time.sleep(0.05)
+                                self._sleep(0.05)
                             if not self._abort:
                                 lg(f"  ↩ Resuming — retrying setpoint {x_pos:.4g}")
                                 safe_write(mag_p, mag_cur_attr, x_pos)
-                        time.sleep(max(cfg["settle_time"], 0.05))
+                        self._sleep(max(cfg["settle_time"], 0.05))
                         if self._wait_not_moving(mag_p, field_move_timeout, lg, st):
                             # The device was ramping (superconducting magnet /
                             # temperature sweep) — apply the settle once more
                             # now that the setpoint has actually been reached.
                             if cfg["settle_time"] > 0:
-                                time.sleep(cfg["settle_time"])
+                                self._sleep(cfg["settle_time"])
                         v, _ = safe_read(mag_p, mag_fld_attr)
                         if v is not None:
                             x_read = v
@@ -922,12 +942,12 @@ class ScanRunner:
                             if _rw_err and count == 0:
                                 lg(f"⚠ RTV40 PulseWidth write: {_rw_err}")
                         if cfg["settle_time"] > 0:
-                            time.sleep(cfg["settle_time"])
+                            self._sleep(cfg["settle_time"])
                         # Adaptive settle: extra wait proportional to position step
                         if _adap_k > 0 and _prev_x_pos is not None:
                             extra = _adap_k * abs(x_pos - _prev_x_pos)
                             if extra > 0:
-                                time.sleep(extra)
+                                self._sleep(extra)
                     _prev_x_pos = x_pos
 
                     x_actual[iy, ix] = x_read
@@ -1050,17 +1070,17 @@ class ScanRunner:
                     raw = hyst_p.read_attribute(attr).value
                     if raw is None:
                         lg(f"  ⚠ {attr} returned None (attempt {attempt+1}/3)")
-                        time.sleep(0.15)
+                        self._sleep(0.15)
                         continue
                     arr = np.asarray(raw, dtype=float).flatten()
                 except Exception as e:
                     lg(f"  ⚠ {attr} attempt {attempt+1}/3: {e}")
-                    time.sleep(0.15)
+                    self._sleep(0.15)
                     continue
                 if len(arr) < _MIN_ARRAY_LEN:
                     lg(f"  ⚠ {attr} too short ({len(arr)} pts, need ≥{_MIN_ARRAY_LEN}) "
                        f"— device may not have finished (attempt {attempt+1}/3)")
-                    time.sleep(0.2)
+                    self._sleep(0.2)
                     continue
                 return arr
             return None
@@ -1395,7 +1415,7 @@ class ScanRunner:
             st(f"Starting DC Hyst: {npts} pts × {cycles} cycles, "
                f"field={field_A:.3f} A, int={int_t:.3g} s/half-loop")
             hyst_p.command_inout("Start")
-            time.sleep(poll_s)   # give device time to enter RUNNING state
+            self._sleep(poll_s)   # give device time to enter RUNNING state
 
             last_cycle = 0
             result_arrays_live: Optional[Dict[str, np.ndarray]] = None
@@ -1424,7 +1444,7 @@ class ScanRunner:
                             pt, pg, c_int, cycles, lg,
                             dl=cbs.get('dc_loop'))
 
-                time.sleep(poll_s)
+                self._sleep(poll_s)
 
             # ── Abort path ────────────────────────────────────────────────────
             if self._abort:
@@ -1683,7 +1703,7 @@ class ScanRunner:
                      "(raise 'Timeout' if the device is simply slow)")
                 bad_devs |= remaining
         else:
-            time.sleep(int_time)
+            self._sleep(int_time)
 
         # Guard delay — let device output registers settle
         time.sleep(READOUT_GUARD_MS / 1000.0)
@@ -1774,7 +1794,7 @@ class ScanRunner:
                     if first_point and not _first_settle_logged:
                         lg(f"── Lock-in settling wait: {max_lockin_settling:.3f} s per point ──")
                         _first_settle_logged = True
-                    time.sleep(max_lockin_settling)
+                    self._sleep(max_lockin_settling)
 
                 vals, t_trigger, _ok = self._do_acquire(
                     devp, dev_sensors, trigger_devs, int_time,
@@ -1802,7 +1822,7 @@ class ScanRunner:
 
             # All attempts failed; block here until the user resumes
             while self._paused and not self._abort:
-                time.sleep(0.05)
+                self._sleep(0.05)
             if not self._abort:
                 lg(f"  ↩ Resuming — retrying {x_lbl}={x_read:.4g}…")
         return vals, t_trigger
@@ -1834,7 +1854,7 @@ class ScanRunner:
            f"(timeout {timeout:.0f} s) ──")
         while not self._abort:
             while self._paused and not self._abort:
-                time.sleep(0.1)
+                self._sleep(0.1)
             try:
                 if proxy.state() != tango.DevState.MOVING:
                     return True
@@ -1848,7 +1868,7 @@ class ScanRunner:
                    f"— continuing with point")
                 return True
             st(f"Ramping to setpoint… {elapsed:.0f} s")
-            time.sleep(0.5)
+            self._sleep(0.5)
         return True
 
     # ── Stage movement ────────────────────────────────────────────────────────

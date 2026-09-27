@@ -24,96 +24,51 @@ import threading
 
 log = logging.getLogger(__name__)
 
-_TIMEOUT_S = 60  # kill the copy process if it hangs longer than this
+_TIMEOUT_S = 60       # SIGKILL the copy process if it hangs longer than this
+_WORKER_BUDGET_S = 45  # worker stops and saves its index before that kill
 
-# Python source run inside the child process.
-# sys.argv[1] is a JSON payload; stdout is a JSON result line.
-_WORKER_SRC = r"""
-import sys, os, shutil, json
-from pathlib import Path
+# Serialise syncs that target the same destination inside this process: the
+# post-scan auto-sync and a manual "↑ Sync" can otherwise overlap and race on
+# the same sidecar files.
+_sync_locks = {}
+_sync_locks_guard = threading.Lock()
 
-def _atomic_copy(src, dst):
-    # Copy via a .part sidecar, then rename into place.
-    # A direct copyfile to the NAS leaves a truncated file under the real name
-    # if the transfer is interrupted -- and this worker is SIGKILLed after a
-    # timeout, so that happens whenever the share is slow.  Until the next sync
-    # notices the size mismatch, that partial file looks exactly like data.
-    # os.replace is atomic within a filesystem, so a reader sees either the old
-    # file or the complete new one.  copyfile (not copy2) because SMB mounts
-    # reject the utime() that copy2 makes afterwards.
-    tmp = dst.with_name(dst.name + '.part')
-    try:
-        shutil.copyfile(str(src), str(tmp))
-        os.replace(str(tmp), str(dst))
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
-def sync_dir(src, dst):
-    sp = Path(src)
-    if not sp.exists():
-        return 0, 0
-    dp = Path(dst)
-    dp.mkdir(parents=True, exist_ok=True)
-    copied = skipped = 0
-    for f in sorted(sp.rglob('*')):
-        if not f.is_file():
-            continue
-        if f.name.endswith('.part'):
-            continue                    # our own interrupted transfer
-        df = dp / f.relative_to(sp)
-        df.parent.mkdir(parents=True, exist_ok=True)
-        if not df.exists() or df.stat().st_size != f.stat().st_size:
-            _atomic_copy(f, df)
-            copied += 1
-        else:
-            skipped += 1
-    return copied, skipped
-
-def sync_file(src, dst_dir):
-    sp = Path(src)
-    if not sp.is_file():
-        return
-    dp = Path(dst_dir)
-    dp.mkdir(parents=True, exist_ok=True)
-    df = dp / sp.name
-    if not df.exists() or df.stat().st_size != sp.stat().st_size:
-        _atomic_copy(sp, df)
-
-args  = json.loads(sys.argv[1])
-lines = []
-for d in args.get('dirs', []):
-    c, s = sync_dir(d['src'], d['dst'])
-    lines.append(f"{d['src']}: {c} copied, {s} skipped")
-for f in args.get('files', []):
-    sync_file(f['src'], f['dst'])
-print(json.dumps({'ok': True, 'log': lines}))
-"""
+def _destination_lock(dirs: list, files: list):
+    key = tuple(sorted({os.path.realpath(e['dst']) for e in list(dirs) + list(files)}))
+    with _sync_locks_guard:
+        return _sync_locks.setdefault(key, threading.Lock())
 
 
 def _run_worker(dirs: list, files: list) -> bool:
     """Spawn a child process to do the actual file I/O.
 
-    The child is killed after _TIMEOUT_S seconds so a hung GVFS call
-    never permanently blocks the calling thread.
+    The child is killed after _TIMEOUT_S seconds so a hung GVFS call never
+    permanently blocks the calling thread.  The worker keeps its own, smaller
+    time budget so it can save its index before that kill lands.
     """
-    payload = json.dumps({'dirs': dirs, 'files': files})
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'sync_worker.py')
+    payload = json.dumps({'dirs': dirs, 'files': files,
+                          'budget_s': _WORKER_BUDGET_S})
     try:
-        r = subprocess.run(
-            [sys.executable, '-c', _WORKER_SRC, payload],
-            capture_output=True, text=True, timeout=_TIMEOUT_S,
-        )
+        with _destination_lock(dirs, files):
+            r = subprocess.run(
+                [sys.executable, worker, payload],
+                capture_output=True, text=True, timeout=_TIMEOUT_S,
+            )
         if r.returncode == 0:
             try:
                 result = json.loads(r.stdout.strip())
-                for line in result.get('log', []):
-                    log.info('server_sync: %s', line)
-            except Exception:
-                pass
-            return True
+            except (ValueError, TypeError):
+                log.warning('server_sync: unreadable worker response')
+                return False
+            for line in result.get('log', []):
+                log.info('server_sync: %s', line)
+            # Propagate the worker's own verdict.  This used to return True
+            # for any clean exit, so deferred files and per-file errors were
+            # reported to the user as a completed sync.
+            return bool(result.get('ok', False))
         log.warning('server_sync failed (exit %d): %s',
                     r.returncode, (r.stderr or r.stdout)[:400])
         return False

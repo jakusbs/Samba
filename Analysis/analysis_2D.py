@@ -722,8 +722,12 @@ def plot_2D_compare_auto(data, pltkeys, px_x, px_y, fs=14, cmap_first='magma',fi
     
     plt.tight_layout(rect=[0, 0, 1, 0.98])  # Leave space for suptitle
     if savepath:
-        plt.savefig(savepath+ '\\'+plotname+'.png',pad_inches = 0.1)
-        plt.savefig(savepath+ '\\'+plotname+'.eps',pad_inches = 0.1)
+        # `plotname` never existed — the parameter is `figname`, so saving a
+        # comparison figure raised NameError.  os.path.join instead of a
+        # hardcoded '\\', which is not a separator on Linux.
+        _name = figname or 'comparison'
+        plt.savefig(os.path.join(savepath, _name + '.png'), pad_inches=0.1)
+        plt.savefig(os.path.join(savepath, _name + '.eps'), pad_inches=0.1)
     plt.show()
 
 
@@ -1805,10 +1809,17 @@ def compare_shifted_reflectivity(d_old, d, I_ch='averagein3value'):
         plt.grid()
         plt.show()
         
-def data_to_csv(D,name):
-    csv_filename = name + '.csv'
-    df = pd.DataFrame(D) 
+def data_to_csv(D, name, output_dir='.'):
+    """Export columns to a semicolon-separated CSV; returns the written path.
 
-    
-    df.to_csv(self.path1 +'//'+ csv_filename, index=False,sep=';')
-    print('Data saved at %s' %self.path1)
+    Was unusable: a module-level function referencing `self.path1`, with
+    pandas never imported — every call raised NameError.  The destination is
+    now an explicit argument (defaulting to the working directory) instead of
+    an attribute that does not exist here.
+    """
+    import pandas as pd
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, name + '.csv')
+    pd.DataFrame(D).to_csv(path, index=False, sep=';')
+    print('Data saved at %s' % path)
+    return path

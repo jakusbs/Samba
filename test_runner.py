@@ -5,7 +5,7 @@ Run from the repo root:
 
 No Qt, TANGO, or lab hardware needed.
 """
-import os, sys, time, types, unittest
+import os, sys, threading, time, types, unittest
 from unittest.mock import MagicMock
 import numpy as np
 
@@ -75,6 +75,9 @@ def _make_runner():
     r._abort   = False
     r._paused  = False
     r._trigger_consec_fails = {}
+    # Settling/integration waits block on this so abort() wakes them; the
+    # helper bypasses __init__, so it has to mirror the real attribute.
+    r._stop_event = threading.Event()
     return r
 
 
@@ -768,6 +771,63 @@ class TestInterleaved2D(unittest.TestCase):
         self.assertEqual([ix for (iy, ix) in trace if iy == 0],   [0, 1, 2])
         self.assertEqual([ix for (iy, ix) in retrace if iy == 0], [2, 1, 0],
                          "Retrace must sweep X in reverse")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7b. Abort wakes settling / integration waits
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAbortWakesSleep(unittest.TestCase):
+    """Settling and integration used plain time.sleep().
+
+    Aborting a scan therefore sat out the full sleep before the loop looked at
+    the abort flag again — with a 20 s integration time that is up to 20 s per
+    remaining step.  _sleep() blocks on an Event that abort() sets.
+    """
+
+    def test_sleep_returns_immediately_once_aborted(self):
+        r = _make_runner()
+        r.abort()
+        t0 = time.time()
+        r._sleep(30.0)
+        self.assertLess(time.time() - t0, 0.5,
+                        "a sleep started after abort must not block")
+
+    def test_abort_from_another_thread_wakes_a_running_sleep(self):
+        r = _make_runner()
+        threading.Timer(0.05, r.abort).start()
+        t0 = time.time()
+        r._sleep(30.0)
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 2.0,
+                        f"abort must wake the wait; it blocked {elapsed:.1f}s")
+
+    def test_sleep_still_waits_when_not_aborted(self):
+        """It must remain a real sleep — otherwise settling stops happening."""
+        r = _make_runner()
+        t0 = time.time()
+        r._sleep(0.20)
+        self.assertGreaterEqual(time.time() - t0, 0.15)
+
+    def test_abort_sets_both_flag_and_event(self):
+        r = _make_runner()
+        self.assertFalse(r._abort)
+        self.assertFalse(r._stop_event.is_set())
+        r.abort()
+        self.assertTrue(r._abort)
+        self.assertTrue(r._stop_event.is_set())
+
+    def test_sleep_reports_abort_state(self):
+        r = _make_runner()
+        self.assertTrue(r._sleep(0.0))
+        r.abort()
+        self.assertFalse(r._sleep(0.0))
+
+    def test_negative_duration_is_harmless(self):
+        r = _make_runner()
+        t0 = time.time()
+        r._sleep(-5)
+        self.assertLess(time.time() - t0, 0.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

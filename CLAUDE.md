@@ -5618,3 +5618,127 @@ currently skips any file whose destination has an equal byte count, so an
 HDF5 revised in place at the same size is never uploaded). The abort-progress
 and thread-aware-close fixes are **not** separable — they are built on the new
 `core/ui_shell.py` `RunPhase` machinery.
+
+---
+
+## 82. Recent Changes (September 2026) — Three Fixes Ported From the Declined 13.31 Branch
+
+Branch `feat/reliability-ports` (257 + 18 tests). App version → **v13.33**.
+`codex/samba-ui-reliability` was declined for its visuals (§81), but three of
+its **non-visual** fixes were real. Ported here; the branch was then deleted.
+None of the new `core/ui_shell.py` machinery came with them.
+
+### 1. `Analysis/analysis_2D.py` — two functions that always raised
+`pyflakes` found five undefined names, all on live code paths:
+- **`data_to_csv` never worked at all.** A module-level function referencing
+  `self.path1`, with pandas never imported — two `NameError`s per call. The
+  destination is now an explicit `output_dir` argument (default `.`), pandas
+  is imported in the function, and the written path is returned.
+- **`plot_2D_compare_auto` could not save.** It used an undefined `plotname`
+  (the parameter is `figname`) and built the path with a hardcoded Windows
+  `'\\'`. Now `os.path.join(savepath, figname or 'comparison')`.
+
+Verified by actually calling `data_to_csv` and reading the CSV back.
+
+### 2. Abort no longer waits out the settle (`core/scan/runner.py`)
+Settling, lock-in settling and the integration fallback used plain
+`time.sleep()`, so after pressing Abort the engine sat out the **entire**
+remaining sleep before looking at the flag again — with a 20 s integration
+time that is up to 20 s per remaining step.
+
+`ScanRunner` gained a `threading.Event` that `abort()` sets, and `_sleep()`
+which waits on it:
+
+```python
+def abort(self):
+    self._abort = True
+    self._stop_event.set()
+
+def _sleep(self, seconds) -> bool:
+    if not self._abort:
+        self._stop_event.wait(max(0.0, float(seconds)))
+    return not self._abort
+```
+
+**28 waits converted**, chosen by line number after inspecting each site (a
+naive string replace aliases: the 28-space-indented pattern is a substring of
+the 32-space one). Converted: every per-point `settle`, the adaptive-settle
+`extra`, the FIELD settle/ramp re-apply, the 0.5 s ramp poll, the DC-hyst poll
+loop, `max_lockin_settling`, the `int_time` fallback, and the pause loops —
+all of which already carry an abort guard, so none can busy-spin once the
+event is set. **Seven left as `time.sleep`** on purpose: `RETRY_DELAY` backoff
+and the sub-10 ms polls (`0.002`, `0.01`, `0.005`, the readout guard, and the
+50 ms state-poll retry at what is now line 1693 — that one is *not* a pause
+loop, despite matching the indentation).
+
+Measured end-to-end on a 20-point scan with `settle_time=3 s`, abort at
+t=1.0 s: stopped after **3.00 s → 1.00 s**, i.e. abort latency from the full
+remaining settle to ~0.
+
+`test_runner._make_runner()` builds a runner via `__new__`, so it now has to
+set `_stop_event` itself — the helper must mirror the real object rather than
+`_sleep` defending against a half-built one.
+
+### 3. NAS sync: same-size revisions, and files still being written
+`core/server_sync.py`'s inline worker string became **`core/sync_worker.py`**
+(a real module, so it is testable). Two correctness fixes:
+- **A file revised in place at the same byte count was silently never
+  uploaded** — the skip test was `dst.st_size != src.st_size`. Content is now
+  identified by a blake2b digest of the source, remembered in a small
+  `.samba-sync-index.json` at the destination.
+- **An in-progress scan file was uploaded mid-write.** HDF5 files whose
+  `scan_status` is `"running"` — or which cannot be opened because the writer
+  holds the lock — are deferred to the next sync. Checked lazily, only for
+  files about to be copied, so the open cost is not paid for the archive.
+
+`_run_worker` also now **propagates the worker's verdict**; it returned `True`
+for any clean exit, so deferred files and per-file errors were reported as a
+completed sync. Syncs to the same destination are serialised in-process so the
+post-scan auto-sync and a manual `↑ Sync` cannot race on the sidecars.
+
+**Deliberately unlike the 13.31 version, which would not have survived this
+lab's archive.** That worker digests the *destination* too, and verifies every
+copy by reading it back. Measured here: the NAS reads at **5.9 MB/s / 26 ms
+per file** against a local disk at **~1 GB/s**. Hashing the remote side of the
+1.1 GB Green directory is ~250 s, against the parent's 60 s SIGKILL — the
+first sync would be killed before writing its index and would **never make
+progress**. So:
+- only the **source** is ever digested (whole archive ≈ 1 s locally);
+- a pre-existing destination file is **adopted on size + mtime**, not by
+  hashing it. `copyfile` does not preserve mtime, so a destination's mtime is
+  its upload time: a source newer than its destination changed after upload
+  and is re-copied;
+- copies are size-verified rather than read back — truncation is the realistic
+  failure, and a full verify would halve throughput on a 6 MB/s link;
+- a **45 s soft budget** (under the 60 s kill) stops cleanly and saves the
+  index, and the index is checkpointed every 200 files, so a backlog makes
+  progress across syncs instead of being killed part-way every time.
+
+Correctness does not depend on the index: a lost one costs a stat-only
+re-adoption pass, verified by a test.
+
+Measured read-only against the real archive and the real NAS mount: decision
+pass **10.6 s for 3702 files** (2.85 ms/file, stat-bound), **0 copies, 3700
+skips, 2 adoptions** — fits in one sync. The index already on the NAS (written
+by the 13.31 worker) is read compatibly; a `source_path` spelling mismatch
+degrades to a local digest, not a re-upload.
+
+### Tests
+- `test_runner.py` 251 → **257**: `TestAbortWakesSleep` (sleep started after
+  abort returns at once, abort from another thread wakes a running wait, it is
+  still a real sleep otherwise, flag+event both set, return value, negative
+  duration).
+- New **`tests/test_sync_worker.py`** (18): the same-size revision is
+  uploaded, unchanged files are not re-copied, adoption on first run, a source
+  newer than its destination is re-copied, a running HDF5 is deferred (by
+  `scan_status` and by the writer's lock), `.part` sidecars are never
+  published, the index is not itself synced, a lost index does not re-upload,
+  the time budget stops cleanly and the next run finishes, notebook growth is
+  republished, and the worker runs as a subprocess emitting JSON.
+
+### Noted, not fixed
+Closing the application during a sync silently abandons it: tonight's 20:37
+sync logged `starting` and never a result, because the window was closed while
+the daemon thread was still working. The files did reach the NAS (verified by
+size), but the outcome was never reported. The 13.31 fix for this is part of
+the `ui_shell` rework and was not separable.
