@@ -5736,6 +5736,15 @@ degrades to a local digest, not a re-upload.
   the time budget stops cleanly and the next run finishes, notebook growth is
   republished, and the worker runs as a subprocess emitting JSON.
 
+### The 13.31 branch was deleted
+`codex/samba-ui-reliability` is gone from both the local clones and GitHub.
+Its tip was **458d37dcfc9a517eb3e809262770e593836e8e73** ("Preserve abort
+progress and re-enable Start after scanlists"); GitHub keeps unreferenced
+commits reachable by SHA for a while, so `git fetch origin 458d37d` can still
+recover it in the near term. Its own notes are at `docs/13.31-ui-and-reliability.md`
+**in that commit**, not on main. What was in it and why the rest was declined
+is recorded in §81.
+
 ### Noted, not fixed
 Closing the application during a sync silently abandons it: tonight's 20:37
 sync logged `starting` and never a result, because the window was closed while
