@@ -16,6 +16,33 @@ from typing import Optional
 
 _CONFIGURED = False
 
+# Third-party loggers pinned above DEBUG.  The root logger runs at DEBUG so
+# Samba's own modules leave a full trail, but that also sweeps in every
+# library's debug chatter — and matplotlib's font_manager scores every
+# installed font on each lookup.  Measured on the lab machine: 41 602 of
+# 41 672 recorded lines were matplotlib.font_manager, i.e. 11 MB of logs
+# holding 70 lines that meant anything.  With 2 MB × 5 rotation that flushed
+# a real warning off disk within about a minute of starting the app.
+#
+# INFO rather than WARNING: matplotlib's "building the font cache" notice is
+# worth keeping, and these libraries are not chatty above DEBUG.
+_NOISY_LOGGERS = ("matplotlib", "PIL", "h5py", "fontTools")
+
+# Escape hatch for actually debugging one of the above.
+_DEBUG_ENV = "SAMBA_LOG_DEBUG"
+
+
+def quiet_noisy_loggers(level: int = logging.INFO) -> None:
+    """Raise third-party loggers to *level* (no-op if SAMBA_LOG_DEBUG is set).
+
+    Only the named libraries are touched; Samba's own loggers keep whatever
+    the root logger is set to.
+    """
+    if os.environ.get(_DEBUG_ENV):
+        return
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(level)
+
 
 def setup_logging(app_name: str = "samba",
                   log_dir: Optional[Path] = None,
@@ -26,6 +53,11 @@ def setup_logging(app_name: str = "samba",
     Log files live in ``<CONFIG_DIR>/logs/<app_name>.log`` (2 MB each, 5
     backups → ~10 MB max on disk), so a hardware problem can be diagnosed
     after the fact without flooding the disk.
+
+    Samba's own modules log at DEBUG; the libraries in ``_NOISY_LOGGERS`` are
+    pinned to INFO so their debug chatter cannot rotate a real warning off
+    disk.  Set ``SAMBA_LOG_DEBUG=1`` to keep everything at DEBUG when
+    diagnosing one of those libraries.
 
     Idempotent: calling twice is a no-op, so an app that also has its own
     logging setup cannot end up with duplicated handlers.
@@ -50,6 +82,9 @@ def setup_logging(app_name: str = "samba",
     )
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # Must happen before anything imports matplotlib and starts resolving
+    # fonts, otherwise the first flood is already on disk.
+    quiet_noisy_loggers()
 
     log_path: Optional[Path] = None
     try:

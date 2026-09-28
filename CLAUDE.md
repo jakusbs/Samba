@@ -5751,3 +5751,69 @@ sync logged `starting` and never a result, because the window was closed while
 the daemon thread was still working. The files did reach the NAS (verified by
 size), but the outcome was never reported. The 13.31 fix for this is part of
 the `ui_shell` rework and was not separable.
+
+---
+
+## 83. Recent Changes (September 2026) — Application Log No Longer Floods
+
+Branch `feat/reliability-ports` (257 + 25 tests). App version → **v13.34**.
+Both apps (`core/applog.py` is shared).
+
+### The log was 98 % matplotlib
+`setup_logging` (§60) puts the root logger **and** the file handler at DEBUG so
+Samba's own modules leave a full trail after a hardware problem. That also
+swept in every library's debug output — and matplotlib's `font_manager` scores
+**every installed font** on a lookup miss, one log line each.
+
+Measured across all rotated logs on the lab machine:
+
+| logger | lines |
+|---|---|
+| `matplotlib.font_manager` (DEBUG) | **41 602** |
+| everything else combined | **70** |
+
+11 MB of log files holding 70 lines that meant anything. With 2 MB × 5
+rotation the useful history was minutes: a reproduction showed **three plot
+draws producing 2.27 MB and a full rotation**, with the startup line already
+displaced into `probe.log.1` **one second** after it was written. So the log
+was actively useless for the thing it exists for — diagnosing a fault after it
+happened.
+
+### Fix
+`core/applog.py` gains `quiet_noisy_loggers()`, called from `setup_logging`
+right after `root.setLevel(DEBUG)`:
+
+```python
+_NOISY_LOGGERS = ("matplotlib", "PIL", "h5py", "fontTools")
+```
+
+pinned to **INFO** — not WARNING, because matplotlib's "building the font
+cache" notice is worth keeping and these libraries are not chatty above DEBUG.
+`matplotlib.font_manager` is covered as a child of `matplotlib`. Samba's own
+loggers are untouched and keep full DEBUG.
+
+`SAMBA_LOG_DEBUG=1` disables the pinning, for when one of those libraries is
+itself the thing being debugged.
+
+### Measured
+Identical harness (real `setup_logging`, then three figures drawn at three
+font sizes):
+
+| | log lines | library noise | bytes |
+|---|---|---|---|
+| before | 624 (+ a rotated 2 MB backup) | 623 | 2 271 KB |
+| after | **3** | **0** | **249** |
+| after, `SAMBA_LOG_DEBUG=1` | 624 | 623 | (restored) |
+
+### Tests
+New **`tests/test_applog.py`** (7): matplotlib and h5py pinned, the
+`font_manager` child covered via its parent, warnings still get through,
+Samba's own loggers still at DEBUG, the env var restores everything, and
+`setup_logging` actually calls it (the flood came back the moment it was
+available but unwired).
+
+### Note
+The existing ~11 MB of noise-filled logs in `~/.config/moke_scan/logs/` are
+not cleaned up by this change. They will now age out very slowly, because the
+log grows in kilobytes rather than megabytes — delete `samba.log.*` by hand if
+the disk space matters.

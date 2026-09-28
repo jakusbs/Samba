@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # publishes itself as 13.31, and APP_VERSION is written into every scan file as
 # `samba_version` provenance (§60).  Two different codebases stamping the same
 # version into data would make a file impossible to match to the code.
-APP_VERSION = "13.33"
+APP_VERSION = "13.34"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 12
