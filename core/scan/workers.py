@@ -4,7 +4,7 @@ ScanWorker (single scan QThread) and ScanlistWorker (N-scan list QThread).
 """
 import copy, os, time, traceback
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -70,7 +70,7 @@ class ScanlistWorker(QThread):
     cycle_done    = pyqtSignal(int)
     status_msg    = pyqtSignal(str)
     log_msg       = pyqtSignal(str)
-    scan_done     = pyqtSignal(int, str)
+    scan_done     = pyqtSignal(int, str, dict)   # idx, path, hw_* block of that scan
     all_done      = pyqtSignal(str)
     scan_aborted  = pyqtSignal()
     error_msg     = pyqtSignal(str)
@@ -82,7 +82,8 @@ class ScanlistWorker(QThread):
                  flip_order: str = ORDER_AB,
                  setup_name: str = "",
                  refocus_every_min: float = 0.0,
-                 last_focus_t: Optional[float] = None):
+                 last_focus_t: Optional[float] = None,
+                 hw_snapshot_fn: Optional[Callable[[dict], dict]] = None):
         super().__init__()
         # Accept either a single config dict or a per-cycle list of configs.
         # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
@@ -107,6 +108,10 @@ class ScanlistWorker(QThread):
         self._refocus_min  = max(0.0, float(refocus_every_min or 0.0))
         self._last_focus_t = last_focus_t
         self._refocus_hold = False
+        # Re-reads the host's hw_* metadata block.  Called once per scan, so
+        # each file records the polarity it was actually measured at — see
+        # _refresh_hw_snapshot.
+        self._hw_snapshot_fn = hw_snapshot_fn
 
     def abort(self):
         self._abort = True
@@ -230,6 +235,45 @@ class ScanlistWorker(QThread):
                 return
             prev_fv = fv
             time.sleep(0.5)
+
+    def _refresh_hw_snapshot(self, sc: dict) -> dict:
+        """Re-read the hw_* metadata block for the scan that is about to run.
+
+        The host takes its hardware snapshot once, before the worker starts,
+        and injects it into every config in the list — so every scan used to
+        record the relay position and field the list *began* with.  From the
+        second cycle on the HDF5 metadata therefore disagreed with the
+        scanlist .txt, which derives its polarity from the state the worker
+        actually commanded.  Re-reading here — after the field flip, after
+        the relay write — makes each file describe its own measurement.
+
+        Returns the hw_* block as stored in ``sc``, so the caller can hand
+        the same values to the lab notebook.
+        """
+        if self._hw_snapshot_fn is not None:
+            try:
+                snap = self._hw_snapshot_fn(sc)
+            except Exception as e:
+                # Keep the list-start block rather than leaving the file with
+                # no hardware metadata at all; the relay override below still
+                # corrects the polarity, which is what the analysis groups on.
+                self.log_msg.emit(f"⚠ hardware snapshot failed: {e}")
+                snap = None
+            if snap is not None:
+                # Replace the block rather than merge into it: a read that
+                # failed this time must leave its key absent, not carry the
+                # list-start value forward as though it were still true.
+                for k in [k for k in sc if k.startswith("hw_")]:
+                    del sc[k]
+                sc.update(snap)
+
+        # The commanded relay state wins over any readback: the write just
+        # above may not be reflected by the device yet, and this is the state
+        # the scanlist .txt records relay_sign from — the two must agree.
+        if self.relay_flip:
+            sc["hw_relay_state"] = self._relay_state
+
+        return {k: v for k, v in sc.items() if k.startswith("hw_")}
 
     def _run_list(self):
         # Polarity devices must be real connections: a cached SimProxy would
@@ -360,6 +404,7 @@ class ScanlistWorker(QThread):
                     self.log_msg.emit(f"⚠ relay: {e}")
 
                 sc = copy.deepcopy(sc_template)
+                hw_snap = self._refresh_hw_snapshot(sc)
                 self._runner = ScanRunner(sc, self.setup)
                 fn = self._runner.run({
                     'point':    self.point_done.emit,
@@ -377,7 +422,10 @@ class ScanlistWorker(QThread):
                         f"Aborted scan not recorded in scanlist: {fn}")
                 elif fn:
                     results.append((fn, relay_sign, field_T))
-                    self.scan_done.emit(scan_idx, fn)
+                    # The snapshot travels with the signal rather than being
+                    # read off the worker: the slot runs on the GUI thread
+                    # and by then the worker may already be a scan ahead.
+                    self.scan_done.emit(scan_idx, fn, hw_snap)
                 scan_idx += 1
                 self.cycle_done.emit(i)   # reset live display between directions
                 self._maybe_refocus()

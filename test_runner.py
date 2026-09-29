@@ -1987,6 +1987,160 @@ class TestScanlistFlipSchedule(unittest.TestCase):
         self.assertIn("relay_flip=1", head)
 
 
+class TestScanlistHwSnapshotPerScan(unittest.TestCase):
+    """The hw_* metadata block must describe the scan it is stored in.
+
+    The host snapshots the hardware once, before the worker starts, and
+    injects it into every config in the list — so every scan used to record
+    the relay position the list *began* with.  Reported from the lab: a
+    2-scan list measured A(0) B(1) with both files claiming 0, and the next
+    current, which started at B(1), giving A(0) B(1) → both claiming 1 —
+    while the scanlist .txt had the polarity right all along.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = _import_workers()
+
+    def _run_list(self, n, relay0=0, relay_flip=True, order="ABBA",
+                  snapshot_fn="live", start_cfg=None):
+        """Run a list and return (per-scan cfgs seen by ScanRunner, txt path).
+
+        snapshot_fn: "live"  — reads the fake relay, as the host does
+                     "stale" — always returns the list-start state
+                     "empty" — every read failed
+                     None    — no snapshot callable at all
+        """
+        import tempfile
+        W = self.W
+
+        class _Relay:
+            def __init__(self, state):
+                self.state = state
+            def read_attribute(self, attr):
+                return types.SimpleNamespace(value=self.state)
+            def write_attribute(self, attr, val):
+                self.state = int(val)
+
+        relay  = _Relay(relay0)
+        magnet = object()
+        seen   = []          # cfg handed to each ScanRunner
+        emits  = []          # (idx, path, hw_snap) from scan_done
+
+        def _fresh(dev):
+            return (relay if dev == "relay/dev" else magnet), None
+        def _read(proxy, attr, **kw):
+            return (1.0, None) if proxy is magnet else (0.0, None)
+        def _write(proxy, attr, val, **kw):
+            return None
+
+        class _Runner:
+            def __init__(self, cfg, setup): seen.append(dict(cfg))
+            def run(self, cbs):             return "/data/scan.h5"
+            def abort(self):                pass
+            def pause(self):                pass
+            def resume(self):               pass
+            def is_paused(self):            return False
+
+        setup = {"relay_device": "relay/dev", "relay_attr": "switchvar",
+                 "magnet_device": "magnet/dev",
+                 "save_dir": os.path.join(tempfile.mkdtemp(), "data"),
+                 "demagnetize_after_scan": False}
+
+        fns = {
+            "live":  lambda sc: {"hw_relay_state": relay.state,
+                                 "hw_field_mT": 1.0},
+            "stale": lambda sc: {"hw_relay_state": relay0,
+                                 "hw_field_mT": 1.0},
+            "empty": lambda sc: {},
+            None:    None,
+        }
+
+        cfg = dict(start_cfg or {})
+        cfg.setdefault("name", "s_trace")
+        w = W.ScanlistWorker(cfg, setup, n, "list", relay_flip, False,
+                             flip_order=order,
+                             hw_snapshot_fn=fns[snapshot_fn])
+        w._wait_field_settled = lambda *a, **kw: None
+        w.scan_done = types.SimpleNamespace(
+            emit=lambda *a: emits.append(a), connect=lambda *a: None)
+
+        orig = (W.fresh_proxy, W.safe_read, W.safe_write)
+        W.fresh_proxy, W.safe_read, W.safe_write = _fresh, _read, _write
+        old_runner, W.ScanRunner = W.ScanRunner, _Runner
+        try:
+            w._run_list()
+        finally:
+            W.fresh_proxy, W.safe_read, W.safe_write = orig
+            W.ScanRunner = old_runner
+
+        self._emits = emits
+        return seen, os.path.join(setup["save_dir"], "ScanLists", "list.txt")
+
+    # ── The reported bug ─────────────────────────────────────────────────────
+    def test_relay_metadata_follows_each_scan(self):
+        seen, _ = self._run_list(2, relay0=0)
+        self.assertEqual([c["hw_relay_state"] for c in seen], [0, 1])
+
+    def test_relay_metadata_follows_a_list_starting_at_1(self):
+        """The second current of the reported sweep: the relay is left at 1
+        by the previous list, so the schedule runs 1, 0 — and the metadata
+        used to read 1, 1."""
+        seen, _ = self._run_list(2, relay0=1)
+        self.assertEqual([c["hw_relay_state"] for c in seen], [1, 0])
+
+    def test_metadata_agrees_with_the_scanlist_txt(self):
+        """relay_sign in the .txt and hw_relay_state in the file must never
+        disagree — the analysis groups on one and the operator reads the
+        other."""
+        seen, txt = self._run_list(4, relay0=0)
+        signs = [int(ln.split("\t")[1])
+                 for ln in open(txt).read().splitlines()
+                 if ln and not ln.startswith("#")]
+        self.assertEqual(signs,
+                         [+1 if c["hw_relay_state"] == 0 else -1 for c in seen])
+
+    # ── Failure modes ────────────────────────────────────────────────────────
+    def test_commanded_relay_state_beats_a_lagging_readback(self):
+        """A relay that has not yet reported the position just written must
+        not be able to reintroduce the bug."""
+        seen, _ = self._run_list(4, relay0=0, snapshot_fn="stale")
+        self.assertEqual([c["hw_relay_state"] for c in seen], [0, 1, 1, 0])
+
+    def test_failed_reads_drop_the_key_rather_than_keep_a_stale_value(self):
+        seen, _ = self._run_list(2, snapshot_fn="empty",
+                                 start_cfg={"hw_field_mT": 99.0})
+        self.assertNotIn("hw_field_mT", seen[1])
+
+    def test_non_hw_config_keys_survive_the_refresh(self):
+        seen, _ = self._run_list(2, snapshot_fn="empty",
+                                 start_cfg={"integration_time": 0.25})
+        self.assertEqual(seen[1]["integration_time"], 0.25)
+
+    def test_relay_not_forced_when_flip_is_disabled(self):
+        """Nothing is switching, so the device readback stands on its own."""
+        seen, _ = self._run_list(2, relay0=1, relay_flip=False,
+                                 snapshot_fn="live")
+        self.assertEqual([c["hw_relay_state"] for c in seen], [1, 1])
+
+    def test_no_snapshot_callable_still_corrects_the_relay(self):
+        """Hosts that pass no callable (older callers, tests) still get the
+        polarity right — only the other hw_* keys stay at list-start."""
+        seen, _ = self._run_list(2, relay0=0, snapshot_fn=None,
+                                 start_cfg={"hw_relay_state": 0})
+        self.assertEqual([c["hw_relay_state"] for c in seen], [0, 1])
+
+    # ── Lab notebook ─────────────────────────────────────────────────────────
+    def test_scan_done_carries_this_scans_snapshot(self):
+        """The notebook row is built on the GUI thread, by which time the
+        worker may be a scan ahead — so the block travels with the signal."""
+        seen, _ = self._run_list(2, relay0=0)
+        self.assertEqual([e[2]["hw_relay_state"] for e in self._emits], [0, 1])
+        for e, c in zip(self._emits, seen):
+            self.assertEqual(e[2],
+                             {k: v for k, v in c.items() if k.startswith("hw_")})
+
+
 class TestNStepPair(unittest.TestCase):
     """core/nstep.py — N ↔ Δ-step coupling used by the trajectory panels."""
 

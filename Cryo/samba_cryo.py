@@ -2376,6 +2376,11 @@ class CryoMainWindow(QMainWindow):
             hw_snap["_temp_sweep_stop_K"]  = t_stop
             hw_snap["_temp_sweep_step_K"]  = (
                 (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
+        # Taken here for the first scan, and re-taken by the worker before
+        # every later one: the field changes between cycles when field flip
+        # is on, so a single list-start snapshot mislabels every scan after
+        # the first.  The _temp_sweep_* keys are config-derived, not device
+        # reads, so they survive the worker's per-scan refresh.
         for c in cfg_list:
             c.update(hw_snap)
 
@@ -2390,7 +2395,10 @@ class CryoMainWindow(QMainWindow):
                                              self.sl_panel.refocus.interval_min()
                                              if self.sl_panel.refocus.is_enabled()
                                              else 0.0),
-                                         last_focus_t=self._focus_t)
+                                         last_focus_t=self._focus_t,
+                                         hw_snapshot_fn=lambda sc: _read_hw_snapshot(
+                                             setup, sc.get("scan_type", "SPATIAL"),
+                                             is_temp_sweep=is_temp_sweep))
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
@@ -2814,10 +2822,14 @@ class CryoMainWindow(QMainWindow):
         if not self._run_refocus(_done):
             _done(None)
 
-    def _on_sl_scan_done(self, idx: int, fn: str):
+    def _on_sl_scan_done(self, idx: int, fn: str, hw_snap: Optional[dict] = None):
         """Per-file callback from ScanlistWorker — updates status bar and
         records a lab-notebook entry for the file just written (each
-        scanlist file previously produced no notebook row at all)."""
+        scanlist file previously produced no notebook row at all).
+
+        ``hw_snap`` is the hardware state of *this* file, re-read by the
+        worker; the config still carries the list-start block.
+        """
         self._status_bar_scan_done()
         t_start = self._sl_scan_t0
         self._sl_scan_t0 = _time.time()   # next file starts now
@@ -2830,6 +2842,10 @@ class CryoMainWindow(QMainWindow):
             nb = _nb_path(setup.get("notebook_dir", "~/moke_data"), "Cryo")
             base_cfg = cfg_list[idx % len(cfg_list)]
             entry = dict(base_cfg)
+            if hw_snap is not None:
+                for _k in [k for k in entry if k.startswith("hw_")]:
+                    del entry[_k]
+                entry.update(hw_snap)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
             # Mark this row as part of the scanlist (blank for single scans).

@@ -2346,6 +2346,9 @@ class MainWindow(QMainWindow):
         self._apply_field_setpoint_for_scan(cfg, self.sl_panel.hw)
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
+        # Taken here for the first scan, and re-taken by the worker before
+        # every later one: the relay and the field change between cycles, so
+        # a single list-start snapshot mislabels every scan after the first.
         cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
 
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
@@ -2356,7 +2359,9 @@ class MainWindow(QMainWindow):
                                              self.sl_panel.refocus.interval_min()
                                              if self.sl_panel.refocus.is_enabled()
                                              else 0.0),
-                                         last_focus_t=self._focus_t)
+                                         last_focus_t=self._focus_t,
+                                         hw_snapshot_fn=lambda sc: _read_hw_snapshot(
+                                             setup, sc.get("scan_type", "SPATIAL")))
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
@@ -2776,10 +2781,14 @@ class MainWindow(QMainWindow):
         if not self._run_refocus(_done):
             _done(None)
 
-    def _on_sl_scan_done(self, idx: int, fn: str):
+    def _on_sl_scan_done(self, idx: int, fn: str, hw_snap: Optional[dict] = None):
         """Per-file callback from ScanlistWorker — updates status bar and
         records a lab-notebook entry for the file just written (each
-        scanlist file previously produced no notebook row at all)."""
+        scanlist file previously produced no notebook row at all).
+
+        ``hw_snap`` is the hardware state of *this* file, re-read by the
+        worker; the config still carries the list-start block.
+        """
         self._status_bar_scan_done()
         t_start = self._sl_scan_t0
         self._sl_scan_t0 = _time.time()   # next file starts now
@@ -2790,6 +2799,10 @@ class MainWindow(QMainWindow):
             nb = _nb_path(setup.get("notebook_dir", "~/moke_data"),
                           self._active_setup_name)
             entry = dict(self._current_scan_cfg)
+            if hw_snap is not None:
+                for _k in [k for k in entry if k.startswith("hw_")]:
+                    del entry[_k]
+                entry.update(hw_snap)
             entry["_scan_start_time"] = t_start
             entry["_hdf5_path"] = os.path.abspath(fn)
             # Mark this row as part of the scanlist (blank for single scans).

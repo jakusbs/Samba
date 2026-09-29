@@ -5857,3 +5857,81 @@ inside a broad `except` that turned a crash into a silent no-op. A whole-tree
 `pyflakes` undefined-name sweep costs seconds and is now worth running before
 any merge to main — the CI workflow on the declined branch did exactly this
 (`ruff check` with `F821`), which is how that branch had both fixes.
+
+---
+
+## 85. Recent Changes (September 2026) — Scanlist Metadata Records the Scan's Own Hardware State
+
+Branch `fix/scanlist-hw-snapshot-per-scan` (266 tests). App version → **v13.36**.
+Both apps. Reported from the lab: in a relay-flip scanlist the **scanlist .txt
+had the polarity right but the HDF5 metadata did not**.
+
+### The symptom, exactly
+A 2-scan list run at two currents. The relay really went A(0) B(1), then — the
+second list starting from wherever the first left it — B(1) A(0). The metadata
+read `0, 0` and then `1, 1`.
+
+### Cause: one snapshot, N scans
+`_read_hw_snapshot()` is called **once**, in `_launch_scanlist` (Samba_main) /
+the scanlist start path (Cryo), and its `hw_*` keys are injected into the config
+handed to `ScanlistWorker`. The worker deep-copies that config per scan, so
+every file in the list recorded the hardware state as it was **before the first
+cycle** — and the relay and the field are precisely the two things the scanlist
+then changes. The first scan is right by construction and everything after it
+is the list-start value, which is why the list-start value differs per current
+(`[0,0]`, then `[1,1]`) and looks almost plausible.
+
+The same staleness applied to `hw_field_mT` and `hw_magnet_current_A` in a
+**field-flip** list — arguably worse, since the sign of the recorded field was
+wrong for half the scans — and to the lab-notebook rows, which
+`_on_sl_scan_done` builds from the same launch-time config.
+
+Reproduced end to end against the real `ScanlistWorker` with fake hardware:
+pre-fix `[0,0] [1,1]`, post-fix `[0,1] [1,0]`, matching the report exactly.
+
+### Fix — re-read per scan, in the worker
+`ScanlistWorker` takes a `hw_snapshot_fn` callable and calls it from the new
+`_refresh_hw_snapshot(sc)` once per scan, **after** the field flip and **after**
+the relay write, just before `ScanRunner` is constructed. Both apps pass a
+closure over their own `_read_hw_snapshot` (Cryo's also carries
+`is_temp_sweep`). Both snapshot functions are pure `get_proxy` + `safe_read`
+device reads with no Qt or GUI state, so calling them on the worker thread is
+safe — and it is strictly better than the GUI thread, where §61 had to bound
+them to stop a dead device freezing the window.
+
+Three deliberate choices:
+
+- **The block is replaced, not merged.** A read that fails this time leaves its
+  key *absent* rather than carrying the list-start value forward as though it
+  were still true. Non-`hw_` keys are untouched, so Cryo's config-derived
+  `_is_temp_sweep` / `_temp_sweep_*` survive.
+- **The commanded relay state overrides the readback** when `relay_flip` is on.
+  The write happens microseconds earlier and an optical relay need not report
+  the new position yet — a lagging readback would reintroduce the bug in a
+  subtler, intermittent form. This is also the value the `.txt` derives
+  `relay_sign` from, and the two must agree.
+- **The snapshot travels with `scan_done`** (`pyqtSignal(int, str, dict)`)
+  rather than being read off the worker in the slot: the slot runs on the GUI
+  thread, by which time the worker can already be a scan ahead. Both
+  `_on_sl_scan_done` handlers take the third argument and rebuild the row's
+  `hw_*` block from it. `ScanWorker.scan_done` is a different signal on a
+  different class and is unchanged.
+
+Cost: ~14 extra attribute reads per scan on the worker thread, each bounded by
+`_HW_SNAP_TIMEOUT_S` (1.5 s) with the rest of a device skipped once one of its
+reads fails — normally milliseconds, and it delays a scan rather than the UI.
+
+`hw_act1_pos` / `hw_act2_pos` now describe the stage *before this scan* instead
+of before the list; both spellings are "position at scan start" and the new one
+is the accurate one.
+
+### Tests
+`test_runner.py` 257 → **266**: `TestScanlistHwSnapshotPerScan` drives the real
+`_run_list` against a fake relay and captures the config each `ScanRunner`
+receives — the reported two-current sequence in both directions, metadata
+agreeing with the `.txt` `relay_sign` column, a lagging readback losing to the
+commanded state, a failed read dropping the key instead of keeping a stale one,
+non-`hw_` keys surviving, no override when the flip is off, hosts passing no
+callable still getting the polarity right, and the payload on `scan_done`
+matching the config. Verified non-vacuous: with `_refresh_hw_snapshot` neutered
+to the old behaviour, 8 of the 9 fail.
