@@ -49,6 +49,14 @@ _SKIP_RAW_META = {"sensors_json", "scan_name", "n_x", "n_y",
 
 INDEX_KEY = "__index__"
 
+# Axis datasets in the legacy flat `/measurement` layout, excluded so they are
+# not offered as measured channels.  This was referenced in _read_meta but
+# never defined: every legacy file raised NameError there, was caught by the
+# outer handler and marked invalid, so old scans could not be opened at all.
+_AXIS_NAMES = frozenset({"x", "y", "x_actual", "y_actual", "actuator_x",
+                         "actuator_y", "field", "field_T", "field_mT",
+                         "time", "elapsed_time", "timestamp"})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scan file reader — reads both old (end-of-scan) and new (incremental) HDF5

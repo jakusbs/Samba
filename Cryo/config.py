@@ -2,7 +2,7 @@
 config.py — Samba v3
 Constants, hardware defaults, scan config schema, and JSON persistence.
 """
-import copy, json, os
+import copy, json, os, shutil
 import numpy as np
 from pathlib import Path
 from typing import Dict, List

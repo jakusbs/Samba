@@ -5817,3 +5817,43 @@ The existing ~11 MB of noise-filled logs in `~/.config/moke_scan/logs/` are
 not cleaned up by this change. They will now age out very slowly, because the
 log grows in kilobytes rather than megabytes — delete `samba.log.*` by hand if
 the disk space matters.
+
+---
+
+## 84. Recent Changes (September 2026) — Two NameErrors Found by a Pre-Merge Sweep
+
+Branch `feat/reliability-ports` (257 + 25 tests). App version → **v13.35**.
+Found by running `pyflakes` over the whole tree before merging to main. Both
+pre-existing on main, both on live paths, both silently swallowed — and both
+were fixed on the declined 13.31 branch, missed when §82 triaged it.
+
+### `Cryo/config.py` — the unreadable-setup backup never happened
+§47 added, to both apps, a backup of a corrupt `<Setup>.json` taken **before**
+any auto-save can overwrite it with defaults. Cryo's copy calls
+`shutil.copyfile` but the module only imported `copy, json, os` — so the call
+raised `NameError`, was swallowed by the surrounding `except Exception: pass`,
+and the backup was never written. The next save then replaced the corrupt file
+with defaults: exactly the silent data loss §47 existed to prevent. Samba_main
+imports `shutil` and was unaffected.
+
+Verified against a real corrupt file: `.bad` backup written byte-identical,
+original left in place, `_load_status` reports the error.
+
+### `core/data_browser.py` — legacy `/measurement` files could not be opened
+`ScanFile._read_meta` filters axis datasets out of the channel list with
+`if key not in _AXIS_NAMES`, and **`_AXIS_NAMES` was never defined**. Every
+file in the old flat `/measurement` layout therefore raised `NameError` there,
+was caught by the outer `except Exception`, and was marked `valid = False` —
+so old scans simply did not open in the browser. The frozenset is restored
+(`x`, `y`, `x_actual`, `y_actual`, `actuator_x`, `actuator_y`, `field`,
+`field_T`, `field_mT`, `time`, `elapsed_time`, `timestamp`).
+
+Verified on a synthetic legacy file: opens `valid`, and `x_actual`/`time` are
+excluded so only the real channel is offered.
+
+### Lesson
+Both were invisible to the test suite and to normal use, because each sat
+inside a broad `except` that turned a crash into a silent no-op. A whole-tree
+`pyflakes` undefined-name sweep costs seconds and is now worth running before
+any merge to main — the CI workflow on the declined branch did exactly this
+(`ruff check` with `F821`), which is how that branch had both fixes.
