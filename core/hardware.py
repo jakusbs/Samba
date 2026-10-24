@@ -201,6 +201,46 @@ def is_sim_proxy(proxy) -> bool:
     return isinstance(proxy, SimProxy)
 
 
+def probe_alive(proxy, timeout_s: float = 2.0) -> Optional[str]:
+    """Return None if the device answers a ping, else the error text.
+
+    Constructing a DeviceProxy only resolves the database entry: a server
+    that crashed without unexporting itself still yields a proxy, and the
+    failure only shows on the first call.  fresh_proxy() therefore proves
+    that the device is *defined*, not that it is *alive* — scan-start guards
+    that must refuse to run against a dead device need this as well.
+
+    Proxies without ping (SimProxy, test fakes) count as alive.  The proxy's
+    own client timeout is lowered for the ping and restored afterwards.
+    """
+    ping = getattr(proxy, "ping", None)
+    if ping is None or isinstance(proxy, SimProxy):
+        return None
+    old_ms = None
+    try:
+        if hasattr(proxy, "get_timeout_millis") and hasattr(proxy, "set_timeout_millis"):
+            try:
+                old_ms = proxy.get_timeout_millis()
+                proxy.set_timeout_millis(int(max(0.1, timeout_s) * 1000))
+            except Exception:
+                old_ms = None
+        _call_with_timeout(ping, timeout_s + 1.0)
+        return None
+    except TimeoutError:
+        return f"no answer to ping within {timeout_s:g} s"
+    except Exception as e:
+        args = getattr(e, "args", ())
+        if args and hasattr(args[0], "reason") and hasattr(args[0], "desc"):
+            return f"{args[0].reason}: {str(args[0].desc).strip()}"
+        return str(e) or type(e).__name__
+    finally:
+        if old_ms is not None:
+            try:
+                proxy.set_timeout_millis(old_ms)
+            except Exception:
+                pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Safe read / write helpers
 # ─────────────────────────────────────────────────────────────────────────────

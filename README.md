@@ -584,8 +584,17 @@ migration — simply loading them in a current SAMBA upgrades them.
 python test_runner.py -v
 ```
 
-61 hardware-free unit tests covering the scan engine (acquisition, retries, auto-pause,
-zigzag/fast-axis traversal, FIELD ramp wait), HDF5 writing (DC-hyst cycles, calibration,
-dedup), the lab notebook, hysteresis cycle math, and config load hardening. Only numpy
-and h5py are required — Qt and TANGO are stubbed. A GitHub Actions workflow runs the
-suite on every push and pull request.
+Hardware-free unit tests (about 270) covering the scan engine (acquisition, retries,
+auto-pause, trigger-reply collection, zigzag/fast-axis traversal, FIELD ramp wait), HDF5
+writing (DC-hyst cycles, calibration, dedup), the lab notebook, hysteresis cycle math,
+and config load hardening. Only numpy and h5py are required — Qt and TANGO are stubbed.
+
+```bash
+python -m pytest tests/ -q
+```
+
+A second suite: the NAS sync worker, logging, and — when pytango is installed —
+`tests/test_tango_engine.py`, which serves a small lock-in-like device **in-process**
+with `tango.test_context.DeviceTestContext` (no database, no hardware) and drives the
+real scan engine through a real `DeviceProxy`. A GitHub Actions workflow runs both
+suites and a `ruff` undefined-name check on every push and pull request.

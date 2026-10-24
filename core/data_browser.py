@@ -45,7 +45,7 @@ import scan_index
 # rest are duplicated verbatim by the curated sections above.
 _SKIP_RAW_META = {"sensors_json", "scan_name", "n_x", "n_y",
                   "points_acquired", "points_planned", "duration_seconds",
-                  "integration_time", "settle_time"}
+                  "integration_time", "settle_time", "NX_class"}
 
 INDEX_KEY = "__index__"
 

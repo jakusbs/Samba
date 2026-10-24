@@ -471,7 +471,7 @@ class CryoMainWindow(QMainWindow):
         shown for any unavailable devices.
         """
         import threading as _threading
-        from hardware import fresh_proxy, is_sim_proxy
+        from hardware import fresh_proxy, is_sim_proxy, probe_alive
         setup = self._active_setup()
 
         candidates = {
@@ -498,7 +498,12 @@ class CryoMainWindow(QMainWindow):
                 results[name] = (None, "no path configured")
                 continue
             def _probe(n=name, p=path):
-                results[n] = fresh_proxy(p)
+                proxy, err = fresh_proxy(p)
+                if not err:
+                    # A proxy only proves the device is defined in the
+                    # database; a crashed server still hands one out.
+                    err = probe_alive(proxy, timeout_s=4.0)
+                results[n] = (proxy, err)
             t = _threading.Thread(target=_probe, daemon=True)
             t.start()
             threads[name] = t
@@ -543,7 +548,8 @@ class CryoMainWindow(QMainWindow):
                 msg = (
                     "The following devices could not be reached at startup:\n\n"
                     + "\n".join(f"  • {d}" for d in unavailable)
-                    + "\n\nScans will run in simulation mode for these devices.\n"
+                    + "\n\nScans that use these devices will refuse to start "
+                      "until they are reachable.\n"
                     "Check your TANGO_HOST and device server status."
                 )
                 QMessageBox.warning(self, "Hardware Unavailable", msg)
@@ -2099,7 +2105,14 @@ class CryoMainWindow(QMainWindow):
             disp = self.right_panel.get_display_sensor()
             self.map2d_retrace.update_point(ix, iy, vals.get(disp, float("nan")))
 
-    def _log_append(self, msg: str, level: str = "auto"):
+    def _log_append(self, msg: str, level: str = "auto", to_file: bool = True):
+        """Append to the GUI log pane and mirror into the rotating file log.
+
+        The pane is cleared at every scan start, so without the mirror the
+        engine's own diagnostics (trigger failures, position mismatches, why
+        it auto-paused) left no trail.  Per-point status lines pass
+        to_file=False and are mirrored only when they carry a warning.
+        """
         if level == "auto":
             ml = msg.lower()
             if "⚠" in msg or "error" in ml or "traceback" in ml:
@@ -2108,6 +2121,9 @@ class CryoMainWindow(QMainWindow):
                 level = "warning"
             else:
                 level = "info"
+        if to_file or level != "info":
+            {"info": log.info, "warning": log.warning,
+             "error": log.error}.get(level, log.info)("%s", msg)
         filt = self.log_filter.currentIndex()
         if filt == 1 and level != "error": return
         if filt == 2 and level == "info": return
@@ -2121,7 +2137,7 @@ class CryoMainWindow(QMainWindow):
         self.log_text.setTextCursor(cursor)
 
     def _on_status(self, msg):
-        self.status_lbl.setText(msg); self._log_append(msg)
+        self.status_lbl.setText(msg); self._log_append(msg, to_file=False)
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
         worker = self._worker or self._sl_worker or self._cs_settle

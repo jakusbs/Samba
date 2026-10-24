@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
         Without a callback, probes block and show a QMessageBox for unavailable devices.
         """
         import threading as _threading
-        from hardware import fresh_proxy, is_sim_proxy
+        from hardware import fresh_proxy, is_sim_proxy, probe_alive
 
         # Collect one representative path per device type across all setups
         candidates: dict = {}
@@ -372,7 +372,12 @@ class MainWindow(QMainWindow):
         threads: dict = {}
         for name, path in candidates.items():
             def _probe(n=name, p=path):
-                results[n] = fresh_proxy(p)
+                proxy, err = fresh_proxy(p)
+                if not err:
+                    # A proxy only proves the device is defined in the
+                    # database; a crashed server still hands one out.
+                    err = probe_alive(proxy, timeout_s=4.0)
+                results[n] = (proxy, err)
             t = _threading.Thread(target=_probe, daemon=True)
             t.start()
             threads[name] = t
@@ -412,7 +417,8 @@ class MainWindow(QMainWindow):
                 msg = (
                     "The following devices could not be reached at startup:\n\n"
                     + "\n".join(f"  • {d}" for d in unavailable)
-                    + "\n\nScans will run in simulation mode for these devices.\n"
+                    + "\n\nScans that use these devices will refuse to start "
+                      "until they are reachable.\n"
                     "Check your TANGO_HOST and device server status."
                 )
                 QMessageBox.warning(self, "Hardware Unavailable", msg)
@@ -2101,11 +2107,17 @@ class MainWindow(QMainWindow):
         if getattr(self, '_calib_timescan', False):
             self.calib_panel.focus_plot.update_timescan_point(ix, x_actual, vals)
 
-    def _log_append(self, msg: str, level: str = "auto"):
+    def _log_append(self, msg: str, level: str = "auto", to_file: bool = True):
         """
         Append a message to the log with color-coding.
         level: "info", "warning", "error", or "auto" (detect from content).
         Respects the log filter dropdown.
+
+        Also mirrors the line into the rotating file log (§60).  The GUI pane
+        is cleared at every scan start, so without this the engine's own
+        diagnostics — trigger failures, position mismatches, why it
+        auto-paused — left no trail at all.  Per-point status lines pass
+        to_file=False and are mirrored only when they carry a warning.
         """
         if level == "auto":
             ml = msg.lower()
@@ -2115,6 +2127,10 @@ class MainWindow(QMainWindow):
                 level = "warning"
             else:
                 level = "info"
+
+        if to_file or level != "info":
+            {"info": log.info, "warning": log.warning,
+             "error": log.error}.get(level, log.info)("%s", msg)
 
         # Apply filter
         filt = self.log_filter.currentIndex()  # 0=All, 1=Errors, 2=Warn+Err
@@ -2134,7 +2150,7 @@ class MainWindow(QMainWindow):
         self.log_text.setTextCursor(cursor)
 
     def _on_status(self, msg):
-        self.status_lbl.setText(msg); self._log_append(msg)
+        self.status_lbl.setText(msg); self._log_append(msg, to_file=False)
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
         # Detect auto-pause from ScanRunner (single scan or scanlist) and update button

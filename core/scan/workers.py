@@ -11,7 +11,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import X_TIME
 from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
-                      safe_write, demagnetize_magnet, TANGO_AVAILABLE)
+                      safe_write, demagnetize_magnet, probe_alive,
+                      TANGO_AVAILABLE)
 from core.scan.runner import ScanRunner
 from current_sweep import refocus_due
 from polarity import (ORDER_AB, flip_phase, normalize_order, order_preview,
@@ -102,6 +103,9 @@ class ScanlistWorker(QThread):
         # running toggle does when a cycle is skipped.
         self._relay_state = 0
         self._relay_base  = 0
+        # True once the relay state has been read back from the device (or
+        # verified after a write); until then nothing may be assumed about it.
+        self._relay_known = False
         # Periodic autofocus.  last_focus_t is the run-wide timestamp the
         # host keeps, so a refocus the current sweep just did counts here
         # too and the two never autofocus twice in a row.
@@ -191,15 +195,48 @@ class ScanlistWorker(QThread):
             self._wait_field_settled(mag_p, mag_fld)
             return
 
-    def _pause_on_flip_error(self, msg: str):
+    def _pause_on_flip_error(self, msg: str, what: str = "magnet"):
+        """Auto-pause the list on a polarity-device failure; Resume retries."""
         self.log_msg.emit(f"⚠ {msg} — pausing scanlist")
-        self.status_msg.emit("⚠ AUTO-PAUSED — field flip failed; "
-                             "fix the magnet and press Resume")
+        self.status_msg.emit(f"⚠ AUTO-PAUSED — {msg}; "
+                             f"fix the {what} and press Resume")
         self.pause()
         while self.is_paused() and not self._abort:
             time.sleep(0.1)
         if not self._abort:
-            self.log_msg.emit("  ↩ Resuming — retrying field flip…")
+            self.log_msg.emit(f"  ↩ Resuming — retrying the {what}…")
+
+    # Delay between relay write attempts (tests shorten it).
+    _RELAY_RETRY_S = 1.0
+
+    def _set_relay(self, relay_p, relay_attr, desired: int) -> bool:
+        """Drive the relay to *desired* and verify it by readback.
+
+        Three attempts, then the scanlist auto-pauses on the spot and Resume
+        retries from scratch — the same contract as _flip_field.  Measuring
+        on after a failed relay write ran the scan at the wrong polarity
+        while the .txt and the HDF5 metadata recorded the intended one, which
+        corrupts the pos/neg grouping in the analysis.
+
+        Returns False only when the list was aborted while retrying.
+        """
+        desired = int(desired)
+        while not self._abort:
+            err = None
+            for _ in range(3):
+                err = safe_write(relay_p, relay_attr, desired)
+                if not err:
+                    rb, rerr = safe_read(relay_p, relay_attr)
+                    if rb is not None and int(rb) == desired:
+                        self._relay_state = desired
+                        self._relay_known = True
+                        self.relay_changed.emit(desired)
+                        self.log_msg.emit(f"Relay → {desired} (verified)")
+                        return True
+                    err = rerr or f"readback {rb!r} ≠ {desired}"
+                time.sleep(self._RELAY_RETRY_S)
+            self._pause_on_flip_error(f"relay write failed: {err}", "relay")
+        return False
 
     def _wait_field_settled(self, mag_p, mag_fld):
         """Wait until the field stops changing (rate-of-change settles to ~0).
@@ -267,9 +304,10 @@ class ScanlistWorker(QThread):
                     del sc[k]
                 sc.update(snap)
 
-        # The commanded relay state wins over any readback: the write just
-        # above may not be reflected by the device yet, and this is the state
-        # the scanlist .txt records relay_sign from — the two must agree.
+        # The relay state recorded here is the one VERIFIED by readback right
+        # after the write (_set_relay) — the same state the scanlist .txt
+        # derives relay_sign from, so the two always agree, and a snapshot
+        # read that lags the write cannot record the previous polarity.
         if self.relay_flip:
             sc["hw_relay_state"] = self._relay_state
 
@@ -298,11 +336,18 @@ class ScanlistWorker(QThread):
         mag_p, mag_err = fresh_proxy(_mag_dev)
 
         if TANGO_AVAILABLE:
+            # A proxy only proves the device is defined in the database; a
+            # server that died without unexporting itself still hands one
+            # out.  Ask the device before trusting it with the polarity.
+            if self.relay_flip and not relay_err:
+                relay_err = probe_alive(relay_p)
+            if self.field_flip and not mag_err:
+                mag_err = probe_alive(mag_p)
             problems = []
-            if self.relay_flip and is_sim_proxy(relay_p):
+            if self.relay_flip and (relay_err or is_sim_proxy(relay_p)):
                 problems.append(f"relay '{self.setup.get('relay_device', '')}'"
                                 f" — {relay_err}")
-            if self.field_flip and is_sim_proxy(mag_p):
+            if self.field_flip and (mag_err or is_sim_proxy(mag_p)):
                 problems.append(f"magnet '{_mag_dev}' — {mag_err}")
             if problems:
                 msg = ("Scanlist not started — polarity device(s) unreachable:\n  "
@@ -313,11 +358,20 @@ class ScanlistWorker(QThread):
                 return
 
         relay_attr = self.setup.get("relay_attr", "switchvar")
-        try:
-            self._relay_state = int(relay_p.read_attribute(relay_attr).value)
+        # Where the relay actually is.  Every later write is verified against
+        # a readback, and a scan only starts once the relay is KNOWN to be in
+        # the scheduled state.
+        _rb, _rb_err = safe_read(relay_p, relay_attr)
+        if _rb is not None:
+            self._relay_state = int(_rb)
+            self._relay_known = True
             self.relay_changed.emit(self._relay_state)
-        except Exception:
+        else:
             self._relay_state = 0
+            self._relay_known = False
+            if self.relay_flip:
+                self.log_msg.emit(f"⚠ relay readback failed ({_rb_err}) — "
+                                  "state unknown; it will be set explicitly")
         self._relay_base = self._relay_state
 
         if self.relay_flip or self.field_flip:
@@ -353,8 +407,7 @@ class ScanlistWorker(QThread):
             # Cycle 0 is A by definition: the list starts in whatever state
             # the hardware is already in.
             phase = flip_phase(i, self.flip_order)
-            if self.relay_flip:
-                self._relay_state = self._relay_base ^ phase
+            relay_target = (self._relay_base ^ phase) if self.relay_flip else None
 
             # ── Field flip ────────────────────────────────────────────────────
             # Reverse only when this cycle's phase differs from the previous
@@ -390,18 +443,24 @@ class ScanlistWorker(QThread):
                 elif name.endswith("_retrace"): dir_lbl = " [retrace]"
                 else:                           dir_lbl = ""
 
+                # Relay: drive it only when the scheduled state differs from
+                # the state it is known to be in.  PyRelais actuates (ground →
+                # switch → unground) on EVERY write whatever the value, so the
+                # old unconditional write clicked the relay before every scan
+                # — with flipping off too.  A write that cannot be verified
+                # auto-pauses, like the field flip (see _set_relay).
+                if relay_target is not None and (
+                        not self._relay_known
+                        or self._relay_state != relay_target):
+                    if not self._set_relay(relay_p, relay_attr, relay_target):
+                        break                       # aborted while retrying
+
                 pol_lbl = (f" [{self.flip_order}:{phase_label(phase)}]"
                            if (self.relay_flip or self.field_flip) else "")
                 self.status_msg.emit(
                     f"Cycle {i+1}/{self.n_scans}{dir_lbl}{pol_lbl}  "
                     f"relay={'1(−1)' if self._relay_state else '0(+1)'}  "
                     f"field={field_T:+.3f} T")
-
-                try:
-                    relay_p.write_attribute(relay_attr, self._relay_state)
-                    self.relay_changed.emit(self._relay_state)
-                except Exception as e:
-                    self.log_msg.emit(f"⚠ relay: {e}")
 
                 sc = copy.deepcopy(sc_template)
                 hw_snap = self._refresh_hw_snapshot(sc)

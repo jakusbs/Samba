@@ -54,6 +54,7 @@ _hw.safe_read          = lambda proxy, attr, **kw: (0.0, None)
 _hw.safe_write         = lambda proxy, attr, val, **kw: None
 _hw.demagnetize_magnet = MagicMock()
 _hw.is_sim_proxy       = lambda proxy: False      # workers.py polarity guard
+_hw.probe_alive        = lambda proxy, **kw: None  # every fake is "alive"
 _hw.TANGO_AVAILABLE    = False
 sys.modules['hardware'] = _hw
 
@@ -76,8 +77,11 @@ def _make_runner():
     r._paused  = False
     r._trigger_consec_fails = {}
     # Settling/integration waits block on this so abort() wakes them; the
-    # helper bypasses __init__, so it has to mirror the real attribute.
+    # helper bypasses __init__, so it has to mirror the real attributes.
     r._stop_event = threading.Event()
+    r._phase_b_timeout_logged = False
+    r._pos_readback_fails = 0
+    r._last_bad_devs = []
     return r
 
 
@@ -87,22 +91,49 @@ class InstantProxy:
 
     trigger_fail_n  how many times command_inout_asynch raises before succeeding
     read_fail_n     how many times read_attribute raises before succeeding
+    reply_fail_n    how many Starts are REJECTED server-side: the asynch
+                    dispatch succeeds (as the real API does), the device stays
+                    ON, and the rejection surfaces only in command_inout_reply
     read_val        value returned on a successful read
+    integ_s         how long the device stays RUNNING per Start
+
+    Every asynch request id handed out is kept in pending_ids until it is
+    collected with command_inout_reply — like the real ApiUtil table.
     """
-    def __init__(self, read_val=1.23, trigger_fail_n=0, read_fail_n=0):
+    def __init__(self, read_val=1.23, trigger_fail_n=0, read_fail_n=0,
+                 reply_fail_n=0, integ_s=0.003):
         self._read_val      = read_val
         self._trigger_fails = trigger_fail_n
         self._read_fails    = read_fail_n
+        self._reply_fails   = reply_fail_n
+        self._integ_s       = integ_s
         self._done_at       = 0.0
+        self._next_id       = 0
+        self.pending_ids    = set()
+        self.rejected_ids   = set()
 
     def command_inout_asynch(self, cmd, *a):
         if self._trigger_fails > 0:
             self._trigger_fails -= 1
             raise Exception("TRANSIENT — simulated trigger failure")
-        self._done_at = time.time() + 0.003   # 3 ms integration window
+        self._next_id += 1
+        self.pending_ids.add(self._next_id)
+        if self._reply_fails > 0:
+            self._reply_fails -= 1
+            self.rejected_ids.add(self._next_id)   # no acquisition: stays ON
+        else:
+            self._done_at = time.time() + self._integ_s
+        return self._next_id
+
+    def command_inout_reply(self, rid, timeout_ms=0):
+        self.pending_ids.discard(rid)
+        if rid in self.rejected_ids:
+            raise Exception("Not_ready: Cannot Start in state FAULT")
+        return None
 
     def command_inout(self, cmd, *a):
-        self.command_inout_asynch(cmd)
+        rid = self.command_inout_asynch(cmd)
+        self.command_inout_reply(rid)
 
     def state(self):
         return 'RUNNING' if time.time() < self._done_at else 'ON'
@@ -226,6 +257,172 @@ class TestDoAcquireReadFailure(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertTrue(np.isnan(vals['ZI x1']))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. Asynchronous Start replies are collected
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAsyncReplyCollected(unittest.TestCase):
+    """The asynchronous Start reply is collected after every point.
+
+    command_inout_asynch returns a request id; until command_inout_reply
+    fetches it the reply sits in the process-wide ApiUtil table (measured at
+    ~2.2 KB each, never freed when the proxy goes), and a server-side
+    exception raised by Start() is delivered ONLY through that reply.
+    """
+
+    def test_every_request_is_collected(self):
+        r = _make_runner()
+        p = InstantProxy()
+        devp, dev_sensors, trigger_devs, cfg = _std_args(p)
+        for _ in range(5):
+            _, _, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+            self.assertTrue(ok)
+        self.assertEqual(p.pending_ids, set(),
+                         "no un-collected asynch reply may remain")
+
+    def test_server_side_rejection_fails_point(self):
+        """Start rejected by the server while the device stays ON must fail
+        the point.  Before the reply was collected this passed as a good
+        point carrying the PREVIOUS point's values."""
+        r = _make_runner()
+        p = InstantProxy(read_val=7.0, reply_fail_n=1)
+        devp, dev_sensors, trigger_devs, cfg = _std_args(p)
+        vals, _, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertFalse(ok, "rejected Start must fail the point")
+        self.assertTrue(np.isnan(vals['ZI x1']))
+        self.assertEqual(p.pending_ids, set())
+        self.assertEqual(r._last_bad_devs, ['dev://zi1'])
+        # The next Start is accepted again → the retry recovers the point.
+        vals, _, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(vals['ZI x1'], 7.0)
+
+    def test_rejection_after_proxy_refresh_is_still_seen(self):
+        """Dispatch fails → retried on a fresh proxy → rejected server-side:
+        the recovered dispatch's reply must be collected too."""
+        r = _make_runner()
+        dev  = 'dev://zi1'
+        bad  = InstantProxy(trigger_fail_n=1)
+        good = InstantProxy(reply_fail_n=1)
+        orig = _runner_mod.fresh_proxy
+        _runner_mod.fresh_proxy = lambda path: (good, None)
+        try:
+            devp        = {dev: bad}
+            dev_sensors = {dev: [{'attribute': 'x1', 'label': 'ZI x1'}]}
+            vals, _, ok = _acquire(r, devp, dev_sensors, {dev: 'Start'},
+                                   {'move_timeout': 5.0})
+        finally:
+            _runner_mod.fresh_proxy = orig
+        self.assertFalse(ok)
+        self.assertTrue(np.isnan(vals['ZI x1']))
+        self.assertEqual(good.pending_ids, set())
+
+
+class TestPhaseBTimeoutDerivation(unittest.TestCase):
+    """Phase B waits for the integration, not for the stage timeout."""
+
+    def test_integration_longer_than_move_timeout_completes(self):
+        r = _make_runner()
+        p = InstantProxy(read_val=2.0, integ_s=0.25)
+        devp, dev_sensors, trigger_devs, _ = _std_args(p)
+        cfg = {'move_timeout': 0.05}            # shorter than the integration
+        vals, _, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg,
+                               int_time=0.25)
+        self.assertTrue(ok, "the integration must be allowed to finish")
+        self.assertAlmostEqual(vals['ZI x1'], 2.0)
+
+    def test_device_that_never_finishes_still_times_out(self):
+        r = _make_runner()
+        p = InstantProxy(integ_s=10.0)
+        devp, dev_sensors, trigger_devs, _ = _std_args(p)
+        cfg = {'move_timeout': 0.05}
+        old = _runner_mod.PHASE_B_MARGIN_S
+        _runner_mod.PHASE_B_MARGIN_S = 0.05
+        try:
+            vals, _, ok = _acquire(r, devp, dev_sensors, trigger_devs, cfg,
+                                   int_time=0.0)
+        finally:
+            _runner_mod.PHASE_B_MARGIN_S = old
+        self.assertFalse(ok)
+        self.assertTrue(np.isnan(vals['ZI x1']))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2c. NeXus attributes, absolute timestamps, readback accounting
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNexusAndTimestampAttrs(unittest.TestCase):
+    """Additive NeXus NXdata attributes on the existing HDF5 layout, plus the
+    tz-aware timestamp and the position-readback counter.  Same file type,
+    same datasets — only attributes are added."""
+
+    def _open(self, n_x=5, n_y=1):
+        import tempfile
+        r  = _make_runner()
+        fn = os.path.join(tempfile.mkdtemp(), "t.h5")
+        sensors = [{"label": "ZI x1", "device": "d", "attribute": "x1", "unit": "V"},
+                   {"label": "DC",    "device": "e", "attribute": "Value", "unit": "V"}]
+        cfg = {"name": "t", "integration_time": 0.1, "settle_time": 0.0,
+               "act1_start": 0.0, "act1_stop": 4.0, "act1_label": "X", "act1_unit": "nm",
+               "act2_start": 0.0, "act2_stop": 1.0, "act2_label": "Y", "act2_unit": "nm"}
+        x_plan = np.linspace(0, 4, n_x)
+        y_plan = np.linspace(0, 1, n_y) if n_y > 1 else np.array([0.0])
+        hdf = "SPATIAL_XY" if n_y > 1 else "SPATIAL_X"
+        f = r._open_hdf5(fn, x_plan, y_plan, sensors, "X", "nm", hdf, cfg)
+        self.assertIsNotNone(f, "file creation must not fail")
+        return r, f
+
+    def test_1d_nxdata_attributes_point_at_existing_datasets(self):
+        r, f = self._open()
+        try:
+            self.assertEqual(f.attrs["NX_class"], "NXroot")
+            self.assertEqual(f.attrs["default"], "data")
+            d = f["data"]
+            self.assertEqual(d.attrs["NX_class"], "NXdata")
+            self.assertEqual(d.attrs["signal"], "ZI_x1")
+            self.assertEqual(list(d.attrs["auxiliary_signals"]), ["DC"])
+            self.assertEqual(list(d.attrs["axes"]), ["actuator_x"])
+            self.assertEqual(int(d.attrs["actuator_x_indices"]), 0)
+            for name in ("ZI_x1", "DC", "actuator_x"):
+                self.assertIn(name, d)
+            self.assertEqual(f["metadata"].attrs["NX_class"], "NXcollection")
+        finally:
+            f.close()
+
+    def test_2d_axes_are_the_1d_setpoint_datasets(self):
+        r, f = self._open(n_x=4, n_y=3)
+        try:
+            d = f["data"]
+            self.assertEqual(list(d.attrs["axes"]),
+                             ["actuator_y_setpoint", "actuator_x_setpoint"])
+            self.assertEqual(int(d.attrs["actuator_y_setpoint_indices"]), 0)
+            self.assertEqual(int(d.attrs["actuator_x_setpoint_indices"]), 1)
+            self.assertEqual(d["actuator_y_setpoint"].shape, (3,))
+            self.assertEqual(d["actuator_x_setpoint"].shape, (4,))
+            self.assertEqual(d["ZI_x1"].shape, (3, 4))
+        finally:
+            f.close()
+
+    def test_timestamp_carries_a_utc_offset(self):
+        from datetime import datetime
+        r, f = self._open()
+        try:
+            ts = datetime.fromisoformat(str(f.attrs["timestamp"]))
+            self.assertIsNotNone(ts.tzinfo, "naive local time is ambiguous")
+        finally:
+            f.close()
+
+    def test_finalize_records_position_readback_failures(self):
+        import h5py
+        r, f = self._open()
+        fn = f.filename
+        r._pos_readback_fails = 2
+        r._finalize_hdf5(f, 5, np.zeros((1, 5)))
+        with h5py.File(fn, "r") as g:
+            self.assertEqual(int(g["metadata"].attrs["position_readback_failures"]), 2)
+            self.assertEqual(g.attrs["scan_status"], "completed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1885,34 +2082,59 @@ class TestScanlistFlipSchedule(unittest.TestCase):
         cls.W = _import_workers()
 
     def _run_list(self, n, order, relay_flip=True, field_flip=True,
-                  relay0=0, field0=1.0):
-        """Run n cycles and return (relay states per scan, field per scan)."""
+                  relay0=0, field0=1.0, relay_ignore_writes=0,
+                  relay_read_fails=0):
+        """Run n cycles against a fake relay + magnet.
+
+        Returns a namespace: states — the relay's ACTUAL state at the start
+        of each scan; writes — every value written to it; flips — magnet
+        reversals; pauses — auto-pause count.  relay_ignore_writes makes the
+        relay silently drop the first N writes (the readback then disagrees
+        with the command); relay_read_fails makes its first N reads fail.
+        """
         import tempfile
         W = self.W
 
         class _Relay:
             def __init__(self, state):
                 self.state = state; self.writes = []
+                self.ignore = relay_ignore_writes
+                self.read_fails = relay_read_fails
             def read_attribute(self, attr):
                 return types.SimpleNamespace(value=self.state)
             def write_attribute(self, attr, val):
-                self.state = int(val); self.writes.append(int(val))
+                self.writes.append(int(val))
+                if self.ignore > 0:
+                    self.ignore -= 1          # hardware did not switch
+                    return
+                self.state = int(val)
 
         relay  = _Relay(relay0)
         magnet = object()
         field  = {"v": field0, "writes": 0}
+        states = []
+        pauses = []
 
         def _fresh(dev):
             return (relay if dev == "relay/dev" else magnet), None
         def _read(proxy, attr, **kw):
-            return (field["v"], None) if proxy is magnet else (0.0, None)
+            if proxy is magnet:
+                return (field["v"], None)
+            if proxy is relay:
+                if relay.read_fails > 0:
+                    relay.read_fails -= 1
+                    return (None, "relay read failed — simulated")
+                return (relay.state, None)
+            return (0.0, None)
         def _write(proxy, attr, val, **kw):
             if proxy is magnet:
                 field["v"] = val; field["writes"] += 1
+            elif proxy is relay:
+                relay.write_attribute(attr, val)
             return None
 
         class _Runner:
-            def __init__(self, cfg, setup): pass
+            def __init__(self, cfg, setup): states.append(relay.state)
             def run(self, cbs):             return "/data/scan.h5"
             def abort(self):                pass
             def pause(self):                pass
@@ -1929,6 +2151,11 @@ class TestScanlistFlipSchedule(unittest.TestCase):
         # The settle poll is real time against a fake magnet that arrives
         # instantly; the schedule is what is under test, not the ramp.
         w._wait_field_settled = lambda *a, **kw: None
+        w._RELAY_RETRY_S = 0.0
+        _orig_pause = w.pause
+        def _pause():
+            pauses.append(1); _orig_pause()
+        w.pause = _pause
 
         orig = (W.fresh_proxy, W.safe_read, W.safe_write)
         W.fresh_proxy, W.safe_read, W.safe_write = _fresh, _read, _write
@@ -1941,42 +2168,66 @@ class TestScanlistFlipSchedule(unittest.TestCase):
 
         # setup_name is "", so the worker writes <save_dir>/ScanLists/<name>.txt
         self._last_txt = os.path.join(setup["save_dir"], "ScanLists", "list.txt")
-        return relay.writes, field["writes"]
+        return types.SimpleNamespace(states=states, writes=relay.writes,
+                                     flips=field["writes"], pauses=len(pauses))
 
     # ── Relay ────────────────────────────────────────────────────────────────
     def test_relay_ab_alternates_every_scan(self):
-        writes, _ = self._run_list(8, "AB", field_flip=False)
-        self.assertEqual(writes, [0, 1, 0, 1, 0, 1, 0, 1])
+        r = self._run_list(8, "AB", field_flip=False)
+        self.assertEqual(r.states, [0, 1, 0, 1, 0, 1, 0, 1])
+        # Cycle 0 is already in state 0 — no write; one per change after.
+        self.assertEqual(r.writes, [1, 0, 1, 0, 1, 0, 1])
 
     def test_relay_abba_alternates_in_pairs(self):
-        writes, _ = self._run_list(8, "ABBA", field_flip=False)
-        self.assertEqual(writes, [0, 1, 1, 0, 0, 1, 1, 0])
+        r = self._run_list(8, "ABBA", field_flip=False)
+        self.assertEqual(r.states, [0, 1, 1, 0, 0, 1, 1, 0])
+        # Written only where the state CHANGES: PyRelais actuates (ground →
+        # switch → unground) on every write, so the B→B / A→A boundaries
+        # must not touch it.
+        self.assertEqual(r.writes, [1, 0, 1, 0])
 
     def test_relay_schedule_starts_from_the_device_state(self):
         """Cycle 0 is whatever the relay already reads back — the pattern is
         relative to it, not to a hard-coded 0."""
-        writes, _ = self._run_list(8, "ABBA", field_flip=False, relay0=1)
-        self.assertEqual(writes, [1, 0, 0, 1, 1, 0, 0, 1])
+        r = self._run_list(8, "ABBA", field_flip=False, relay0=1)
+        self.assertEqual(r.states, [1, 0, 0, 1, 1, 0, 0, 1])
+        self.assertEqual(r.writes, [0, 1, 0, 1])
 
     def test_relay_held_when_flip_disabled(self):
-        writes, _ = self._run_list(4, "ABBA", relay_flip=False,
-                                   field_flip=False, relay0=1)
-        self.assertEqual(writes, [1, 1, 1, 1])
+        r = self._run_list(4, "ABBA", relay_flip=False,
+                           field_flip=False, relay0=1)
+        self.assertEqual(r.states, [1, 1, 1, 1])
+        self.assertEqual(r.writes, [], "a disabled flip must never actuate the relay")
+
+    def test_relay_write_is_verified_and_a_failure_pauses(self):
+        """The first write is silently dropped by the hardware: the readback
+        disagrees, the list auto-pauses instead of measuring at the wrong
+        polarity, and after the retry every scan runs at the scheduled state."""
+        r = self._run_list(4, "AB", field_flip=False, relay_ignore_writes=3)
+        self.assertEqual(r.states, [0, 1, 0, 1])
+        self.assertEqual(r.pauses, 1)
+        self.assertEqual(r.writes[:4], [1, 1, 1, 1])   # three dropped, then ok
+
+    def test_unknown_relay_state_is_set_explicitly(self):
+        """If the relay cannot be read back at the start, cycle 0 is written
+        (and verified) rather than assumed."""
+        r = self._run_list(2, "AB", field_flip=False, relay0=1,
+                           relay_read_fails=1)
+        self.assertEqual(r.writes[0], 0, "cycle 0 state written explicitly")
+        self.assertEqual(r.states, [0, 1])
+        self.assertEqual(r.pauses, 0)
 
     # ── Field ────────────────────────────────────────────────────────────────
     def test_field_ab_reverses_on_every_boundary(self):
-        _, flips = self._run_list(8, "AB", relay_flip=False)
-        self.assertEqual(flips, 7)
+        self.assertEqual(self._run_list(8, "AB", relay_flip=False).flips, 7)
 
     def test_field_abba_reverses_half_as_often(self):
         """The B→B and A→A boundaries leave the magnet alone — the point of
         ABBA on a slow (superconducting) magnet."""
-        _, flips = self._run_list(8, "ABBA", relay_flip=False)
-        self.assertEqual(flips, 4)
+        self.assertEqual(self._run_list(8, "ABBA", relay_flip=False).flips, 4)
 
     def test_field_not_touched_when_flip_disabled(self):
-        _, flips = self._run_list(8, "ABBA", field_flip=False)
-        self.assertEqual(flips, 0)
+        self.assertEqual(self._run_list(8, "ABBA", field_flip=False).flips, 0)
 
     # ── Provenance ───────────────────────────────────────────────────────────
     def test_txt_records_the_order(self):
@@ -2030,8 +2281,12 @@ class TestScanlistHwSnapshotPerScan(unittest.TestCase):
         def _fresh(dev):
             return (relay if dev == "relay/dev" else magnet), None
         def _read(proxy, attr, **kw):
+            if proxy is relay:
+                return (relay.state, None)
             return (1.0, None) if proxy is magnet else (0.0, None)
         def _write(proxy, attr, val, **kw):
+            if proxy is relay:
+                relay.write_attribute(attr, val)
             return None
 
         class _Runner:
@@ -2062,6 +2317,7 @@ class TestScanlistHwSnapshotPerScan(unittest.TestCase):
                              flip_order=order,
                              hw_snapshot_fn=fns[snapshot_fn])
         w._wait_field_settled = lambda *a, **kw: None
+        w._RELAY_RETRY_S = 0.0
         w.scan_done = types.SimpleNamespace(
             emit=lambda *a: emits.append(a), connect=lambda *a: None)
 

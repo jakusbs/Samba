@@ -79,9 +79,14 @@ class ActuatorDefaultRow(QWidget):
         for d in show:
             self.dev_combo.addItem(d["name"], d["tango_path"])
         if initial_path:
-            for i in range(self.dev_combo.count()):
-                if self.dev_combo.itemData(i) == initial_path:
-                    self.dev_combo.setCurrentIndex(i); break
+            idx = self.dev_combo.findData(initial_path)
+            if idx < 0:
+                # Saved path not in the registry list: keep it as a real item
+                # (data = path) instead of silently landing on item 0, which
+                # get_values() would then persist in its place.
+                self.dev_combo.addItem(initial_path, initial_path)
+                idx = self.dev_combo.count() - 1
+            self.dev_combo.setCurrentIndex(idx)
         self.dev_combo.blockSignals(False)
         self._populate_chs(initial_attr=initial_attr)
 
@@ -202,9 +207,14 @@ class HardwareDeviceGroup(QWidget):
         for d in filtered:
             self.dev_combo.addItem(d["name"], d["tango_path"])
         if initial_path:
-            for i in range(self.dev_combo.count()):
-                if self.dev_combo.itemData(i) == initial_path:
-                    self.dev_combo.setCurrentIndex(i); break
+            idx = self.dev_combo.findData(initial_path)
+            if idx < 0:
+                # Saved path not in the registry list: keep it as a real item
+                # (data = path) instead of silently landing on item 0, which
+                # get_values() would then persist in its place.
+                self.dev_combo.addItem(initial_path, initial_path)
+                idx = self.dev_combo.count() - 1
+            self.dev_combo.setCurrentIndex(idx)
         self.dev_combo.blockSignals(False)
         self._populate_attrs()
 

@@ -663,8 +663,14 @@ def _set_by_path(combo: NoScrollComboBox, path: str):
         if combo.itemData(i) == path:
             combo.setCurrentIndex(i)
             return
-    # Path not in list — let user see it as typed text
-    combo.setEditText(path)
+    # Path not in the registry list: add it as a real item carrying the path
+    # as item data.  setEditText() alone left the combo on item 0, so
+    # _get_path() — which prefers currentData() — returned the FIRST
+    # registry device instead of the saved path, and the next save persisted
+    # that: on any machine without a device_registry.json the Keithley and
+    # relay paths were silently replaced by a lock-in.
+    combo.addItem(path, path)
+    combo.setCurrentIndex(combo.count() - 1)
 
 
 def _set(combo: NoScrollComboBox, value: str):

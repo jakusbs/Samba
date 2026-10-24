@@ -10,7 +10,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      # PyQt6 / pytango are stubbed by test_runner.py — only the numeric
-      # stack is needed, keeping CI fast and hardware-free.
-      - run: pip install numpy h5py
+      # PyQt6 is stubbed by the suites.  pytango is installed so that
+      # tests/test_tango_engine.py can serve a real device in-process
+      # (tango.test_context — no database, no hardware); it skips itself
+      # if the import fails.
+      - run: pip install numpy h5py pytango pytest ruff
       - run: python test_runner.py -v
+      - run: python -m pytest tests/ -q
+      # Undefined names / redefinitions / bare excepts — the class of error
+      # that only showed up at runtime inside a broad except before (§84).
+      - run: ruff check --select F821,F822,F823,F811,E722 core Samba_main Cryo

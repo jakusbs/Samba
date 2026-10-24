@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # publishes itself as 13.31, and APP_VERSION is written into every scan file as
 # `samba_version` provenance (§60).  Two different codebases stamping the same
 # version into data would make a file impossible to match to the code.
-APP_VERSION = "13.36"
+APP_VERSION = "13.37"
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 12
@@ -571,10 +571,27 @@ def load_setup(name: str) -> dict:
     return d
 
 def save_setup(name: str, data: dict):
+    """Save a setup to JSON atomically (write a sibling temp file, fsync,
+    os.replace) — the same scheme as Cryo/config.py.
+
+    This runs on every config edit and at every scan start, so a crash or
+    power loss mid-write used to truncate <Setup>.json; load_setup then
+    backed the fragment up as .bad and fell back to defaults (§47).  With the
+    rename the file on disk is always either the old or the new complete one.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     data = {k: v for k, v in data.items() if k != "_load_status"}
+    path = CONFIG_DIR / f"{name}.json"
+    tmp  = CONFIG_DIR / f"{name}.json.tmp"
     try:
-        with open(CONFIG_DIR / f"{name}.json", "w") as f:
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except Exception as e:
         log.error("Config save error: %s", e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass

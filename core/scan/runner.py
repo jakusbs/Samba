@@ -46,12 +46,22 @@ except ImportError:
     TANGO_AVAILABLE = False
 
 from config import MAX_RETRIES, RETRY_DELAY, X_TIME
-from hardware import get_proxy, fresh_proxy, safe_read, safe_write, demagnetize_magnet
+from hardware import (get_proxy, fresh_proxy, safe_read, safe_write,
+                      demagnetize_magnet, probe_alive)
 
 # h5py on Python 3.13 raises TypeError when writing plain Python strings as
 # variable-length UTF-8 attrs.  Use explicit string_dtype throughout.
 import h5py as _h5py
 _H5STR = _h5py.string_dtype()
+
+def _now_iso() -> str:
+    """Local time with its UTC offset, ISO 8601.
+
+    A naive local timestamp is ambiguous for one hour every autumn and
+    cannot be correlated with another instrument's clock.
+    """
+    return datetime.now().astimezone().isoformat()
+
 
 def _wsa(target, key, val):
     """Write a string HDF5 attribute, compatible with all h5py/Python versions.
@@ -242,6 +252,27 @@ TRIGGER_START_GUARD_MS = 200
 # settings (e.g. TC=1.5 ms → 7 ms settling) from skipping meaningful
 # settling altogether, which can produce noisy or inconsistent readings.
 MIN_LOCKIN_SETTLING_MS = 50
+# How long to wait for the asynchronous Start reply once Phase B has ended.
+# The reply normally arrived long before (Start returns as soon as the device
+# thread is spawned); this only bounds a device that stopped answering.
+TRIGGER_REPLY_TIMEOUT_MS = 2000
+# Phase B (integration completion) wait = the integration itself plus this
+# margin for the device's flush, thread start-up and readout latency.  The
+# stage move timeout (T.out) is a separate thing and only serves as a floor.
+PHASE_B_MARGIN_S = 5.0
+
+
+def _exc_text(e: BaseException) -> str:
+    """One-line description of an exception.
+
+    A Tango DevFailed carries its message in args[0].reason / .desc; str(e)
+    alone is the whole multi-line error stack, which is useless in a status
+    line.
+    """
+    args = getattr(e, "args", ())
+    if args and hasattr(args[0], "reason") and hasattr(args[0], "desc"):
+        return f"{args[0].reason}: {str(args[0].desc).strip()}"
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
 
 
 def _unhealthy_states() -> set:
@@ -286,6 +317,11 @@ class ScanRunner:
         # Devices implicated by the last failed acquire — named in the
         # auto-pause status message so the user knows what to open in Jive.
         self._last_bad_devs: List[str] = []
+        # Logged once per scan when the integration wait exceeds T.out.
+        self._phase_b_timeout_logged = False
+        # Stage position readbacks that failed after a move (the setpoint is
+        # recorded as the actual position for those points — see _move).
+        self._pos_readback_fails = 0
 
     def abort(self):
         self._abort = True
@@ -322,6 +358,8 @@ class ScanRunner:
         pg = cbs.get('progress', lambda *a: None)
         self._lg, self._st = lg, st
         self._write_fail_streak = 0
+        self._phase_b_timeout_logged = False
+        self._pos_readback_fails = 0
 
         scan_type = cfg.get("scan_type", "SPATIAL")
         scan_x    = cfg.get("scan_x",   True)
@@ -349,6 +387,11 @@ class ScanRunner:
             for _fut in as_completed(_fut_to_dev):
                 dp = _fut_to_dev[_fut]
                 fp, fp_err = _fut.result()
+                if not fp_err:
+                    # A proxy only proves the device is defined in the
+                    # database; a server that died without unexporting
+                    # itself still hands one out.  Ask it.
+                    fp_err = probe_alive(fp)
                 devp[dp] = fp
                 if fp_err:
                     _dead_sensors.append((dp, fp_err))
@@ -378,6 +421,8 @@ class ScanRunner:
         # configured but unreachable.
         def _actuator(path, role):
             p, err = fresh_proxy(path)
+            if not err:
+                err = probe_alive(p)      # defined ≠ alive, see above
             if err:
                 if TANGO_AVAILABLE:
                     st(f"✗ {role} device '{path}' unreachable — scan not started: {err}")
@@ -491,6 +536,13 @@ class ScanRunner:
 
         st(f"Starting {hdf_scan}: {n_x}×{n_y} = {total} pts → {filename}")
         count = 0; t0 = time.time()
+        # Absolute time base of the per-point `time` dataset (POSIX seconds)
+        # so point times can be reconstructed exactly — the root `timestamp`
+        # is taken a moment earlier, when the file is created.
+        try:
+            hfile.attrs["t0_epoch"] = float(t0)
+        except Exception:
+            pass
 
         # ── Configure integration time on all sensor devices ──────────────
         # Use fresh_proxy (not cached) to ensure a real connection.
@@ -889,7 +941,7 @@ class ScanRunner:
                         # that was never applied — a wrong x with no marker.
                         # Retry, then auto-pause on the same point, matching
                         # how sensor read failures are handled.
-                        _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
+                        _mag_err = safe_write(mag_p, mag_cur_attr, float(x_pos))
                         if _mag_err:
                             for _mtry in range(AUTO_PAUSE_THRESHOLD - 1):
                                 if self._abort: break
@@ -899,7 +951,7 @@ class ScanRunner:
                                 _mp, _mperr = fresh_proxy(_field_dev)
                                 if not _mperr:
                                     mag_p = _mp
-                                _mag_err = safe_write(mag_p, mag_cur_attr, x_pos)
+                                _mag_err = safe_write(mag_p, mag_cur_attr, float(x_pos))
                                 if not _mag_err:
                                     lg("  ✓ Magnet setpoint recovered")
                                     break
@@ -913,7 +965,7 @@ class ScanRunner:
                                 self._sleep(0.05)
                             if not self._abort:
                                 lg(f"  ↩ Resuming — retrying setpoint {x_pos:.4g}")
-                                safe_write(mag_p, mag_cur_attr, x_pos)
+                                safe_write(mag_p, mag_cur_attr, float(x_pos))
                         self._sleep(max(cfg["settle_time"], 0.05))
                         if self._wait_not_moving(mag_p, field_move_timeout, lg, st):
                             # The device was ramping (superconducting magnet /
@@ -1006,6 +1058,11 @@ class ScanRunner:
             if rtv40_p is not None and rtv40_base_ns is not None:
                 safe_write(rtv40_p, "PulseWidth", rtv40_base_ns)
                 lg(f"── RTV40 reset to base width {rtv40_base_ns:.3f} ns ──")
+
+        if self._pos_readback_fails:
+            lg(f"⚠ {self._pos_readback_fails} position readback(s) failed during "
+               f"this scan — those points store the commanded setpoint as x "
+               f"(metadata: position_readback_failures)")
 
         if count > 0:
             # Auto-demagnetize after FIELD scans — disabled for superconducting magnets
@@ -1292,7 +1349,7 @@ class ScanRunner:
             # Root: minimal status + type
             _wsa(hfile, "scan_status", "running")
             _wsa(hfile, "scan_type",   "DC_HYST")
-            _wsa(hfile, "timestamp",   datetime.now().isoformat())
+            _wsa(hfile, "timestamp",   _now_iso())
 
             # /metadata/
             meta = hfile.create_group("metadata")
@@ -1366,6 +1423,19 @@ class ScanRunner:
                 _wsa(cds, "unit",  "mV")
                 _wsa(cds, "role",  "calibration")
 
+            # NeXus NXdata attributes (additive, as in _open_hdf5)
+            _wsa(hfile, "NX_class", "NXroot")
+            _wsa(hfile, "default", "data")
+            _wsa(meta, "NX_class", "NXcollection")
+            _wsa(data_grp, "NX_class", "NXdata")
+            _wsa(data_grp, "signal", active_ch[0]["_hdf5_key"])
+            if len(active_ch) > 1:
+                data_grp.attrs.create("auxiliary_signals", data=np.array(
+                    [c["_hdf5_key"] for c in active_ch[1:]], dtype=_H5STR))
+            data_grp.attrs.create("axes", data=np.array(["actuator_field"],
+                                                        dtype=_H5STR))
+            data_grp.attrs["actuator_field_indices"] = 0
+
             hfile.flush()
         except Exception as e:
             st(f"⚠ Could not create {filename}: {e}"); return None
@@ -1406,6 +1476,10 @@ class ScanRunner:
            f"(IntegrationTime={int_t:.3g} s per half-loop) ──")
 
         t0 = time.time()
+        try:
+            hfile.attrs["t0_epoch"] = float(t0)
+        except Exception:
+            pass
         _RUNNING = {tango.DevState.RUNNING} if TANGO_AVAILABLE else set()
         _RUNNING.add("RUNNING")
 
@@ -1455,7 +1529,7 @@ class ScanRunner:
                     lg(f"⚠ Abort command failed: {e}")
                 st("DC Hyst aborted.")
                 _wsa(hfile, "scan_status",   "aborted")
-                _wsa(hfile, "timestamp_end", datetime.now().isoformat())
+                _wsa(hfile, "timestamp_end", _now_iso())
                 # result_fn stays None; finally block closes the file
 
             else:
@@ -1508,7 +1582,7 @@ class ScanRunner:
                 # inspection / outlier exclusion without re-measuring).
                 self._save_hyst_cycles(hfile, hyst_p, active_ch, n_loop, lg)
                 _wsa(hfile, "scan_status",   "completed")
-                _wsa(hfile, "timestamp_end", datetime.now().isoformat())
+                _wsa(hfile, "timestamp_end", _now_iso())
                 hfile.attrs["duration_seconds"] = elapsed
                 hfile["metadata"].attrs["duration_seconds"] = elapsed
                 hfile["metadata"].attrs["points_acquired"]  = n_actual
@@ -1548,11 +1622,15 @@ class ScanRunner:
         (modified in place) — the point is then marked bad so the per-point
         retry/auto-pause machinery engages, instead of silently reading the
         device's stale previous values.
+
+        Returns the asynchronous request id of the recovered dispatch (None
+        for a synchronous dispatch, or when recovery failed) so the caller
+        can collect its reply like any other.
         """
         fails = self._trigger_consec_fails.get(dev_path, 0) + 1
         self._trigger_consec_fails[dev_path] = fails
         lg(f"⚠ Trigger {dev_path}.{tcmd} ({fails}× consecutive): "
-           f"{type(exc).__name__}")
+           f"{_exc_text(exc)}")
         new_fp, fp_err = fresh_proxy(dev_path)
         if not fp_err:
             devp[dev_path] = new_fp
@@ -1561,16 +1639,18 @@ class ScanRunner:
                 except Exception: pass
             try:
                 if use_async:
-                    devp[dev_path].command_inout_asynch(tcmd)
+                    rid = devp[dev_path].command_inout_asynch(tcmd)
                 else:
                     devp[dev_path].command_inout(tcmd)
+                    rid = None
                 self._trigger_consec_fails[dev_path] = 0
                 lg(f"  ✓ {dev_path}: trigger recovered after proxy refresh")
-                return
+                return rid
             except Exception as e2:
                 lg(f"  ✗ {dev_path}: still failing after refresh: "
-                   f"{type(e2).__name__}")
+                   f"{_exc_text(e2)}")
         trigger_failed.append(dev_path)
+        return None
 
     # ── Single-point acquire: trigger → Phase A+B → guard → read ────────────
     def _do_acquire(self, devp, dev_sensors, trigger_devs,
@@ -1586,19 +1666,26 @@ class ScanRunner:
         the caller's retry/auto-pause machinery handles the failure.
         """
         trigger_failed = []
+        # device → asynchronous request id; every one is collected after
+        # Phase B (see there for why that is not optional).
+        pending: Dict[str, object] = {}
         t_trigger = time.time() - t0
 
         if trigger_devs:
             use_async = True
             for dev_path, tcmd in list(trigger_devs.items()):
                 try:
-                    devp[dev_path].command_inout_asynch(tcmd)
+                    rid = devp[dev_path].command_inout_asynch(tcmd)
+                    if rid is not None:
+                        pending[dev_path] = rid
                     self._trigger_consec_fails[dev_path] = 0
                 except AttributeError:
                     use_async = False; break
                 except Exception as e:
-                    self._recover_trigger(devp, dev_path, tcmd, e, True,
-                                          _zi_timeout_ms, trigger_failed, lg)
+                    rid = self._recover_trigger(devp, dev_path, tcmd, e, True,
+                                                _zi_timeout_ms, trigger_failed, lg)
+                    if rid is not None:
+                        pending[dev_path] = rid
             t_trigger = time.time() - t0
 
             if not use_async:
@@ -1661,7 +1748,19 @@ class ScanRunner:
             # Phase B — wait for every triggered device to leave RUNNING
             remaining = set(triggered) - bad_devs
             t_wait = time.time()
-            timeout = cfg["move_timeout"]
+            # The integration must be allowed to finish whatever the stage
+            # timeout is: Int can be set to 3600 s while T.out defaults to
+            # 15 s (max 300 s), and bounding this wait by T.out alone failed
+            # every point of a 20 s integration unless the operator also
+            # remembered to raise T.out.
+            _move_t = float(cfg["move_timeout"])
+            timeout = max(_move_t, float(int_time) + PHASE_B_MARGIN_S)
+            if timeout > _move_t and not getattr(self, "_phase_b_timeout_logged", False):
+                self._phase_b_timeout_logged = True
+                lg(f"── Integration wait bound: {timeout:.1f} s "
+                   f"(integration {float(int_time):.4g} s + "
+                   f"{PHASE_B_MARGIN_S:.0f} s margin; T.out {_move_t:.1f} s "
+                   f"is lower and only bounds stage moves) ──")
             _phase_b_fails = {dp: 0 for dp in remaining}
             while remaining and (time.time() - t_wait < timeout):
                 if self._abort: break
@@ -1702,6 +1801,28 @@ class ScanRunner:
                    + " — integration did not finish; failing point "
                      "(raise 'Timeout' if the device is simply slow)")
                 bad_devs |= remaining
+
+            # ── Collect the asynchronous Start replies ────────────────────
+            # command_inout_asynch returns a request id and the reply has to
+            # be fetched with command_inout_reply.  Until it is, it sits in
+            # the process-wide ApiUtil table — never freed when the proxy
+            # goes, measured at ~2.2 KB per trigger for the life of the
+            # application — and a server-side exception from Start() (the
+            # ZI "Cannot Start in state FAULT", a Beckhoff PLC write that
+            # failed) is raised HERE and nowhere else.  Un-collected, such a
+            # device stays ON, answers the readout with the previous point's
+            # values, and the point passed as good with one warning.
+            for dev_path, rid in pending.items():
+                reply = getattr(devp.get(dev_path), "command_inout_reply", None)
+                if reply is None:
+                    continue
+                try:
+                    reply(rid, TRIGGER_REPLY_TIMEOUT_MS)
+                except Exception as e:
+                    lg(f"⚠ {dev_path}.{trigger_devs.get(dev_path, '?')} rejected "
+                       f"by the server: {_exc_text(e)} — no acquisition; "
+                       f"failing point")
+                    bad_devs.add(dev_path)
         else:
             self._sleep(int_time)
 
@@ -1901,8 +2022,15 @@ class ScanRunner:
         try:
             raw = proxy.read_attribute(attr).value
             actual = float(raw[0]) if hasattr(raw, "__len__") else float(raw)
-        except Exception:
-            # Readback failed — use target as fallback, no warning
+        except Exception as e:
+            # Readback failed: the setpoint is recorded as the actual
+            # position.  Say so and count it — those points carry commanded,
+            # not measured, x values (metadata attr
+            # position_readback_failures), which used to happen silently.
+            self._pos_readback_fails = getattr(self, "_pos_readback_fails", 0) + 1
+            if log:
+                log(f"⚠ Position readback failed on '{attr}' ({_exc_text(e)}) "
+                    f"— recording the setpoint {target:.6g} as the actual position")
             return target
 
         delta = abs(actual - target)
@@ -1957,7 +2085,7 @@ class ScanRunner:
             # ── Root: minimal status / timing attrs ───────────────────────────
             _wsa(f, "scan_status", "running")
             _wsa(f, "scan_type",   hdf_scan)
-            _wsa(f, "timestamp",   datetime.now().isoformat())
+            _wsa(f, "timestamp",   _now_iso())
 
             # ── /metadata/ ────────────────────────────────────────────────────
             meta = f.create_group("metadata")
@@ -2092,6 +2220,26 @@ class ScanRunner:
                 cal_arr = np.array(bd_cal, dtype=np.float64)
                 _ds("calibration", cal_arr, "λ/2 calibration (mV)", "mV", "calibration")
 
+            # ── NeXus NXdata attributes — additive: same file, same datasets ──
+            # Tools that understand NeXus (PyMca, silx, h5web) take their
+            # default plot from these instead of guessing from shapes.
+            # 1-D: signal vs the actual axis; 2-D: signal [n_y, n_x] vs the
+            # 1-D setpoint axes (an NXdata axis must be 1-D along its dim).
+            _wsa(f, "NX_class", "NXroot")
+            _wsa(f, "default", "data")
+            _wsa(meta, "NX_class", "NXcollection")
+            _wsa(data, "NX_class", "NXdata")
+            if sensors:
+                _wsa(data, "signal", sensors[0]["_hdf5_key"])
+                if len(sensors) > 1:
+                    data.attrs.create("auxiliary_signals", data=np.array(
+                        [s["_hdf5_key"] for s in sensors[1:]], dtype=_H5STR))
+            _axes = ([ay_key + "_setpoint", ax_key + "_setpoint"] if is_2d
+                     else [ax_key])
+            data.attrs.create("axes", data=np.array(_axes, dtype=_H5STR))
+            for _i, _ax in enumerate(_axes):
+                data.attrs[f"{_ax}_indices"] = _i
+
             _wsa(f, "_x_key", ax_key)
             f.attrs["_is_2d"]   = is_2d
             f.attrs["_is_time"] = is_time
@@ -2162,11 +2310,15 @@ class ScanRunner:
                 _wsa(f, "scan_status", "completed")
 
             duration = float(t_actual.max()) if count > 0 else 0.0
-            _wsa(f, "timestamp_end",    datetime.now().isoformat())
+            _wsa(f, "timestamp_end",    _now_iso())
             f.attrs["duration_seconds"] = duration
 
             f["metadata"].attrs["points_acquired"]  = count
             f["metadata"].attrs["duration_seconds"] = duration
+            # Points whose x is the setpoint because the stage readback
+            # failed (0 for a clean scan) — see _move.
+            f["metadata"].attrs["position_readback_failures"] = int(
+                getattr(self, "_pos_readback_fails", 0))
 
             f.flush()
         except Exception:

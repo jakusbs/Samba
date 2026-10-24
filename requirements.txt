@@ -1,0 +1,9 @@
+# Runtime requirements for both applications (Samba_main and Cryo).
+# Lower bounds are the oldest versions the code is known to work with; the
+# lab installs pin whatever the conda env resolves.  pytango is optional —
+# without it both applications run in simulation mode.
+numpy>=1.26
+h5py>=3.10
+matplotlib>=3.8
+PyQt6>=6.6
+pytango>=9.5

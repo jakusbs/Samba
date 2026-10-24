@@ -5935,3 +5935,126 @@ non-`hw_` keys surviving, no override when the flip is off, hosts passing no
 callable still getting the polarity right, and the payload on `scan_done`
 matching the config. Verified non-vacuous: with `_refresh_hw_snapshot` neutered
 to the old behaviour, 8 of the 9 fail.
+
+---
+
+## 86. Recent Changes (October 2026) — Review Batch 1: Trigger Replies, Relay Integrity, Timeouts, Liveness, Metadata
+
+Branch `claude/trusting-darwin-zb18w0` (277 unit + 30 pytest tests, 5 of them
+against a **real in-process pytango device**). App version → **v13.37**.
+First batch from the October engineering review (the review itself is in the
+session scratchpad, `SAMBA_REVIEW_2026-10-24.md`; findings are referenced as
+D1…D12 / R1…).
+
+### D1 — Asynchronous Start replies are now collected (`core/scan/runner.py`)
+`_do_acquire` dispatched every trigger with `command_inout_asynch` and never
+called `command_inout_reply`.  Two consequences, both measured against a real
+pytango 10.3.1 device served by `tango.test_context.DeviceTestContext`:
+- **A server-side failure of `Start()` was invisible.**  The exception only
+  exists in the reply.  A device whose Start raised while it stayed `ON`
+  (`DoubleInBeckhoffAverage.Start` writes to the PLC *before* setting
+  RUNNING) took Phase A's "still ON — warn, do not fail" branch, and the
+  point was recorded as good **with the previous point's values**.  The ZI
+  servers only raise from non-ON states, so Phase A's unhealthy-state check
+  caught those by *state*, not by exception.
+- **Replies accumulated for the life of the process**: ≈2.2 KB each in the
+  global `ApiUtil` table — 3000 still pending after deleting the proxy — i.e.
+  ≈180 MB left behind by a 200×200 map with two triggered devices.
+Now the request id is kept per device (also through `_recover_trigger`,
+which returns the id of its re-dispatch) and collected after Phase B with
+`command_inout_reply(rid, TRIGGER_REPLY_TIMEOUT_MS)`; a `DevFailed` reply
+puts the device in `bad_devs` → NaN + the existing retry/auto-pause path.
+`forget=True` was deliberately **not** used: the pytango docs note that
+fire-and-forget disables the proxy's automatic reconnection.
+`_exc_text()` renders a DevFailed as `reason: desc` instead of the whole
+error stack in status lines.
+
+### D4 — Integration completion no longer bounded by the stage timeout
+Phase B waited at most `cfg["move_timeout"]` (T.out, default 15 s, max
+300 s) while Int allows 3600 s — so an integration ≥ T.out failed every
+point and auto-paused unless the operator also raised T.out.  Now
+`timeout = max(T.out, int_time + PHASE_B_MARGIN_S)` (5 s margin), logged
+once per scan when the derived bound exceeds T.out.
+
+### D2 — Scanlist relay: verified, written only on change, auto-pause on failure (`workers.py`)
+- A failed relay write used to be log-only; the list measured on at the old
+  polarity while `.txt` and HDF5 recorded the intended one (the `.txt`
+  derives `relay_sign` from the commanded state).  New `_set_relay()`:
+  `safe_write` + readback verification, 3 attempts, then auto-pause via
+  `_pause_on_flip_error(…, "relay")` — the same contract as `_flip_field`.
+  `hw_relay_state` is the **verified** state.
+- `PyRelais.switchvar.write` runs ground → switch → unground on **every**
+  write whatever the value, so the old unconditional write clicked the
+  relay before every scan — with flipping off too.  The relay is now written
+  only when the scheduled state differs from the known one (`_relay_known`;
+  an unreadable relay at list start is set explicitly for cycle 0).  AB over
+  8 cycles: 7 writes; ABBA: 4; flipping off: 0.
+- Tests assert the relay's *actual* state at each scan plus the write
+  sequence; new: dropped write → pause → correct state; unknown start state.
+
+### R1 — Liveness probe (`hardware.probe_alive`)
+`DeviceProxy()` only resolves the database entry; a server that crashed
+without unexporting itself still yields a proxy.  `probe_alive(proxy)` pings
+with a short client timeout (restored afterwards; SimProxy/test fakes count
+as alive).  Used by the scan-start sensor pool and `_actuator()`, the
+scanlist polarity-device guard, and both apps' splash probe.  The splash
+dialog text now says scans using an unreachable device **refuse to start**
+(it claimed "simulation mode", which the engine stopped doing in §60).
+
+### D8 — NeXus attributes, additively (same `.h5`, same datasets)
+`_open_hdf5` / `_run_dc_hyst` now also write `NX_class` (`NXroot` /
+`NXdata` / `NXcollection`), root `default="data"`, `/data@signal` (first
+sensor), `@auxiliary_signals`, `@axes` (1-D: the actual axis; 2-D: the two
+1-D `*_setpoint` datasets, `[y, x]` to match `[iy, ix]` storage) and
+`@<axis>_indices`.  Nothing that reads the files today changes; NeXus-aware
+tools (PyMca, silx, h5web) get a reliable default plot instead of guessing
+from shapes.  `NX_class` is hidden from the browser's "Other metadata".
+
+### D9 / D11 / R5 — timestamps, readback accounting, float coercion
+- `timestamp` / `timestamp_end` carry the UTC offset (`_now_iso()`); the
+  root attr `t0_epoch` (POSIX seconds) is the exact base of `/data/time`.
+- `_move` readback failures (setpoint recorded as x) are logged per point,
+  counted, summarised at scan end, and stored as metadata
+  `position_readback_failures` (was silent).
+- FIELD setpoints are written as Python `float`, like `_move` already did.
+
+### D3 — Saved device paths survive the Setup Defaults round trip (both apps)
+A path not in the registry list left the combo on item 0, `get_defaults()`
+returned the first registry device, and the next save persisted it (CLAUDE.md
+§68 "pre-existing, not fixed": a fresh machine without
+`device_registry.json` got a lock-in as its Keithley and relay).
+`_set_by_path` (Samba_main) and both `_populate_devs` (Cryo) now insert the
+saved path as a real item (data = path).  Verified with real offscreen Qt in
+both apps.
+
+### D5 / D7 / D12 — diagnosability and persistence
+- `_log_append` mirrors into the rotating file log (per-point status lines
+  only when they carry a warning) — the GUI pane is cleared at every scan
+  start, so the engine's diagnostics left no trail.
+- Samba_main `save_setup` is atomic (tmp + fsync + `os.replace`), as Cryo's.
+
+### Tests / CI
+- `test_runner.py` 266 → **277**: reply collection (incl. after a proxy
+  refresh), server-side rejection fails the point, Phase-B bound derivation
+  (and that a device that never finishes still times out), NeXus attributes
+  (1-D and 2-D), tz-aware timestamp, readback counter, relay verification /
+  write-on-change / unknown start state.
+- New `tests/test_tango_engine.py`: a lock-in-like `tango.server.Device`
+  served by `DeviceTestContext` (no database, no hardware) drives the real
+  `_do_acquire` through a real `DeviceProxy`: fresh value every point, zero
+  pending replies, rejected Start → NaN, integration longer than T.out
+  completes, `probe_alive`, numpy-scalar write accepted.  Skips without
+  pytango.
+- CI now installs pytango, runs both suites and `ruff --select
+  F821,F822,F823,F811,E722`.  Root `requirements.txt` added; README test
+  section updated.
+
+### Layout check (offscreen, both apps, 1180×640 / 1366×768 / 1920×1080)
+Rendered with real Qt; see the review conversation for the screenshots.  At
+the declared **minimum 1180×640 the bottom tab area collapses to ≈130 px**
+(Trajectory shows only group titles; Scanlist/Data Browser controls overlap;
+Setup Defaults shows one title) and the sensor picker's Axis column scrolls
+out of view; Autofocus labels truncate ("Focus p", "Step (dz") at ≤1366 and
+nearly every Calibration-tab label truncates in Cryo at 1180.  1920×1080 is
+clean.  Not changed in this batch — a decision for the operators (raise the
+minimum height, or make the bottom tab pages scroll at small heights).
