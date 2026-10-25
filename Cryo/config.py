@@ -12,6 +12,7 @@ from typing import Dict, List
 # from drifting apart.  See Samba_main/config.py for the same import.
 from core.current_sweep import CURRENT_SWEEP_DEFAULTS, REFOCUS_DEFAULTS
 from core.polarity import ORDER_AB
+from core.version import __version__ as APP_VERSION   # title + HDF5 provenance
 
 
 def _sanitize(obj):

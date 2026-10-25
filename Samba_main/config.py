@@ -15,15 +15,13 @@ from core.polarity import ORDER_AB
 
 log = logging.getLogger(__name__)
 
-# Application version, shown in the main window title as "Samba vX.YZ".
-# Convention: bump the decimal part on every regular commit; the major part
-# only for a release/breaking change.  Independent of SCHEMA_VERSION below,
-# which tracks the on-disk scan-config format.
-# 13.31 is deliberately skipped: the codex/samba-ui-reliability branch already
-# publishes itself as 13.31, and APP_VERSION is written into every scan file as
-# `samba_version` provenance (§60).  Two different codebases stamping the same
-# version into data would make a file impossible to match to the code.
-APP_VERSION = "13.38"
+# Application version, shown in the main window title as "Samba vX.YZ" and
+# written into every scan file as `samba_version` provenance (§60).  The
+# number itself lives in core/version.py (one source for both apps and for
+# pyproject.toml); the bump-per-commit convention is documented there.
+# Independent of SCHEMA_VERSION below, which tracks the on-disk scan-config
+# format.
+from core.version import __version__ as APP_VERSION
 
 # Current schema version — bump when adding new fields
 SCHEMA_VERSION = 12

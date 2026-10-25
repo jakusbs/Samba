@@ -3037,6 +3037,78 @@ class TestDefaultsPanelLoadGuard(unittest.TestCase):
                 f"{rel}: defaults_changed should be emitted only inside "
                 f"{funnel}(), found {len(emits)} emit(s) at lines {emits}")
 
+class TestHdf5NameDedupe(unittest.TestCase):
+    """Two scans finishing within the same second must not share a file (§88):
+    names carry only a HHMMSS stamp, and h5py's mode "w" truncates."""
+
+    def test_existing_name_gets_a_numeric_suffix(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "103013_TIME_sweep.h5")
+        self.assertEqual(_runner_mod._unique_path(p), p)          # free: unchanged
+        open(p, "w").close()
+        p2 = _runner_mod._unique_path(p)
+        self.assertEqual(p2, os.path.join(d, "103013_TIME_sweep_2.h5"))
+        open(p2, "w").close()
+        self.assertEqual(_runner_mod._unique_path(p),
+                         os.path.join(d, "103013_TIME_sweep_3.h5"))
+
+
+class TestScanHost(unittest.TestCase):
+    """The two main windows share their run lifecycle through core/scan_host.py.
+
+    Before the mixin (October 2026) MainWindow and CryoMainWindow had 34
+    byte-identical methods and 9 that differed only in a key spelling or a
+    QSettings name, so every start/finish/pause/abort fix had to be made
+    twice and the copies drifted.  These checks keep it that way: no method
+    may be defined near-identically in both windows again, and a window may
+    only override the mixin's documented hooks.
+    """
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+    HOOKS = {"_disarm_zero_after_scan", "_run_zero_after_scan",
+             "_stop_background_workers", "_active_sensors", "_kerr_display_widgets"}
+
+    @classmethod
+    def _methods(cls, rel, clsname):
+        import ast
+        src = open(os.path.join(cls.ROOT, rel), encoding="utf-8").read()
+        tree = ast.parse(src); lines = src.splitlines()
+        node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.ClassDef) and n.name == clsname)
+        return node, {f.name: "\n".join(lines[f.lineno - 1:f.end_lineno])
+                      for f in node.body if isinstance(f, ast.FunctionDef)}
+
+    def test_no_method_is_duplicated_between_the_windows(self):
+        import difflib
+        _, a = self._methods("Samba_main/samba.py", "MainWindow")
+        _, b = self._methods("Cryo/samba_cryo.py", "CryoMainWindow")
+        shared = sorted(set(a) & set(b))
+        dup = [m for m in shared
+               if difflib.SequenceMatcher(None, a[m], b[m]).ratio() >= 0.9]
+        self.assertEqual(dup, [], "near-identical in both windows — move to ScanHostMixin")
+        # 95 shared names before the mixin; the ones left are genuinely
+        # different implementations of the same hook (__init__, _build_ui …).
+        self.assertLessEqual(len(shared), 60, shared)
+
+    def test_windows_override_only_the_mixin_hooks(self):
+        _, mixin = self._methods("core/scan_host.py", "ScanHostMixin")
+        shared_impl = set(mixin) - self.HOOKS
+        for rel, clsname in (("Samba_main/samba.py", "MainWindow"),
+                             ("Cryo/samba_cryo.py", "CryoMainWindow")):
+            node, meths = self._methods(rel, clsname)
+            redefined = sorted(set(meths) & shared_impl)
+            self.assertEqual(redefined, [], f"{clsname} redefines mixin methods")
+            self.assertEqual([getattr(b, "id", None) for b in node.bases][:1],
+                             ["ScanHostMixin"], f"{clsname} must list the mixin first")
+
+    def test_mixin_has_the_shared_lifecycle(self):
+        _, mixin = self._methods("core/scan_host.py", "ScanHostMixin")
+        for m in ("_acquire_setup_lock", "_on_sl_worker_finished", "_toggle_pause",
+                  "_abort_scanlist", "_on_status", "_on_engine_error", "_build_status_bar",
+                  "_cs_begin", "_cs_finish", "_run_refocus", "closeEvent"):
+            self.assertIn(m, mixin)
+
+
 class TestAppVersion(unittest.TestCase):
     """Samba_main window title carries the vX.YZ application version."""
 

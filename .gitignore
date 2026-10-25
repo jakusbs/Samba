@@ -10,3 +10,10 @@ Cryo/tango_device_cryo/
 
 # Written by install.sh — records the chosen conda env, per machine.
 .install_config
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+*~

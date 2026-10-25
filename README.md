@@ -112,7 +112,7 @@ Samba/
 │   ├── analyze_samba.py     # SOT line-scan pipeline (import_analyze_both, …)
 │   └── samba_io.py          # HDF5 loaders, hysteresis cycle tools
 │
-├── test_runner.py           # Hardware-free unit tests (61 tests)
+├── test_runner.py           # Hardware-free unit tests (Qt + TANGO stubbed)
 ├── CLAUDE.md                # Developer documentation + changelog
 └── README.md                # This file
 ```
@@ -134,6 +134,16 @@ one-line re-export shims in `Samba_main/` and `Cryo/` (e.g. `Samba_main/theme.py
   UI development (see [Simulation mode](#15-simulation-mode))
 
 ### Quick install (pip)
+
+From a checkout, one command installs the dependencies and the two launchers:
+
+```bash
+pip install -e .            # simulation-capable; add real hardware with:
+pip install -e ".[tango]"   # pytango as well
+samba --version             # prints the APP_VERSION of this checkout
+```
+
+Or install just the packages by hand:
 
 ```bash
 pip install pytango PyQt6 matplotlib h5py numpy
@@ -175,11 +185,14 @@ export TANGO_HOST=192.168.1.1:10000
 
 ```bash
 # Green + IR setups
-cd Samba_main && python samba.py
+cd Samba_main && python samba.py        # or, after pip install -e .:  samba
 
 # Cryo setup
-cd Cryo && python samba_cryo.py
+cd Cryo && python samba_cryo.py         # or:  samba-cryo
 ```
+
+Both accept `--version`.  The entry points simply run the scripts from their
+own directories, so the two ways are equivalent.
 
 On startup a splash screen probes the key devices for the active setup **in parallel**
 (stage, lock-in, magnet, Keithley — AttoDRY on Cryo) and shows a live ✓/⚠ status line

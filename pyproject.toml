@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "samba-moke"
+dynamic = ["version"]
+description = "SAMBA — scanning MOKE measurement control for the ETH Intermag lab (Green, IR and Cryo setups)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "h5py>=3.10",
+    "matplotlib>=3.8",
+    "PyQt6>=6.6",
+]
+
+[project.optional-dependencies]
+# Without pytango both applications run in simulation mode (core/hardware.py).
+tango    = ["pytango>=9.5"]
+analysis = ["scipy>=1.11", "pandas>=2.0"]
+test     = ["pytest>=8", "ruff>=0.5", "pytango>=9.5"]
+
+[project.scripts]
+samba      = "core.launch:main_samba"
+samba-cryo = "core.launch:main_cryo"
+
+[tool.setuptools]
+packages = ["core", "core.scan",
+            "Samba_main", "Samba_main.panels", "Samba_main.scan",
+            "Cryo", "Cryo.scan"]
+
+[tool.setuptools.package-data]
+Samba_main = ["*.png", "*.svg", "*.ico", "*.sh", "*.md"]
+Cryo       = ["*.png", "*.svg", "*.ico", "*.sh", "*.md", "requirements.txt"]
+
+[tool.setuptools.dynamic]
+version = {attr = "core.version.__version__"}

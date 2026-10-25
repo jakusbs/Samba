@@ -97,6 +97,24 @@ def _make_filename(cfg: dict) -> str:
     return "_".join(parts) + ".h5"
 
 
+def _unique_path(path: str) -> str:
+    """`path` itself, or `<stem>_2<ext>`, `<stem>_3<ext>`, … if it exists.
+
+    File names carry a HHMMSS stamp, so two scans that finish within the same
+    second — a sub-second scanlist item, a quick calibration repeat — would
+    otherwise open the SAME file with mode "w" and the first scan's data would
+    be silently truncated away (seen in a simulated 0.7 s-per-scan sweep: three
+    scans, two files).  The scanlist .txt already dedupes the same way.
+    """
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f"{stem}_{n}{ext}"):
+        n += 1
+    return f"{stem}_{n}{ext}"
+
+
 _PROVENANCE: Optional[Dict[str, str]] = None
 
 
@@ -525,7 +543,7 @@ class ScanRunner:
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         day_dir = os.path.join(base, datetime.now().strftime("%Y%m%d"))
         os.makedirs(day_dir, exist_ok=True)
-        filename = os.path.join(day_dir, _make_filename(cfg))
+        filename = _unique_path(os.path.join(day_dir, _make_filename(cfg)))
 
         # ── Open HDF5 immediately — crash-safe from the first point ───────────
         hfile = self._open_hdf5(filename, x_plan, y_plan, active,
@@ -704,7 +722,8 @@ class ScanRunner:
             retrace_cfg      = copy.deepcopy(cfg)
             retrace_cfg["name"] = cfg.get("_retrace_name",
                                           cfg["name"] + "_retrace")
-            retrace_filename = os.path.join(day_dir, _make_filename(retrace_cfg))
+            retrace_filename = _unique_path(
+                os.path.join(day_dir, _make_filename(retrace_cfg)))
             hfile2 = self._open_hdf5(retrace_filename, x_plan, y_plan, active,
                                      x_lbl, x_unit, hdf_scan, retrace_cfg)
             if hfile2 is None:
@@ -1344,7 +1363,7 @@ class ScanRunner:
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         day_dir = os.path.join(base, datetime.now().strftime("%Y%m%d"))
         os.makedirs(day_dir, exist_ok=True)
-        filename = os.path.join(day_dir, _make_filename(cfg))
+        filename = _unique_path(os.path.join(day_dir, _make_filename(cfg)))
 
         try:
             import json as _json
