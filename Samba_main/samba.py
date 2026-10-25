@@ -657,6 +657,9 @@ class MainWindow(QMainWindow):
         log_hdr.addWidget(clear_btn)
         tlol.addLayout(log_hdr)
         self.log_text = QTextEdit(); self.log_text.setReadOnly(True); tlol.addWidget(self.log_text)
+        # One line per point for a long map adds up (500 k lines kept in the
+        # document); the full trail is in the file log since §86.
+        self.log_text.document().setMaximumBlockCount(20000)
         self.live_tabs.addTab(tlog, "Log")
         cl.addWidget(self.live_tabs)
 
@@ -730,6 +733,7 @@ class MainWindow(QMainWindow):
         "idle":    "QStatusBar{background:#181825;border-top:2px solid #313244;}",
         "running": "QStatusBar{background:#16241b;border-top:2px solid #a6e3a1;}",
         "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
+        "error":   "QStatusBar{background:#2a1520;border-top:2px solid #f38ba8;}",
     }
 
     def _tint_status_bar(self, state: str):
@@ -1825,27 +1829,59 @@ class MainWindow(QMainWindow):
                 return None
         return active
 
-    def _apply_field_setpoint_for_scan(self, cfg: dict, hw_panel):
-        """Push the hardware panel's magnet-current setpoint to the magnet at
-        scan start, so the measurement runs at the field shown in the write
-        window (an aborted scanlist auto-zeroes the magnet while the window
-        still displays the old setpoint).  FIELD sweeps and DC hysteresis
-        drive the magnet themselves and are skipped."""
-        if cfg.get("scan_type") in ("FIELD", "DC_HYST"):
-            return
-        try:
-            val, err = hw_panel.apply_field_setpoint()
-        except Exception as e:
-            self._log_append(f"⚠ Field setpoint apply failed: {e}", level="warning")
-            return
-        if err in ("simulation", "no magnet device configured"):
-            return
-        if err:
-            self._log_append(f"⚠ Could not apply field setpoint {val:.4g} A "
-                             f"at scan start: {err}", level="warning")
-        else:
-            self._log_append(f"Field setpoint {val:.4g} A applied to magnet "
-                             f"(scan start)", level="info")
+    def _make_pre_start(self, setup: dict, scan_type: str, hw_panel):
+        """Build the hardware step the worker runs on ITS thread before the
+        first point.
+
+        Two things used to happen on the GUI thread between pressing Start
+        and the first point: the magnet-current setpoint write (a TANGO
+        write with the 10 s I/O timeout, so the measurement runs at the
+        field the write window shows — an aborted scanlist auto-zeroes the
+        magnet while the window still displays the old setpoint) and the
+        metadata snapshot (up to 1.5 s per attribute, ~14 attributes).  With
+        one device down the window froze for seconds.  Widget values are
+        read HERE, on the GUI thread; the returned callable does the TANGO
+        I/O on the worker thread, in the same order as before, and reports
+        through the worker's log signal.
+
+        The setpoint is skipped for FIELD and DC_HYST scans, which drive the
+        magnet themselves.
+        """
+        from hardware import is_sim_proxy
+        sp = None
+        if scan_type not in ("FIELD", "DC_HYST") and hw_panel is not None:
+            dev  = (setup.get("magnet_device", "") or "").strip()
+            attr = setup.get("magnet_current_attr", "current_polar")
+            if dev:
+                sp = (dev, attr, float(hw_panel.field_spin.value()))
+
+        def _pre_start(cfgs, log):
+            if sp is not None:
+                dev, attr, val = sp
+                p, err = fresh_proxy(dev)
+                if err:
+                    if TANGO_AVAILABLE:
+                        log(f"⚠ Could not apply field setpoint {val:.4g} A "
+                            f"at scan start: {err}")
+                elif not is_sim_proxy(p):
+                    werr = safe_write(p, attr, val)
+                    if werr:
+                        log(f"⚠ Could not apply field setpoint {val:.4g} A "
+                            f"at scan start: {werr}")
+                        self._post_to_main.emit(
+                            lambda: hw_panel._set_err(hw_panel.mag_status, werr[:60]))
+                    else:
+                        log(f"Field setpoint {val:.4g} A applied to magnet "
+                            f"(scan start)")
+                        self._post_to_main.emit(
+                            lambda: hw_panel._set_ok(
+                                hw_panel.mag_status,
+                                f"Sent {attr} = {val:.4f} A (scan start)"))
+            # Hardware snapshot (written to HDF5 metadata + lab notebook)
+            snap = _read_hw_snapshot(setup, scan_type)
+            for c in cfgs:
+                c.update(snap)
+        return _pre_start
 
     # ── "Zero after scan" ─────────────────────────────────────────────────────
     def _arm_zero_after_scan(self, cfg: dict):
@@ -1906,9 +1942,35 @@ class MainWindow(QMainWindow):
         worker.status_msg.connect(self._on_status)
         worker.log_msg.connect(self._log_append)
         worker.scan_done.connect(lambda fn: setattr(self, "_last_fn", fn))
-        worker.error_msg.connect(
-            lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        self._engine_error = None
+        worker.error_msg.connect(self._on_engine_error)
         worker.finished.connect(self._on_worker_finished)
+
+    def _on_engine_error(self, tb: str):
+        """The scan engine raised: say so where the operator looks.
+
+        Until now a traceback was one red line in the Log tab and nothing
+        else changed — the status label kept the last point's text, the
+        status bar went back to idle, and nothing said the file was
+        incomplete.  The dialog is non-modal so the worker's finish handling
+        runs underneath it.
+        """
+        self._engine_error = tb
+        self._log_append(f"\n⚠ ERROR:\n{tb}", level="error")
+        self.status_lbl.setText("✗ Scan failed — see the Log tab")
+        self._tint_status_bar("error")
+        lines = [ln for ln in str(tb).strip().splitlines() if ln.strip()]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Scan failed")
+        box.setText("The scan engine stopped with an error:\n\n"
+                    + (lines[-1] if lines else str(tb))[:300]
+                    + "\n\nThe data file, if one was created, is incomplete. "
+                      "The full traceback is in the Log tab and in the log file.")
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.show()
+        self._error_box = box
 
     # ── Setup lock helper ─────────────────────────────────────────────────────
     def _acquire_setup_lock(self) -> bool:
@@ -2005,14 +2067,10 @@ class MainWindow(QMainWindow):
 
         # BD calibration is injected in _build_full_config() (shared path).
 
-        # Apply the displayed field setpoint so the scan runs at the field the
-        # write window shows (an aborted scanlist may have auto-zeroed it).
-        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
-
-        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
-        cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
-
-        self._worker = ScanWorker(cfg, setup)
+        # Field setpoint + hardware snapshot run on the worker thread, before
+        # the first point (they froze the GUI when a device was down).
+        self._worker = ScanWorker(cfg, setup, pre_start=self._make_pre_start(
+            setup, cfg.get("scan_type", "SPATIAL"), self.traj_panel.hw))
         self._wire_worker(self._worker)
         if cfg.get("scan_type") == "DC_HYST":
             self._worker.dc_loop_ready.connect(self.traj_panel.update_dc_live)
@@ -2078,9 +2136,8 @@ class MainWindow(QMainWindow):
         self._setup_live_display(cfg, active)
         self._alloc_scan_data(cfg, active)
 
-        self._apply_field_setpoint_for_scan(cfg, self.traj_panel.hw)
-
-        self._worker = ScanWorker(cfg, setup)
+        self._worker = ScanWorker(cfg, setup, pre_start=self._make_pre_start(
+            setup, cfg.get("scan_type", "SPATIAL"), self.traj_panel.hw))
         self._wire_worker(self._worker)
 
         self._scan_start_time = _time.time()
@@ -2187,6 +2244,10 @@ class MainWindow(QMainWindow):
         release_lock(self._active_setup_name)
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
+        if getattr(self, "_engine_error", None):
+            # Keep the failure visible after the run-state reset.
+            self._tint_status_bar("error")
+            self.status_lbl.setText("✗ Scan failed — see the Log tab")
         self._calib_timescan = False
         # Drop the finished worker: _toggle_pause/_on_status pick the target via
         # `self._worker or self._sl_worker`, so a stale finished single-scan
@@ -2218,6 +2279,10 @@ class MainWindow(QMainWindow):
             self._log_append(f"✓ Scan complete — saved {self._last_fn}", level="info")
             self._last_fn = None
         self._update_estimate()
+        if getattr(self, "_engine_error", None):
+            # _update_estimate just rewrote the status label; the failure
+            # must stay visible until the next start or config edit.
+            self.status_lbl.setText("✗ Scan failed — see the Log tab")
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):
@@ -2357,16 +2422,11 @@ class MainWindow(QMainWindow):
 
         # BD calibration is injected in _build_full_config() (shared path).
 
-        # Apply the displayed field setpoint so the scanlist starts at the
-        # field the write window shows (a previous abort auto-zeroed it).
-        self._apply_field_setpoint_for_scan(cfg, self.sl_panel.hw)
-
-        # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
-        # Taken here for the first scan, and re-taken by the worker before
-        # every later one: the relay and the field change between cycles, so
-        # a single list-start snapshot mislabels every scan after the first.
-        cfg.update(_read_hw_snapshot(setup, cfg.get("scan_type", "SPATIAL")))
-
+        # Field setpoint (so the list starts at the field the write window
+        # shows — a previous abort auto-zeroed it) + the first hardware
+        # snapshot run on the worker thread before the first scan; the worker
+        # re-takes the snapshot before every later scan, since the relay and
+        # the field change between cycles.
         self._sl_worker = ScanlistWorker(cfg, setup, sl["n_scans"], sl["list_name"],
                                          sl["relay_flip"], sl["field_flip"],
                                          flip_order=sl["flip_order"],
@@ -2377,7 +2437,10 @@ class MainWindow(QMainWindow):
                                              else 0.0),
                                          last_focus_t=self._focus_t,
                                          hw_snapshot_fn=lambda sc: _read_hw_snapshot(
-                                             setup, sc.get("scan_type", "SPATIAL")))
+                                             setup, sc.get("scan_type", "SPATIAL")),
+                                         pre_start=self._make_pre_start(
+                                             setup, cfg.get("scan_type", "SPATIAL"),
+                                             self.sl_panel.hw))
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
@@ -2386,8 +2449,8 @@ class MainWindow(QMainWindow):
         self._sl_worker.log_msg.connect(self._log_append)
         self._sl_worker.all_done.connect(self._on_scanlist_done)
         self._sl_worker.relay_changed.connect(self._on_scanlist_relay_changed)
-        self._sl_worker.error_msg.connect(
-            lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        self._engine_error = None
+        self._sl_worker.error_msg.connect(self._on_engine_error)
         self._sl_worker.refocus_due.connect(self._on_sl_refocus_due)
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 

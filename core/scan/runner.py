@@ -563,10 +563,14 @@ class ScanRunner:
                 continue
             try:
                 fp, fp_err = fresh_proxy(dev_path)
-                if fp_err:
+                if fp_err and TANGO_AVAILABLE:
                     lg(f"  ⚠ {dev_path}: cannot connect — {fp_err}")
                     configured_devs.add(dev_path)
                     continue
+                # In simulation mode fresh_proxy reports "pytango not
+                # installed" next to a SimProxy: write to it anyway, or the
+                # simulated device keeps its default 0.1 s and every
+                # simulated point costs 100 ms whatever Int says.
                 devp[dev_path] = fp
                 err = safe_write(fp, it_attr, int_time)
                 if err:

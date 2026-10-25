@@ -31,9 +31,14 @@ class ScanWorker(QThread):
     error_msg         = pyqtSignal(str)
     dc_loop_ready     = pyqtSignal(object, object)   # (field_arr, y_bufs dict)
 
-    def __init__(self, cfg: dict, setup: dict):
+    def __init__(self, cfg: dict, setup: dict, pre_start=None):
         super().__init__()
         self._runner = ScanRunner(cfg, setup)
+        # Hardware I/O the host wants done on THIS thread before the first
+        # point — field setpoint, metadata snapshot: pre_start(cfgs, log).
+        # It used to run on the GUI thread and froze the window for the I/O
+        # timeout whenever a device was down.
+        self._pre_start = pre_start
 
     def abort(self):     self._runner.abort()
     def pause(self):     self._runner.pause()
@@ -42,6 +47,11 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
+            if self._pre_start is not None:
+                try:
+                    self._pre_start([self._runner.cfg], self.log_msg.emit)
+                except Exception as e:
+                    self.log_msg.emit(f"⚠ pre-scan hardware step failed: {e}")
             fn = self._runner.run({
                 'point':         self.point_done.emit,
                 'point_retrace': self.point_retrace.emit,
@@ -84,8 +94,11 @@ class ScanlistWorker(QThread):
                  setup_name: str = "",
                  refocus_every_min: float = 0.0,
                  last_focus_t: Optional[float] = None,
-                 hw_snapshot_fn: Optional[Callable[[dict], dict]] = None):
+                 hw_snapshot_fn: Optional[Callable[[dict], dict]] = None,
+                 pre_start=None):
         super().__init__()
+        # Run once on this thread before the first scan (see ScanWorker).
+        self._pre_start = pre_start
         # Accept either a single config dict or a per-cycle list of configs.
         # For trace+retrace both cfgs run per cycle; field flip happens between cycles.
         self.cfg_list = cfg_or_list if isinstance(cfg_or_list, list) else [cfg_or_list]
@@ -158,6 +171,11 @@ class ScanlistWorker(QThread):
 
     def run(self):
         try:
+            if self._pre_start is not None:
+                try:
+                    self._pre_start(self.cfg_list, self.log_msg.emit)
+                except Exception as e:
+                    self.log_msg.emit(f"⚠ pre-scan hardware step failed: {e}")
             self._run_list()
         except Exception:
             self.error_msg.emit(traceback.format_exc())

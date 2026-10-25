@@ -54,22 +54,53 @@ except ImportError:
 # SimProxy — fallback when TANGO is unavailable or a device is unreachable
 # ─────────────────────────────────────────────────────────────────────────────
 class SimProxy:
-    """Drop-in replacement for tango.DeviceProxy in simulation mode."""
+    """Drop-in replacement for tango.DeviceProxy in simulation mode.
+
+    One object stands in for every device path, so this is not a model of
+    any particular instrument.  What it does know is what the scan engine
+    and the panels ask of a device — the attributes below answer with
+    sensible defaults, and anything else (a lock-in demodulator, a diode)
+    answers with a Gaussian beam profile around the simulated stage
+    position plus noise.  The defaults matter for *timing*: the old version
+    answered every unknown attribute with ≈1.0, including `settlingtime`,
+    so each simulated point cost a full second of lock-in "settling" and a
+    12-point scan at 20 ms integration took 13 s.
+    """
+    _DEFAULTS: Dict = {
+        # lock-in filter settings (read once per scan for the settle wait).
+        # Settling 0 on purpose: the engine sleeps for it before every
+        # trigger, and the simulator exists to exercise the application, not
+        # to wait — 1000 simulated points at 20 ms then take ~35 s.
+        "timeconstant": 0.001, "filterorder": 4, "settlingtime": 0.0,
+        "integrationtime": 0.1, "samplingrate": 1674.0, "frequency": 100.0,
+        "amplitude": 1.0, "phase1": 0.0,
+        # current source / magnet / relay
+        "current": 0.0, "compliance": 1.0, "range": "20mA", "autorange": True,
+        "current_polar": 0.0, "current_longitudinal": 0.0, "switchvar": 0,
+        # stages
+        "x": 0.0, "y": 0.0, "z": 0.0,
+        # cryostat
+        "magneticfield": 0.0, "temperature": 300.0, "sampletemperature": 300.0,
+        "vtitemperature": 4.2, "magnettemperature": 4.2,
+    }
+
     def __init__(self, path: str = ""):
-        self._v: Dict = {
-            "current_polar": 0.0, "current_longitudinal": 0.0,
-            "current": 0.0, "amplitude": 1.0, "switchvar": 0,
-            "frequency": 100.0, "range": "20mA",
-            "x": 0.0, "y": 0.0,
-            "integrationtime": 0.1,
-        }
+        self._path = path
+        self._v: Dict = dict(self._DEFAULTS)
         self._running_until: float = 0.0   # time.time() when integration ends
+
+    # ── identity / connection helpers the real proxy has ──────────────────
+    def name(self):                      return self._path
+    def dev_name(self):                  return self._path
+    def ping(self):                      return 0
+    def set_timeout_millis(self, ms):    pass
+    def get_timeout_millis(self):        return 3000
 
     def state(self):
         import time as _t
         if _t.time() < self._running_until:
             return "RUNNING"
-        return None
+        return "ON"
 
     def write_attribute(self, attr: str, val):
         self._v[attr.lower()] = val

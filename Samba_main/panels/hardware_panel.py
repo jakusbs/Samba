@@ -16,6 +16,7 @@ from config import KEITHLEY_RANGES
 from hardware import (fresh_proxy, is_sim_proxy, safe_write, safe_read,
                       safe_read_str, demagnetize_magnet)
 from panels._widgets import NoScrollComboBox, NoScrollDoubleSpinBox
+from bgcall import BackgroundCall
 
 
 class HardwarePanel(QGroupBox):
@@ -364,84 +365,127 @@ class HardwarePanel(QGroupBox):
             return f"range={rng}"
         return f"range={rng} (not selectable)"
 
+    # ── Background write plumbing ─────────────────────────────────────────
+    # Every write used to run fresh_proxy() + safe_write() on the GUI thread:
+    # with a device down, each Enter froze the window for the I/O timeout
+    # (10 s) plus a database round trip.  Widget values are read on the GUI
+    # thread, the TANGO I/O runs on a daemon thread, and the status label is
+    # set back on the GUI thread through BackgroundCall's queued signal.
+    @property
+    def _bg(self) -> BackgroundCall:
+        bg = getattr(self, "_bg_calls", None)
+        if bg is None:
+            bg = self._bg_calls = BackgroundCall(self)
+        return bg
+
+    def _set_busy(self, lbl: QLabel, msg: str):
+        lbl.setText(f"… {msg}"); lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
+
+    def _finish_write(self, lbl: QLabel, res, on_ok=None, on_sim=None):
+        """GUI-thread half of a background write: res is (kind, msg)."""
+        if isinstance(res, Exception):
+            self._set_err(lbl, str(res)[:60]); return
+        kind, msg = res
+        if kind == "ok":
+            self._set_ok(lbl, msg)
+            if on_ok: on_ok()
+        elif kind == "sim":
+            self._set_sim(lbl)
+            if on_sim: on_sim()
+        else:
+            self._set_err(lbl, str(msg)[:60])
+
+    def _bg_write(self, key: str, lbl: QLabel, dev: str, writes, ok_msg: str,
+                  on_ok=None, on_sim=None):
+        """Connect to *dev* and perform the (attr, value) *writes* in order on
+        a background thread; report on *lbl* from the GUI thread.  A write
+        for the same *key* still in flight drops this one."""
+        if not dev:
+            self._set_err(lbl, "no device configured"); return
+        if self._bg.busy(key):
+            return
+        self._set_busy(lbl, ok_msg)
+
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            for attr, val in writes:
+                err = safe_write(p, attr, val)
+                if err:
+                    return ("err", err)
+            return ("ok", ok_msg)
+
+        self._bg.run(key, _work,
+                     lambda r: self._finish_write(lbl, r, on_ok, on_sim))
+
     # ── Individual-attribute writes (called by Enter on each spinbox) ──────────
     def _write_range(self):
         """Write only the range; used by the Set Range button."""
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: self._set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, self._keithley_attrs(s)["rng"],
-                         self.range_combo.currentText())
-        if err: self._set_err(self.ks_status, err[:60])
-        else:   self._set_ok(self.ks_status, f"range → {self.range_combo.currentText()}")
+        s = self._setup(); rng = self.range_combo.currentText()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(self._keithley_attrs(s)["rng"], rng)], f"range → {rng}")
 
     def _write_amplitude(self):
         s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: self._set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): self._set_sim(self.ks_status); return
         a_amp = self._keithley_attrs(s)["amp"]
         val = self.amp_spin.value()
-        if abs(val) < 1e-9:
-            # Zero amplitude → turn output OFF
-            try:
-                p.command_inout("Off")
-                self._set_ok(self.ks_status, "Output OFF (amplitude = 0)")
-            except Exception as e:
-                # Fallback: write 0 if Off command not available
-                err = safe_write(p, a_amp, 0.0)
-                if err: self._set_err(self.ks_status, err[:60])
-                else:   self._set_ok(self.ks_status, "amp → 0 mA (Off cmd failed)")
-        else:
+        lbl = self.ks_status
+        if not dev:
+            self._set_err(lbl, "no device configured"); return
+        if self._bg.busy("keithley"):
+            return
+        self._set_busy(lbl, f"amp → {val:.4g} mA")
+
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            if abs(val) < 1e-9:
+                # Zero amplitude → turn output OFF
+                try:
+                    p.command_inout("Off")
+                    return ("ok", "Output OFF (amplitude = 0)")
+                except Exception:
+                    # Fallback: write 0 if Off command not available
+                    err = safe_write(p, a_amp, 0.0)
+                    return ("err", err) if err else ("ok", "amp → 0 mA (Off cmd failed)")
             # Non-zero → ensure output is ON, then write amplitude
-            try: p.command_inout("On")
-            except Exception: pass  # On command may not exist or may already be on
+            try:
+                p.command_inout("On")
+            except Exception:
+                pass  # On command may not exist or may already be on
             err = safe_write(p, a_amp, val)
-            if err: self._set_err(self.ks_status, err[:60])
-            else:   self._set_ok(self.ks_status, f"amp → {val:.4g} mA")
+            return ("err", err) if err else ("ok", f"amp → {val:.4g} mA")
+
+        self._bg.run("keithley", _work, lambda r: self._finish_write(lbl, r))
 
     def _write_compliance(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: self._set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, self._keithley_attrs(s)["cpl"],
-                         self.compl_spin.value())
-        if err: self._set_err(self.ks_status, err[:60])
-        else:   self._set_ok(self.ks_status, f"compliance → {self.compl_spin.value():.2f} V")
+        s = self._setup(); val = self.compl_spin.value()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(self._keithley_attrs(s)["cpl"], val)],
+                       f"compliance → {val:.2f} V")
 
     def _write_frequency(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: self._set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): self._set_sim(self.ks_status); return
-        err = safe_write(p, self._keithley_attrs(s)["frq"],
-                         self.freq_spin.value())
-        if err: self._set_err(self.ks_status, err[:60])
-        else:   self._set_ok(self.ks_status, f"freq → {self.freq_spin.value():.4g} Hz")
+        s = self._setup(); val = self.freq_spin.value()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(self._keithley_attrs(s)["frq"], val)],
+                       f"freq → {val:.4g} Hz")
 
     # ── Send All button: writes range + amplitude + frequency together ────────
     def _write_keithley(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            self._set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p):
-            self._set_sim(self.ks_status); return
+        s = self._setup(); self._update_dev_labels()
         k = self._keithley_attrs(s)
+        rng, amp, frq = (self.range_combo.currentText(), self.amp_spin.value(),
+                         self.freq_spin.value())
         # Range first: it bounds the amplitude the source will accept
-        e1 = safe_write(p, k["rng"], self.range_combo.currentText())
-        e2 = safe_write(p, k["amp"], self.amp_spin.value())
-        e3 = safe_write(p, k["frq"], self.freq_spin.value())
-        errs = [e for e in [e1, e2, e3] if e]
-        if errs:
-            self._set_err(self.ks_status, errs[0][:60])
-        else:
-            self._set_ok(self.ks_status,
-                         f"Sent: range={self.range_combo.currentText()}  "
-                         f"amp={self.amp_spin.value():.4g} mA  "
-                         f"freq={self.freq_spin.value():.4g} Hz")
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(k["rng"], rng), (k["amp"], amp), (k["frq"], frq)],
+                       f"Sent: range={rng}  amp={amp:.4g} mA  freq={frq:.4g} Hz")
 
     # ── Magnet-current setpoint + relay readback ──────────────────────────────
     def _read_magnet_relay(self):
@@ -502,48 +546,15 @@ class HardwarePanel(QGroupBox):
 
     # ── Field ─────────────────────────────────────────────────────────────────
     def _write_field(self):
-        s = self._setup(); dev = s.get("magnet_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            self._set_err(self.mag_status, conn_err); return
-        if is_sim_proxy(p):
-            self._set_sim(self.mag_status); return
+        s = self._setup(); self._update_dev_labels()
         attr = s.get("magnet_current_attr", "current_polar")
         val  = self.field_spin.value()
-        err  = safe_write(p, attr, val)
-        if err:
-            self._set_err(self.mag_status, err[:60])
-        else:
-            self._set_ok(self.mag_status, f"Sent {attr} = {val:.4f} A")
+        self._bg_write("magnet", self.mag_status, s.get("magnet_device", ""),
+                       [(attr, val)], f"Sent {attr} = {val:.4f} A")
 
-    def apply_field_setpoint(self):
-        """Write the displayed magnet-current setpoint to the magnet.
-
-        Called at scan start so the measurement runs at the field shown in
-        the write window — e.g. after an aborted scanlist auto-zeroed the
-        magnet while the window still displays the old setpoint.
-
-        Returns ``(value_A, error)``: error is None on success, a short
-        string otherwise ('simulation' in sim mode).
-        """
-        s = self._setup(); dev = s.get("magnet_device", "")
-        val = self.field_spin.value()
-        if not dev:
-            return val, "no magnet device configured"
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            self._set_err(self.mag_status, conn_err)
-            return val, conn_err
-        if is_sim_proxy(p):
-            return val, "simulation"
-        attr = s.get("magnet_current_attr", "current_polar")
-        err  = safe_write(p, attr, val)
-        if err:
-            self._set_err(self.mag_status, err[:60])
-        else:
-            self._set_ok(self.mag_status,
-                         f"Sent {attr} = {val:.4f} A (scan start)")
-        return val, err
+    # The scan-start setpoint write (so the measurement runs at the field the
+    # write window shows) lives in MainWindow._make_pre_start and runs on the
+    # scan worker's thread; it reads field_spin here on the GUI thread first.
 
     def _on_zero_field_clicked(self):
         """Manual Zero-field button: also reset the write spinbox to 0 so a
@@ -556,48 +567,56 @@ class HardwarePanel(QGroupBox):
         self._demagnetize()
 
     def _demagnetize(self):
-        """Run demagnetization in a background thread."""
-        import threading
+        """Run demagnetization in a background thread.
+
+        The connection is made on that thread too (it used to be a GUI-thread
+        fresh_proxy), and the label/button are touched only from the GUI
+        thread via the BackgroundCall result — the old thread wrote to the
+        widgets directly, which Qt does not allow.
+        """
         s = self._setup(); dev = s.get("magnet_device", "")
-        p, conn_err = fresh_proxy(dev); self._update_dev_labels()
-        if conn_err:
-            self._set_err(self.mag_status, conn_err); return
-        if is_sim_proxy(p):
-            self._set_sim(self.mag_status); return
         attr = s.get("magnet_current_attr", "current_polar")
+        self._update_dev_labels()
+        if not dev:
+            self._set_err(self.mag_status, "no device configured"); return
+        if self._bg.busy("magnet"):
+            return
         self.zero_field_btn.setEnabled(False)
-        self._set_ok(self.mag_status, "Demagnetizing…")
+        self._set_busy(self.mag_status, "Demagnetizing…")
 
-        def _run():
-            demagnetize_magnet(p, attr,
-                               log_fn=lambda m: self.mag_status.setText(m))
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            msgs = []
+            demagnetize_magnet(p, attr, log_fn=msgs.append)
+            bad = [m for m in msgs if m.startswith("⚠")]
+            return ("err", bad[0]) if bad else ("ok", msgs[-1] if msgs else "Demagnetized")
+
+        def _done(res):
             self.zero_field_btn.setEnabled(True)
+            self._finish_write(self.mag_status, res)
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._bg.run("magnet", _work, _done)
 
     # ── Relay ─────────────────────────────────────────────────────────────────
     def _toggle_relay(self):
-        self._relay_state = 1 - self._relay_state
         s = self._setup(); dev = s.get("relay_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err:
-            self._set_err(self.relay_status, conn_err)
-            self._relay_state = 1 - self._relay_state   # revert
-            return
-        if is_sim_proxy(p):
-            self._set_sim(self.relay_status)
-        else:
-            relay_attr = s.get("relay_attr", "switchvar")
-            err = safe_write(p, relay_attr, self._relay_state)
-            if err:
-                self._set_err(self.relay_status, err[:60])
-                self._relay_state = 1 - self._relay_state   # revert
-                return
-            self._set_ok(self.relay_status,
-                         f"{relay_attr} → {self._relay_state}  "
-                         f"({'−1' if self._relay_state else '+1'})")
-        self._update_relay_label()
-        self.relay_changed.emit(self._relay_state)
+        relay_attr = s.get("relay_attr", "switchvar")
+        new_state  = 1 - self._relay_state
+
+        def _apply():
+            self._relay_state = new_state
+            self._update_relay_label()
+            self.relay_changed.emit(new_state)
+
+        # The local state follows the hardware: it changes only once the
+        # write has succeeded (or in simulation, where there is no hardware).
+        self._bg_write("relay", self.relay_status, dev, [(relay_attr, new_state)],
+                       f"{relay_attr} → {new_state}  ({'−1' if new_state else '+1'})",
+                       on_ok=_apply, on_sim=_apply)
 
     def _update_relay_label(self):
         if self._relay_state == 0:

@@ -23,6 +23,8 @@ from tango.server import Device, attribute, command             # noqa: E402
 from tango.test_context import DeviceTestContext                # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fakes import FakeLockin                                    # noqa: E402
 
 # runner.py imports PyQt6 (unused here) and the app-level `config` module.
 try:
@@ -45,71 +47,6 @@ import hardware                                                 # noqa: E402  (t
 from runner import ScanRunner                                   # noqa: E402
 
 ALL_ASYNCH = tango.asyn_req_type.ALL_ASYNCH
-
-
-class FakeLockin(Device):
-    """Start → RUNNING → (integrationtime) → ON, like the ZI servers.
-
-    `FailNextStart(True)` makes the next Start raise server-side while the
-    device stays ON — the DoubleInBeckhoffAverage failure mode (its PLC write
-    happens before the state change).
-    """
-
-    def init_device(self):
-        super().init_device()
-        self._it = 0.02
-        self._x = 0.0
-        self._n = 0
-        self._fail = False
-        self._setp = 0.0
-        self.set_state(DevState.ON)
-
-    integrationtime = attribute(dtype=float, access=AttrWriteType.READ_WRITE)
-
-    def read_integrationtime(self):
-        return self._it
-
-    def write_integrationtime(self, v):
-        self._it = float(v)
-
-    setpoint = attribute(dtype=float, access=AttrWriteType.READ_WRITE)
-
-    def read_setpoint(self):
-        return self._setp
-
-    def write_setpoint(self, v):
-        self._setp = float(v)
-
-    x1 = attribute(dtype=float)
-
-    def read_x1(self):
-        return self._x
-
-    y1 = attribute(dtype=float)
-
-    def read_y1(self):
-        return -self._x
-
-    @command(dtype_in=bool)
-    def FailNextStart(self, flag):
-        self._fail = bool(flag)
-
-    @command
-    def Start(self):
-        if self._fail:
-            tango.Except.throw_exception(
-                "Not_ready", "Cannot Start in state FAULT", "Start")
-        if self.get_state() != DevState.ON:
-            return
-        self.set_state(DevState.RUNNING)
-
-        def _run():
-            time.sleep(self._it)
-            self._n += 1
-            self._x = float(self._n)
-            self.set_state(DevState.ON)
-
-        threading.Thread(target=_run, daemon=True).start()
 
 
 @pytest.fixture(scope="module")

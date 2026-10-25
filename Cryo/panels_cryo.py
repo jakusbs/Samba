@@ -169,25 +169,22 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
         dev = self._setup().get("attodry_device", "")
         return fresh_proxy(dev)
 
+    # Both setpoint writes run on a background thread (KeithleyMixin._bg_write):
+    # an AttoDRY that does not answer used to freeze the window for the I/O
+    # timeout on every Enter.
     def _write_field(self):
-        p, err = self._ad_proxy(); self._update_dev_labels()
-        if err: set_err(self.ad_status, err); return
-        if is_sim_proxy(p): set_sim(self.ad_status); return
-        attr = self._setup().get("attodry_attr_field_set", "MagneticField")
+        s = self._setup(); self._update_dev_labels()
+        attr = s.get("attodry_attr_field_set", "MagneticField")
         val  = self.field_sp.value()
-        e = safe_write(p, attr, val)
-        if e: set_err(self.ad_status, e[:60])
-        else: set_ok(self.ad_status, f"Field → {val:.4f} T")
+        self._bg_write("attodry", self.ad_status, s.get("attodry_device", ""),
+                       [(attr, val)], f"Field → {val:.4f} T")
 
     def _write_temperature(self):
-        p, err = self._ad_proxy(); self._update_dev_labels()
-        if err: set_err(self.ad_status, err); return
-        if is_sim_proxy(p): set_sim(self.ad_status); return
-        attr = self._setup().get("attodry_attr_temp_set", "Temperature")
+        s = self._setup(); self._update_dev_labels()
+        attr = s.get("attodry_attr_temp_set", "Temperature")
         val  = self.temp_sp.value()
-        e = safe_write(p, attr, val)
-        if e: set_err(self.ad_status, e[:60])
-        else: set_ok(self.ad_status, f"T setpoint → {val:.2f} K")
+        self._bg_write("attodry", self.ad_status, s.get("attodry_device", ""),
+                       [(attr, val)], f"T setpoint → {val:.2f} K")
 
     def _open_monitor(self):
         from cryo_monitor import CryoMonitorDialog

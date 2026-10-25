@@ -6058,3 +6058,96 @@ out of view; Autofocus labels truncate ("Focus p", "Step (dz") at ≤1366 and
 nearly every Calibration-tab label truncates in Cryo at 1180.  1920×1080 is
 clean.  Not changed in this batch — a decision for the operators (raise the
 minimum height, or make the bottom tab pages scroll at small heights).
+
+---
+
+## 87. Recent Changes (October 2026) — Review Batch 2: Responsiveness, Error Surfacing, Simulation, Device Fakes
+
+Branch `claude/trusting-darwin-zb18w0` (277 unit + 33 pytest; TANGO_Devices
+gains its first suite, 13 tests). App version → **v13.38**.  Phase 2 of the
+October review.
+
+### Engine errors are now visible (both apps)
+A traceback from the scan engine used to be one red line in the Log tab —
+the status label kept the last point's text, the status bar went back to
+idle, nothing said the file was incomplete.  `_on_engine_error` (wired to
+`error_msg` of both worker types) logs it, sets the status label to
+"✗ Scan failed — see the Log tab", tints the status bar red (new `error`
+tint) and shows a **non-modal** `QMessageBox` (modal would block the finish
+handling running underneath).  `_on_worker_finished` re-asserts the failed
+status after `_update_estimate()`, which otherwise overwrote it; the next
+`_wire_worker` clears it.  The GUI log pane is bounded at 20 000 blocks —
+the full trail is in the file log since §86.
+
+### Scan-start hardware I/O moved onto the worker thread (both apps)
+Between pressing Start and the first point two things ran on the GUI
+thread: the magnet-current setpoint write (a TANGO write with the 10 s I/O
+timeout) and the metadata snapshot (1.5 s per attribute).  `ScanWorker` and
+`ScanlistWorker` take a `pre_start(cfgs, log)` callable and run it on their
+own thread before the first point; the hosts build it with
+`_make_pre_start` — widget values (the field spinbox) are read on the GUI
+thread, the I/O happens on the worker, panel status labels are updated via
+`_post_to_main`.  Order of operations is unchanged.  Cryo's temperature-
+sweep keys (config-derived) stay on the GUI thread; `all_cfgs` lets a
+queued trace/retrace run update every direction's config.
+`_apply_field_setpoint_for_scan` and `HardwarePanel.apply_field_setpoint`
+are gone.  Measured against a real in-process device that answers every
+read in 0.4 s: `_start_scan` returns in ~130 ms with the snapshot taken on
+the worker (10 `hw_*` keys), where the old GUI-thread snapshot alone
+stalled 1.2 s.  The ~250 ms gap that remains at scan start is plot setup
+(matplotlib layout/draw), not I/O.
+
+### Hardware-panel writes off the GUI thread
+New shared `core/bgcall.py` — `BackgroundCall.run(key, fn, on_done)`: fn on a
+daemon thread, `on_done(result)` on the GUI thread via a queued signal, one
+call per key in flight (a double Enter cannot queue two writes).
+`Samba_main/panels/hardware_panel.py` (Keithley range/amp/compliance/freq/
+Send-all, magnet setpoint, demagnetize, relay) and the Cryo
+`KeithleyMixin` + `CryoHardwarePanel` (AttoDRY field/temperature) use it
+through `_bg_write` / `_finish_write`.  The old `_demagnetize` thread wrote
+to the label and button from the worker thread, which Qt does not allow;
+fixed as a side effect.  Measured: a panel write against the slow device
+returns in 2 ms and completes in ~2 s with a 19 ms maximum GUI stall (the
+same write on the GUI thread stalled 0.41 s).  The relay's local state now
+follows the hardware — it changes only once the write succeeded (or in
+simulation).
+
+### Simulation: faithful enough to be fast
+- `SimProxy` has an attribute table (lock-in filter settings, source,
+  magnet, relay, stage x/y/z, cryostat) plus `ping`/`name`/timeout helpers;
+  unknown attributes still answer with the beam profile.  `settlingtime`
+  is 0 on purpose: the simulator exists to exercise the application, not to
+  wait.
+- The scan-start integration-time write treated simulation mode's
+  "pytango not installed" note as a connection error and never wrote the
+  value, so every simulated point ran at the SimProxy default 0.1 s
+  whatever Int said.  Fixed: 119 → 36 ms per simulated point in the engine;
+  **1000 simulated points at 20 ms through the real MainWindow: 44.6 s**
+  (was ~1.1 s per point before §86/§87).
+
+### Real-device fakes and tests
+- Samba `tests/fakes.py`: `FakeLockin` (RUNNING→ON, rejectable Start) and
+  `FakeRelay` (actuates on every write, counts actuations).
+  `tests/test_tango_scanlist.py` drives the real `ScanlistWorker._run_list`
+  against a real relay proxy: ABBA over 8 cycles = 4 actuations, the
+  schedule starts from the device state, a disabled flip never touches it.
+- **pytango 10 freezes the DeviceProxy interface**: `proxy.extra = …` raises
+  `AttributeError`.  A fixture that failed after `DeviceTestContext.__enter__`
+  and outside its `try` left the server child running and the interpreter
+  hung at exit joining it — keep everything after `__enter__` inside the
+  `try`, and keep extra data in a wrapper object, never on the proxy.
+- The short nodb device name (`test/nodb/x`) resolves only in the main
+  process; a server in another process resolves it against its own port.
+  Hand other processes `ctx.get_device_access()` (the full
+  `tango://host:port/…#dbase=no` form).
+- **TANGO_Devices `tests/`** (new, with a workflow): `FakeAdsBridge` (the
+  AdsBridge2 command set over a dict, with write traces and failure
+  switches) serves `PyRelais` and `DoubleInBeckhoffAverage` for real —
+  ground→switch→unground order, actuation on an unchanged value, failed
+  switch still ungrounds, IntegrationTime→cycles, Start→RUNNING until the
+  PLC flag clears, and **a failed Start leaves the device ON** (the contract
+  behind §86 D1); `SetupLock` state/auto-clear; `ZI2` with a stubbed
+  `zhinst.ziPython` steered through a control file: scaled averages, 99 %
+  settling, NaN for an empty poll, FAULT then a raising Start until
+  `Reconnect`.  `conftest.py` pins the fork start method (the stubs reach
+  the child only by fork; Python 3.14 defaults to forkserver).

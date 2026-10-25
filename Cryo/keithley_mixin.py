@@ -195,56 +195,111 @@ class KeithleyMixin:
             return f"range={rng}"
         return f"range={rng} (not selectable)"
 
+    # ── Background write plumbing ─────────────────────────────────────────
+    # Every write used to run fresh_proxy() + safe_write() on the GUI thread:
+    # with a device down, each Enter froze the window for the I/O timeout
+    # (10 s) plus a database round trip.  Widget values are read on the GUI
+    # thread, the TANGO I/O runs on a daemon thread, and the status label is
+    # set back on the GUI thread through BackgroundCall's queued signal.
+    @property
+    def _bg(self):
+        from bgcall import BackgroundCall
+        bg = getattr(self, "_bg_calls", None)
+        if bg is None:
+            bg = self._bg_calls = BackgroundCall(self)
+        return bg
+
+    @staticmethod
+    def _set_busy(lbl, msg):
+        lbl.setText(f"… {msg}"); lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
+
+    @staticmethod
+    def _finish_write(lbl, res, on_ok=None, on_sim=None):
+        """GUI-thread half of a background write: res is (kind, msg)."""
+        if isinstance(res, Exception):
+            set_err(lbl, str(res)[:60]); return
+        kind, msg = res
+        if kind == "ok":
+            set_ok(lbl, msg)
+            if on_ok: on_ok()
+        elif kind == "sim":
+            set_sim(lbl)
+            if on_sim: on_sim()
+        else:
+            set_err(lbl, str(msg)[:60])
+
+    def _bg_write(self, key, lbl, dev, writes, ok_msg, on_ok=None, on_sim=None):
+        """Connect to *dev* and perform the (attr, value) *writes* in order on
+        a background thread; report on *lbl* from the GUI thread.  A write
+        for the same *key* still in flight drops this one."""
+        if not dev:
+            set_err(lbl, "no device configured"); return
+        if self._bg.busy(key):
+            return
+        self._set_busy(lbl, ok_msg)
+
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            for attr, val in writes:
+                err = safe_write(p, attr, val)
+                if err:
+                    return ("err", err)
+            return ("ok", ok_msg)
+
+        self._bg.run(key, _work,
+                     lambda r: self._finish_write(lbl, r, on_ok, on_sim))
+
     def _write_range(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): set_sim(self.ks_status); return
-        rng_a = s.get("keithley_attr_range", "range")
-        err = safe_write(p, rng_a, self.range_combo.currentText())
-        if err: set_err(self.ks_status, err[:60])
-        else:   set_ok(self.ks_status, f"range → {self.range_combo.currentText()}")
+        s = self._setup(); rng = self.range_combo.currentText()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(s.get("keithley_attr_range", "range"), rng)],
+                       f"range → {rng}")
 
     def _write_amplitude(self):
         s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): set_sim(self.ks_status); return
         amp_a = s.get("keithley_attr_amplitude", "amplitude")
         val   = self.amp_spin.value()
-        if abs(val) < 1e-9:
-            try:
-                p.command_inout("Off")
-                set_ok(self.ks_status, "Output OFF (amplitude = 0)")
-            except Exception:
-                err = safe_write(p, amp_a, 0.0)
-                if err: set_err(self.ks_status, err[:60])
-                else:   set_ok(self.ks_status, "amp → 0 mA")
-        else:
+        lbl   = self.ks_status
+        if not dev:
+            set_err(lbl, "no device configured"); return
+        if self._bg.busy("keithley"):
+            return
+        self._set_busy(lbl, f"amp → {val:.4g} mA")
+
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            if abs(val) < 1e-9:
+                try:
+                    p.command_inout("Off")
+                    return ("ok", "Output OFF (amplitude = 0)")
+                except Exception:
+                    err = safe_write(p, amp_a, 0.0)
+                    return ("err", err) if err else ("ok", "amp → 0 mA")
             try:
                 p.command_inout("On")
             except Exception:
                 log.debug("Keithley 'On' command unavailable or already on")
             err = safe_write(p, amp_a, val)
-            if err: set_err(self.ks_status, err[:60])
-            else:   set_ok(self.ks_status, f"amp → {val:.4g} mA")
+            return ("err", err) if err else ("ok", f"amp → {val:.4g} mA")
+
+        self._bg.run("keithley", _work, lambda r: self._finish_write(lbl, r))
 
     def _write_compliance(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): set_sim(self.ks_status); return
-        cpl_a = s.get("keithley_attr_compliance", "compliance")
-        err = safe_write(p, cpl_a, self.compl_spin.value())
-        if err: set_err(self.ks_status, err[:60])
-        else:   set_ok(self.ks_status, f"compliance → {self.compl_spin.value():.2f} V")
+        s = self._setup(); val = self.compl_spin.value()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(s.get("keithley_attr_compliance", "compliance"), val)],
+                       f"compliance → {val:.2f} V")
 
     def _write_frequency(self):
-        s = self._setup(); dev = s.get("keithley_device", "")
-        p, conn_err = fresh_proxy(dev)
-        if conn_err: set_err(self.ks_status, conn_err); return
-        if is_sim_proxy(p): set_sim(self.ks_status); return
-        frq_a = s.get("keithley_attr_frequency", "frequency")
-        err = safe_write(p, frq_a, self.freq_spin.value())
-        if err: set_err(self.ks_status, err[:60])
-        else:   set_ok(self.ks_status, f"freq → {self.freq_spin.value():.4g} Hz")
+        s = self._setup(); val = self.freq_spin.value()
+        self._bg_write("keithley", self.ks_status, s.get("keithley_device", ""),
+                       [(s.get("keithley_attr_frequency", "frequency"), val)],
+                       f"freq → {val:.4g} Hz")

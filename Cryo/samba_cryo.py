@@ -741,6 +741,9 @@ class CryoMainWindow(QMainWindow):
         log_hdr.addWidget(clear_btn)
         tlol.addLayout(log_hdr)
         self.log_text = QTextEdit(); self.log_text.setReadOnly(True); tlol.addWidget(self.log_text)
+        # One line per point for a long map adds up (500 k lines kept in the
+        # document); the full trail is in the file log since §86.
+        self.log_text.document().setMaximumBlockCount(20000)
         self.live_tabs.addTab(tlog, "Log")
         cl.addWidget(self.live_tabs)
 
@@ -888,6 +891,7 @@ class CryoMainWindow(QMainWindow):
         "idle":    "QStatusBar{background:#181825;border-top:2px solid #313244;}",
         "running": "QStatusBar{background:#16241b;border-top:2px solid #a6e3a1;}",
         "paused":  "QStatusBar{background:#2b2015;border-top:2px solid #fab387;}",
+        "error":   "QStatusBar{background:#2a1520;border-top:2px solid #f38ba8;}",
     }
 
     def _tint_status_bar(self, state: str):
@@ -1835,9 +1839,14 @@ class CryoMainWindow(QMainWindow):
             self.right_panel.set_x_options(x_opts)
 
     # ── Worker wiring (shared by scan + calib timescan) ────────────────────
-    def _wire_worker(self, cfg, setup):
-        """Create a ScanWorker and connect its signals. Returns the worker."""
-        worker = ScanWorker(cfg, setup)
+    def _wire_worker(self, cfg, setup, pre_start=None):
+        """Create a ScanWorker and connect its signals. Returns the worker.
+
+        pre_start(cfgs, log) is run by the worker on its own thread before
+        the first point — the hardware snapshot lives there now, off the
+        GUI thread.
+        """
+        worker = ScanWorker(cfg, setup, pre_start=pre_start)
         worker.point_done.connect(self._on_point)
         worker.point_retrace.connect(self._on_point_retrace)
         worker.progress.connect(self._on_progress)
@@ -1845,10 +1854,53 @@ class CryoMainWindow(QMainWindow):
         worker.log_msg.connect(self._log_append)
         worker.scan_done.connect(lambda fn: setattr(self, "_last_fn", fn))
         worker.scan_done_retrace.connect(lambda fn: setattr(self, "_last_fn_retrace", fn))
-        worker.error_msg.connect(
-            lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        self._engine_error = None
+        worker.error_msg.connect(self._on_engine_error)
         worker.finished.connect(self._on_worker_finished)
         return worker
+
+    def _make_pre_start(self, setup: dict, scan_type: str, is_temp_sweep: bool,
+                        all_cfgs=None):
+        """Hardware snapshot on the worker thread, before the first point.
+
+        It used to run on the GUI thread between pressing Start and the
+        first point — up to 1.5 s per attribute with a device down.  The
+        config-derived temperature-sweep keys stay on the GUI thread; only
+        the device reads move.  `all_cfgs` lets a queued trace/retrace run
+        update every direction's config, not just the one the first worker
+        was handed.
+        """
+        def _pre_start(cfgs, log):
+            snap = _read_hw_snapshot(setup, scan_type, is_temp_sweep=is_temp_sweep)
+            for c in (all_cfgs if all_cfgs is not None else cfgs):
+                c.update(snap)
+        return _pre_start
+
+    def _on_engine_error(self, tb: str):
+        """The scan engine raised: say so where the operator looks.
+
+        Until now a traceback was one red line in the Log tab and nothing
+        else changed — the status label kept the last point's text, the
+        status bar went back to idle, and nothing said the file was
+        incomplete.  The dialog is non-modal so the worker's finish handling
+        runs underneath it.
+        """
+        self._engine_error = tb
+        self._log_append(f"\n⚠ ERROR:\n{tb}", level="error")
+        self.status_lbl.setText("✗ Scan failed — see the Log tab")
+        self._tint_status_bar("error")
+        lines = [ln for ln in str(tb).strip().splitlines() if ln.strip()]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Scan failed")
+        box.setText("The scan engine stopped with an error:\n\n"
+                    + (lines[-1] if lines else str(tb))[:300]
+                    + "\n\nThe data file, if one was created, is incomplete. "
+                      "The full traceback is in the Log tab and in the log file.")
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.show()
+        self._error_box = box
 
     # ── Single scan ──────────────────────────────────────────────────────────
     # Max allowed points per dimension to prevent memory exhaustion.
@@ -1982,9 +2034,10 @@ class CryoMainWindow(QMainWindow):
         # not for field sweeps.  Checking act1_device == attodry_dev is wrong
         # because temperature sweep configs don't set act1_device at all.
         is_temp_sweep = "temp_start" in first_cfg
-        hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
-                                    is_temp_sweep=is_temp_sweep)
-        # Temperature sweep flag + start/stop/step for the lab notebook.
+        # Config-derived temperature-sweep keys (lab notebook) stay here; the
+        # device reads happen on the worker thread (pre_start) so a device
+        # that does not answer cannot freeze the window at Start.
+        hw_snap = {}
         if is_temp_sweep:
             hw_snap["_is_temp_sweep"] = True
             t_start = first_cfg.get("temp_start", 0.0)
@@ -1997,7 +2050,11 @@ class CryoMainWindow(QMainWindow):
         for c in cfgs:
             c.update(hw_snap)
 
-        self._worker = self._wire_worker(first_cfg, setup)
+        self._worker = self._wire_worker(
+            first_cfg, setup,
+            pre_start=self._make_pre_start(
+                setup, first_cfg.get("scan_type", "SPATIAL"), is_temp_sweep,
+                all_cfgs=cfgs))
         self._scan_running = True; self._set_running(True); self._last_fn = None
         self._worker.start()
 
@@ -2199,6 +2256,10 @@ class CryoMainWindow(QMainWindow):
         release_lock(self._active_setup_name)
         self._status_bar_run_finish()
         self._scan_running = False; self._set_running(False)
+        if getattr(self, "_engine_error", None):
+            # Keep the failure visible after the run-state reset.
+            self._tint_status_bar("error")
+            self.status_lbl.setText("✗ Scan failed — see the Log tab")
         # Drop the finished worker: _toggle_pause/_on_status pick the target via
         # `self._worker or self._sl_worker`, so a stale finished single-scan
         # worker would swallow Pause clicks during a later scanlist run.
@@ -2218,6 +2279,10 @@ class CryoMainWindow(QMainWindow):
         if saved:
             self._log_append("✓ Scan complete — saved " + ", ".join(saved), level="info")
         self._update_estimate()
+        if getattr(self, "_engine_error", None):
+            # _update_estimate just rewrote the status label; the failure
+            # must stay visible until the next start or config edit.
+            self.status_lbl.setText("✗ Scan failed — see the Log tab")
         _setup = self._active_setup()
         _setup["server_sync_dir"] = self.server_dir.text().strip()
         def _done_sync(ok):
@@ -2381,8 +2446,11 @@ class CryoMainWindow(QMainWindow):
 
         # ── Hardware snapshot (written to HDF5 metadata + lab notebook) ─────
         is_temp_sweep = "temp_start" in first_cfg
-        hw_snap = _read_hw_snapshot(setup, first_cfg.get("scan_type", "SPATIAL"),
-                                    is_temp_sweep=is_temp_sweep)
+        # Config-derived temperature-sweep keys stay here (they survive the
+        # worker's per-scan hw_* refresh); the device reads run on the
+        # worker thread before the first scan (pre_start) and are re-taken
+        # before every later one, since the field changes between cycles.
+        hw_snap = {}
         if is_temp_sweep:
             hw_snap["_is_temp_sweep"] = True
             t_start = first_cfg.get("temp_start", 0.0)
@@ -2392,11 +2460,6 @@ class CryoMainWindow(QMainWindow):
             hw_snap["_temp_sweep_stop_K"]  = t_stop
             hw_snap["_temp_sweep_step_K"]  = (
                 (t_stop - t_start) / (t_pts - 1) if t_pts > 1 else "")
-        # Taken here for the first scan, and re-taken by the worker before
-        # every later one: the field changes between cycles when field flip
-        # is on, so a single list-start snapshot mislabels every scan after
-        # the first.  The _temp_sweep_* keys are config-derived, not device
-        # reads, so they survive the worker's per-scan refresh.
         for c in cfg_list:
             c.update(hw_snap)
 
@@ -2414,7 +2477,10 @@ class CryoMainWindow(QMainWindow):
                                          last_focus_t=self._focus_t,
                                          hw_snapshot_fn=lambda sc: _read_hw_snapshot(
                                              setup, sc.get("scan_type", "SPATIAL"),
-                                             is_temp_sweep=is_temp_sweep))
+                                             is_temp_sweep=is_temp_sweep),
+                                         pre_start=self._make_pre_start(
+                                             setup, first_cfg.get("scan_type", "SPATIAL"),
+                                             is_temp_sweep))
         self._sl_worker.point_done.connect(self._on_point)
         self._sl_worker.progress.connect(self._on_progress)
         self._sl_worker.cycle_done.connect(self._on_cycle_done)
@@ -2423,8 +2489,8 @@ class CryoMainWindow(QMainWindow):
         self._sl_worker.log_msg.connect(self._log_append)
         self._sl_worker.all_done.connect(self._on_scanlist_done)
         self._sl_worker.relay_changed.connect(self._on_scanlist_relay_changed)
-        self._sl_worker.error_msg.connect(
-            lambda m: self._log_append(f"\n⚠ ERROR:\n{m}", level="error"))
+        self._engine_error = None
+        self._sl_worker.error_msg.connect(self._on_engine_error)
         self._sl_worker.refocus_due.connect(self._on_sl_refocus_due)
         self._sl_worker.finished.connect(self._on_sl_worker_finished)
 
