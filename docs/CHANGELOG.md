@@ -4988,8 +4988,8 @@ simulation).
 ## 88. Recent Changes (October 2026) — Review Batch 3: One Run Lifecycle, One ZI Source, Packaging, Docs Split
 
 Branch `claude/trusting-darwin-zb18w0` (281 unit + 33 pytest; TANGO_Devices 16).
-App version → **v13.39**, tagged `v13.39`.  Phase 3 of the October review
-(maintainability).
+App version → **v13.39**, tagged `v13.39` (README layout-tree follow-up:
+**v13.40**, tagged `v13.40`).  Phase 3 of the October review (maintainability).
 
 ### One run lifecycle for both windows — `core/scan_host.py`
 Measured before the change (AST + difflib over the two window classes):

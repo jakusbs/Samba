@@ -77,7 +77,11 @@ stage controllers, …) live in the separate **TANGO_Devices** repository.
 
 ```
 Samba/
+├── pyproject.toml           # pip install -e .  →  `samba` / `samba-cryo` commands
 ├── core/                    # Shared modules used by both apps
+│   ├── version.py           # __version__ — the one place the app version is written
+│   ├── launch.py            # the console entry points
+│   ├── scan_host.py         # ScanHostMixin — run lifecycle shared by both main windows
 │   ├── scan/
 │   │   ├── runner.py        # ScanRunner — the scan engine (pure Python, no Qt)
 │   │   └── workers.py       # ScanWorker / ScanlistWorker — QThread wrappers
@@ -113,7 +117,9 @@ Samba/
 │   └── samba_io.py          # HDF5 loaders, hysteresis cycle tools
 │
 ├── test_runner.py           # Hardware-free unit tests (Qt + TANGO stubbed)
-├── CLAUDE.md                # Developer documentation + changelog
+├── tests/                   # pytest: real in-process TANGO devices, NAS sync, logging
+├── docs/CHANGELOG.md        # Dated design notes (§11, §19–20, §23 …; numbering shared with CLAUDE.md)
+├── CLAUDE.md                # Developer documentation (architecture + conventions)
 └── README.md                # This file
 ```
 
