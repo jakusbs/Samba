@@ -194,7 +194,7 @@ colour-vision deficiency and must not be reordered.
 - `AdsBridge2` provides transparent TANGO access to Beckhoff PLC variables. From Samba's perspective all Beckhoff variables are normal TANGO attributes.
 
 ### ZI lock-in notes
-The ZI MFLI TANGO device uses a `subscribe/poll/np.mean` software-averaging pattern. The instrument's native hardware filter (time constant) is not used for averaging. This works correctly for integration times ≥ 50 ms. A future improvement would be to use `getSample()` after waiting for the filter to settle (native hardware average). Both instruments are served from one source (`TANGO_Devices/tango_servers_new/ZurichInstruments_lockin/`), with `ZI` and `ZI2` differing only in property defaults.
+The ZI MFLI TANGO device uses a `subscribe/poll/np.mean` software-averaging pattern. The instrument's native hardware filter (time constant) is not used for averaging. This works correctly for integration times ≥ 50 ms. A future improvement would be to use `getSample()` after waiting for the filter to settle (native hardware average). The two servers (`ZI` for Green, `ZI2` for IR) are near-identical copies in TANGO_Devices; a single-source version was prepared and parked in October 2026 (TANGO_Devices commit `7d141b7`, reverted at the lab's request — cherry-pick to resume).
 
 ---
 

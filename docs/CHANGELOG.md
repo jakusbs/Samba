@@ -4987,9 +4987,11 @@ simulation).
   the child only by fork; Python 3.14 defaults to forkserver).
 ## 88. Recent Changes (October 2026) — Review Batch 3: One Run Lifecycle, One ZI Source, Packaging, Docs Split
 
-Branch `claude/trusting-darwin-zb18w0` (281 unit + 33 pytest; TANGO_Devices 16).
-App version → **v13.39**, tagged `v13.39` (README layout-tree follow-up:
-**v13.40**, tagged `v13.40`).  Phase 3 of the October review (maintainability).
+Branch `claude/trusting-darwin-zb18w0` (281 unit + 33 pytest; TANGO_Devices 13 — see the
+ZI note below).
+App version → **v13.39** (README layout-tree follow-up **v13.40**; ZI
+consolidation parked, docs corrected: **v13.41**).  Tags `v13.39`–`v13.41`
+exist locally only — the session's remote access accepts branch refs only.  Phase 3 of the October review (maintainability).
 
 ### One run lifecycle for both windows — `core/scan_host.py`
 Measured before the change (AST + difflib over the two window classes):
@@ -5061,7 +5063,15 @@ appends `_2`, `_3`, … like the scanlist `.txt` already did, at all three
 naming sites (`_open_hdf5`, DC-hyst, the Cryo retrace file).  Unit test
 `TestHdf5NameDedupe`.
 
-### One ZI lock-in server source (TANGO_Devices)
+### One ZI lock-in server source (TANGO_Devices) — prepared, then PARKED
+**Status:** reverted the same day at Jakub's request ("leave the ZI servers
+alone for now") — the consolidation needs a redeploy with pip operations on
+the zhinst client, the step that has put a lock-in in FAULT before.  The
+work is TANGO_Devices commit `7d141b7` on `claude/trusting-darwin-zb18w0`,
+undone by the revert commit after it; `git cherry-pick 7d141b7` brings it
+back (its test file then makes the server suite 16).  The two original
+directories are the live source and nothing needs deploying.  What it did:
+
 `ZI.py` / `ZI2.py` differed in 42 of 404 lines (class name, docstrings, the
 `DeviceId` / `ZI_Host` defaults, log prefixes), `ThreadZI_DAQ.py` /
 `ThreadZI2_DAQ.py` in 12 of 87, and each directory also tracked a generated
@@ -5107,5 +5117,5 @@ configures harmonics under `/dev4855/…`.
 - `Samba_main/DEVELOPERS.md` rewritten: it still listed `scan/runner.py`,
   `hardware.py` and `DG645_DelayGenerator.py` as Samba_main files and
   `samba_cryo.py` as planned work.
-- TANGO_Devices `CLAUDE.md`: ZI section and test list updated.
+- TANGO_Devices `CLAUDE.md`: a note on where the parked ZI consolidation lives.
 

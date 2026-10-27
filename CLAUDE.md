@@ -330,7 +330,7 @@ Entirely delegated to the PyHysteresis Beckhoff device:
 
 ## 6. ZI / ZI2 Tango Device Servers
 
-**Files:** TANGO_Devices repo, `tango_servers_new/ZurichInstruments_lockin/zi_lockin/` — **one source** since October 2026: `device.py` holds the whole server as `ZILockin`, and `ZI` (Green) / `ZI2` (IR) are four-line subclasses that only change the `DeviceId` / `ZI_Host` property defaults; `thread.py` is the acquisition thread. The TANGO class names, the `ZI_DAQ` / `ZI2_DAQ` executables and the registered instances are unchanged; `install.sh` there installs both. (Before that the two were separate near-identical files, and every fix had to be applied twice; the copies formerly in `Samba_main/tango_devices/` and `Cryo/tango_device_cryo/` were removed earlier.) The threading model below is the historic one — §29 made the servers thread-safe and §67 made `Start` raise outside ON/RUNNING; see `docs/CHANGELOG.md`.
+**Files:** TANGO_Devices repo, `tango_servers_new/ZurichInstruments_lockin_correct_read/ZI.py` (resp. `..._lockin2_correct_read/ZI2.py`), `ThreadZI_DAQ.py` / `ThreadZI2_DAQ.py` — all device server sources live in the separate TANGO_Devices repository (the copies formerly in `Samba_main/tango_devices/` and `Cryo/tango_device_cryo/` were removed). The two files differ only in names, docstrings, the `DeviceId`/`ZI_Host` defaults and log prefixes, so **every fix must be applied to both** (and to the packaged `ZI_DAQ/`/`ZI2_DAQ/` copies the install scripts generate). A single-source version (`ZILockin` + thin `ZI`/`ZI2` subclasses) was prepared in October 2026 and parked at the lab's request — TANGO_Devices commit `7d141b7`, reverted on the same branch; see §88. The threading model below is the historic one — §29 made the servers thread-safe and §67 made `Start` raise outside ON/RUNNING; see `docs/CHANGELOG.md`.
 
 ### Purpose
 
@@ -343,7 +343,7 @@ TANGO device servers wrapping Zurich Instruments MFLI lock-in amplifiers. Each s
 | Serial | dev4855 | dev30933 |
 | Default host | 192.168.1.62 | 192.168.1.144 |
 | `Harmonics` default | [1,2,3,1] | [1,2,3,1] (demod 4 at the fundamental since 04.05.2024) |
-| Thread class | `AcquisitionThread` (shared) | `AcquisitionThread` (shared) |
+| Thread class | ThreadZI | ThreadZI2 (identical apart from name and log prefix) |
 | Integration logic | Identical | Identical |
 
 ### Key attributes
