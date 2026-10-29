@@ -42,7 +42,7 @@ Samba/
 │   │   ├── runner.py        # ScanRunner — pure Python, no Qt dependency
 │   │   └── workers.py       # ScanWorker / ScanlistWorker — QThread wrappers
 │   ├── hardware.py          # Proxy cache, safe_read/write, probe_alive, SimProxy
-│   ├── bgcall.py            # BackgroundCall — panel writes off the GUI thread
+│   ├── bgcall.py            # BackgroundCall + BackgroundWriteMixin — ordered panel writes off the GUI thread
 │   ├── validation.py        # scan-config validation, point/travel limits
 │   ├── setup_lock.py        # multi-computer setup lock client (stale-lock takeover)
 │   ├── plot_widgets.py      # Live1DWidget, Live2DWidget
@@ -1303,6 +1303,9 @@ The rules below were each paid for once; the § points at the batch in
 - A panel's `load()` sets `_loading` and every change signal goes through one
   `_emit_changed()` that consults it — an echoed signal mid-load saves a
   half-restored panel over the setup file (§37, §67, §68).
+- Hardware-panel writes to one device run in the order requested and are
+  never dropped (`BackgroundCall` queues per device key); a scan aborted
+  before its first point touches no hardware and writes no file (§89).
 - GUI updates from a thread go through a queued signal (`BackgroundCall`,
   `_post_to_main`), never `QTimer.singleShot` from the thread (§44, §87).
 - `QGroupBox("A && B")` — a single `&` is a mnemonic (§61).  A checkable
@@ -1325,7 +1328,7 @@ The rules below were each paid for once; the § points at the batch in
 
 | Topic | Sections |
 |---|---|
-| Scan engine: retry, auto-pause, stale values, abort latency | §23, §42, §67, §82, §86 |
+| Scan engine: retry, auto-pause, stale values, abort latency | §23, §42, §67, §82, §86, §89 |
 | 2D traversal (zigzag, fast axis), interleaved trace/retrace | §26, §30 |
 | FIELD / temperature axis units, ramp wait, demagnetisation | §30, §60 |
 | DC hysteresis: per-cycle data, sources, Ampere relabel, drift alignment | §31, §39, §53 |
@@ -1339,7 +1342,7 @@ The rules below were each paid for once; the § points at the batch in
 | Plots: palettes, legends, eng ticks, light export, Recent scale | §27, §45, §46, §48, §49, §58, §63, §64 |
 | Data browser: lazy load, search, metadata, index, dates | §40, §62, §65, §80 |
 | Setup files: load failures, switch bugs, defaults round-trip | §35, §36, §37, §47, §86 |
-| Hardware panel: readback, mirroring, background writes, pulse source | §50, §77, §87 |
+| Hardware panel: readback, mirroring, background writes, pulse source | §50, §77, §87, §89 |
 | ZI / ZI2 servers: v5 thread safety, Start contract, one source | §29, §67, §88 |
 | NAS sync, logging, module shadowing, NameError sweep | §22, §74, §82, §83, §84 |
 | Layout: field row, Scanlist tab, action bar, window sizing | §27, §53, §54, §68, §81, §86 |

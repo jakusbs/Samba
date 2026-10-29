@@ -172,6 +172,8 @@ class CryoHardwarePanel(KeithleyMixin, QGroupBox):
     # Both setpoint writes run on a background thread (KeithleyMixin._bg_write):
     # an AttoDRY that does not answer used to freeze the window for the I/O
     # timeout on every Enter.
+    # They share one queue, so a temperature setpoint sent while a field write
+    # is still in flight runs after it instead of being dropped.
     def _write_field(self):
         s = self._setup(); self._update_dev_labels()
         attr = s.get("attodry_attr_field_set", "MagneticField")

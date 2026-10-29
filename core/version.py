@@ -9,4 +9,4 @@ the major part only for a release or a breaking change, and tag the commit
 `v<version>`.  Independent of the scan-config SCHEMA_VERSION in config.py.
 13.31 is deliberately skipped (a declined branch published itself as 13.31).
 """
-__version__ = "13.41"
+__version__ = "13.42"

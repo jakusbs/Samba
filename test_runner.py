@@ -1229,7 +1229,7 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
                 r = ScanRunner(cfg, {"save_dir": td})
                 # Abort immediately after file creation so we only test _open path
                 r._read_and_emit_hyst_loop = lambda *a, **k: {}
-                r.abort()
+                _abort_on_hyst_start(r, proxy)
                 fn = r.run({"status": lambda m: msgs.append(m),
                             "log": lambda m: msgs.append(m)})
         finally:
@@ -1248,6 +1248,23 @@ class TestDcHystDuplicateLabels(unittest.TestCase):
                  {"label": "MOKE", "attr": "result5", "enabled": True, "y_axis": "Y2"}]
         msgs = self._run(chans)
         self.assertFalse(any("already exists" in m for m in msgs), repr(msgs))
+
+
+def _abort_on_hyst_start(r, proxy):
+    """Abort a DC-hyst run the moment it sends Start to the device.
+
+    These tests exercise the configuration writes and the file a DC-hyst run
+    creates, then want it to stop before the polling loop.  They used to call
+    r.abort() before run(); since §89 a pre-abort stops the run before it
+    touches the device or creates a file (that is the fix), so the abort is
+    now delivered where a real mid-measurement Abort would land."""
+    orig = proxy.command_inout
+
+    def _cmd(cmd, *a):
+        if cmd == "Start":
+            r.abort()
+        return orig(cmd, *a)
+    proxy.command_inout = _cmd
 
 
 class TestDcHystCalibration(unittest.TestCase):
@@ -1273,7 +1290,7 @@ class TestDcHystCalibration(unittest.TestCase):
                     cfg["bd_calibration"] = bd_cal
                 r = ScanRunner(cfg, {"save_dir": td})
                 r._read_and_emit_hyst_loop = lambda *a, **k: {}
-                r.abort()
+                _abort_on_hyst_start(r, proxy)
                 r.run({"status": lambda m: None, "log": lambda m: None})
                 paths = glob.glob(os.path.join(td, "**", "cal.h5"), recursive=True)
                 self.assertTrue(paths, "DC-hyst file was not created")
@@ -1595,7 +1612,7 @@ class TestDcHystSourceWrite(unittest.TestCase):
                        "sensors": []}
                 r = ScanRunner(cfg, {"save_dir": td})
                 r._read_and_emit_hyst_loop = lambda *a, **k: {}
-                r.abort()                       # stop after the config writes
+                _abort_on_hyst_start(r, proxy)  # stop after the config writes
                 r.run({"status": _noop, "log": _noop})
         finally:
             (_runner_mod.fresh_proxy, _runner_mod._make_filename,
@@ -1742,7 +1759,7 @@ class TestDcHystFieldAmpere(unittest.TestCase):
                 cfg.update(cfg_extra)
                 r = ScanRunner(cfg, {"save_dir": td})
                 r._read_and_emit_hyst_loop = lambda *a, **k: {}
-                r.abort()
+                _abort_on_hyst_start(r, proxy)
                 r.run({"status": _noop, "log": _noop})
                 paths = glob.glob(os.path.join(td, "**", "amp.h5"), recursive=True)
                 self.assertTrue(paths, "DC-hyst file was not created")
@@ -3107,6 +3124,308 @@ class TestScanHost(unittest.TestCase):
                   "_abort_scanlist", "_on_status", "_on_engine_error", "_build_status_bar",
                   "_cs_begin", "_cs_finish", "_run_refocus", "closeEvent"):
             self.assertIn(m, mixin)
+
+
+class _Rec:
+    """Stand-in for a Qt signal: records every emit."""
+    def __init__(self):            self.calls = []
+    def emit(self, *a):            self.calls.append(a)
+    def connect(self, *a, **kw):   pass
+
+
+class TestAbortBeforeFirstPoint(unittest.TestCase):
+    """An Abort that arrives before the first point stops the run before it
+    touches the hardware or creates a file (§89).
+
+    The pre-scan step and the runner's device connections run on the worker
+    thread with the window responsive, so Abort can arrive during either.
+    It used to be noticed only at the first point: the run still wrote the
+    integration times (or the DC-hyst parameters and Start) and left an
+    empty "aborted" HDF5 file behind."""
+
+    def _files(self, td):
+        import glob
+        return glob.glob(os.path.join(td, "**", "*.h5"), recursive=True)
+
+    def test_pre_aborted_run_touches_nothing(self):
+        import tempfile
+        connects, statuses = [], []
+        def fresh(path):
+            connects.append(path); return (InstantProxy(), None)
+        with tempfile.TemporaryDirectory() as td, _RunnerPatch(fresh=fresh):
+            r = ScanRunner(_run_cfg(), {"save_dir": td})
+            r.abort()
+            out = r.run({"status": statuses.append})
+            self.assertEqual(self._files(td), [])
+        self.assertIsNone(out)
+        self.assertEqual(connects, [], "no device may be contacted after Abort")
+        self.assertIn(_runner_mod.ABORTED_BEFORE_START, statuses)
+
+    def test_abort_during_device_connection_creates_no_file(self):
+        import tempfile
+        writes, statuses = [], []
+        holder = {}
+        def fresh(path):                       # Abort pressed while connecting
+            holder["r"].abort(); return (InstantProxy(), None)
+        old_sw = _runner_mod.safe_write
+        _runner_mod.safe_write = lambda p, a, v, **kw: writes.append((a, v))
+        try:
+            with tempfile.TemporaryDirectory() as td, _RunnerPatch(fresh=fresh):
+                holder["r"] = r = ScanRunner(_run_cfg(), {"save_dir": td})
+                out = r.run({"status": statuses.append})
+                self.assertEqual(self._files(td), [], "no empty aborted file")
+        finally:
+            _runner_mod.safe_write = old_sw
+        self.assertIsNone(out)
+        self.assertEqual(writes, [], "no integration time written after Abort")
+        self.assertIn(_runner_mod.ABORTED_BEFORE_START, statuses)
+
+    def test_dc_hyst_abort_during_connect_sends_nothing(self):
+        import tempfile
+        writes, cmds = [], []
+        holder = {}
+        proxy = InstantProxy(read_val=1.0)
+        proxy.command_inout = lambda cmd, *a: cmds.append(cmd)
+        def fresh(path):
+            holder["r"].abort(); return (proxy, None)
+        old = (_runner_mod.fresh_proxy, _runner_mod.safe_write)
+        _runner_mod.fresh_proxy = fresh
+        _runner_mod.safe_write = lambda p, a, v, **kw: writes.append((a, v))
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = {"scan_type": "DC_HYST", "name": "h", "hyst_device": "dev://hyst",
+                       "hyst_npts": 4, "hyst_cycles": 1, "hyst_field_A": 1.0,
+                       "hyst_int_time": 0.01, "sensors": [],
+                       "hyst_channels": [{"label": "MOKE", "attr": "result1",
+                                          "enabled": True, "y_axis": "Y1"}]}
+                holder["r"] = r = ScanRunner(cfg, {"save_dir": td})
+                out = r.run({"status": _noop, "log": _noop})
+                self.assertEqual(self._files(td), [])
+        finally:
+            (_runner_mod.fresh_proxy, _runner_mod.safe_write) = old
+        self.assertIsNone(out)
+        self.assertEqual(writes, [], "no DC-hyst parameter written after Abort")
+        self.assertNotIn("Start", cmds)
+
+    # ── the workers ──────────────────────────────────────────────────────────
+    def _scan_worker(self, pre_start):
+        W = _import_workers()
+        w = W.ScanWorker({"scan_type": "SPATIAL", "sensors": []}, {},
+                         pre_start=pre_start)
+        for name in ("status_msg", "scan_aborted", "scan_done", "error_msg", "log_msg"):
+            setattr(w, name, _Rec())
+        ran = []
+        w._runner.run = lambda cbs: ran.append(cbs) or "/data/x.h5"
+        return w, ran
+
+    def test_abort_during_pre_start_skips_the_run(self):
+        seen = {}
+        def pre_start(cfgs, log, aborted):
+            seen["before"] = aborted()
+            w.abort()                           # operator presses Abort now
+            seen["after"] = aborted()
+        w, ran = self._scan_worker(pre_start)
+        w.run()
+        self.assertEqual(ran, [], "runner.run must not start after Abort")
+        self.assertEqual(len(w.scan_aborted.calls), 1)
+        self.assertEqual(w.scan_done.calls, [])
+        self.assertIn((_runner_mod.ABORTED_BEFORE_START,), w.status_msg.calls)
+        self.assertEqual(seen, {"before": False, "after": True},
+                         "pre_start gets a live abort check")
+
+    def test_pre_start_not_run_when_already_aborted(self):
+        calls = []
+        w, ran = self._scan_worker(lambda cfgs, log, aborted: calls.append(1))
+        w.abort()
+        w.run()
+        self.assertEqual(calls, [], "no hardware step after Abort")
+        self.assertEqual(ran, [])
+
+    def test_normal_start_still_runs(self):
+        w, ran = self._scan_worker(lambda cfgs, log, aborted: None)
+        w.run()
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(w.scan_done.calls, [("/data/x.h5",)])
+        self.assertEqual(w.scan_aborted.calls, [])
+
+    def test_scanlist_abort_during_pre_start_skips_the_list(self):
+        W = _import_workers()
+        def pre_start(cfgs, log, aborted):
+            w.abort()
+        w = W.ScanlistWorker({"name": "s"}, {"save_dir": "/nonexistent"}, 2, "list",
+                             False, False, pre_start=pre_start)
+        w.status_msg, w.scan_aborted = _Rec(), _Rec()
+        listed = []
+        w._run_list = lambda: listed.append(1)
+        w.run()
+        self.assertEqual(listed, [], "no polarity probe / relay read after Abort")
+        self.assertEqual(len(w.scan_aborted.calls), 1)
+        self.assertIn((_runner_mod.ABORTED_BEFORE_START,), w.status_msg.calls)
+
+
+class TestBackgroundCallQueue(unittest.TestCase):
+    """Writes to one device run in the order requested; none is dropped (§89).
+
+    BackgroundCall used to DROP a request whenever another call for the same
+    key was in flight.  All Keithley settings share one key, so a frequency
+    change made during a slow amplitude write was lost while the spinbox
+    showed the new value; Cryo's temperature setpoint during a field write and
+    Zero field during a magnet write were lost the same way.
+
+    core/bgcall.py is loaded against a minimal fake QtCore whose signals
+    deliver only when the test pumps them, like a GUI event loop delivering
+    queued connections — so the real module's queue logic is under test,
+    without PyQt6 (CI has none).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        class _BoundSig:
+            def __init__(self):     self.slots, self.queue = [], []
+            def connect(self, f):   self.slots.append(f)
+            def emit(self, *a):     self.queue.append(a)    # queued connection
+        class _Sig:
+            def __init__(self, *a): self.name = None
+            def __set_name__(self, owner, name): self.name = name
+            def __get__(self, obj, objtype=None):
+                if obj is None:
+                    return self
+                return obj.__dict__.setdefault("_sig_" + self.name, _BoundSig())
+        class _QObject:
+            def __init__(self, parent=None): self._parent = parent
+        fake = types.ModuleType("PyQt6.QtCore")
+        fake.QObject, fake.pyqtSignal = _QObject, _Sig
+        old = sys.modules.get("PyQt6.QtCore")
+        sys.modules["PyQt6.QtCore"] = fake
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "core", "bgcall.py")
+            spec = importlib.util.spec_from_file_location("_bgcall_under_test", path)
+            cls.mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cls.mod)
+        finally:
+            sys.modules["PyQt6.QtCore"] = old
+
+    def _pump(self, bg, until, timeout=5.0):
+        sig = bg._done
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            while sig.queue:
+                args = sig.queue.pop(0)
+                for f in sig.slots:
+                    f(*args)
+            if until():
+                return True
+            time.sleep(0.002)
+        return False
+
+    def test_same_key_runs_in_order_and_nothing_is_dropped(self):
+        bg = self.mod.BackgroundCall()
+        log, running, overlap = [], [0], []
+        gates = [threading.Event() for _ in range(3)]
+        def job(i):
+            def fn():
+                running[0] += 1
+                if running[0] > 1:
+                    overlap.append(i)
+                gates[i].wait(2)
+                log.append(("ran", i))
+                running[0] -= 1
+                return i
+            return fn
+        started = [bg.run("keithley", job(i), lambda r: log.append(("done", r)),
+                          on_start=lambda i=i: log.append(("start", i)))
+                   for i in range(3)]
+        self.assertEqual(started, [True, False, False])
+        self.assertEqual(bg.pending("keithley"), 2)
+        for g in gates:
+            g.set()
+        self.assertTrue(self._pump(bg, lambda: not bg.busy("keithley")))
+        self.assertEqual(overlap, [], "two writes to one device ran at once")
+        self.assertEqual(log, [("start", 0), ("ran", 0), ("done", 0),
+                               ("start", 1), ("ran", 1), ("done", 1),
+                               ("start", 2), ("ran", 2), ("done", 2)])
+
+    def test_different_devices_do_not_wait_for_each_other(self):
+        bg = self.mod.BackgroundCall()
+        gate = threading.Event()
+        done = []
+        bg.run("magnet", lambda: gate.wait(2), lambda r: done.append("magnet"))
+        self.assertTrue(bg.run("relay", lambda: "ok", lambda r: done.append("relay")))
+        self.assertTrue(self._pump(bg, lambda: "relay" in done, timeout=1.0))
+        self.assertNotIn("magnet", done)
+        gate.set()
+        self.assertTrue(self._pump(bg, lambda: "magnet" in done))
+
+    def test_exception_is_delivered_and_the_queue_continues(self):
+        bg = self.mod.BackgroundCall()
+        out = []
+        def boom(): raise RuntimeError("device gone")
+        bg.run("k", boom, out.append)
+        bg.run("k", lambda: "second", out.append)
+        self.assertTrue(self._pump(bg, lambda: len(out) == 2))
+        self.assertIsInstance(out[0], RuntimeError)
+        self.assertEqual(out[1], "second")
+
+    # ── status label: a failure must stay visible while the queue drains ─────
+    class _Label:
+        def __init__(self):          self.text, self.history = "", []
+        def setText(self, t):        self.text = t; self.history.append(t)
+        def setStyleSheet(self, s):  pass
+
+    def _panel(self):
+        mod = self.mod
+        class _Panel(mod.BackgroundWriteMixin):
+            def _set_ok(self, lbl, msg):  lbl.setText(f"✓ {msg}")
+            def _set_err(self, lbl, msg): lbl.setText(f"⚠ {msg}")
+            def _set_sim(self, lbl):      lbl.setText("⚠ Simulation")
+        return _Panel()
+
+    def test_earlier_failure_survives_a_later_success(self):
+        pan, lbl = self._panel(), self._Label()
+        gate = threading.Event()
+        def slow_fail():
+            gate.wait(2); return ("err", "amplitude rejected")
+        pan._bg_submit("keithley", lbl, slow_fail, "amp → 5 mA")
+        pan._bg_submit("keithley", lbl, lambda: ("ok", "freq → 1000 Hz"), "freq → 1000 Hz")
+        self.assertIn("(+1 queued)", lbl.text)
+        gate.set()
+        self.assertTrue(self._pump(pan._bg, lambda: not pan._bg.busy("keithley")))
+        self.assertIn("amplitude rejected", lbl.text)
+        self.assertIn("✓ freq → 1000 Hz", lbl.text)
+        self.assertTrue(lbl.text.startswith("⚠"))
+        # The next burst starts clean.
+        pan._bg_submit("keithley", lbl, lambda: ("ok", "range → 20mA"), "range → 20mA")
+        self.assertTrue(self._pump(pan._bg, lambda: not pan._bg.busy("keithley")))
+        self.assertEqual(lbl.text, "✓ range → 20mA")
+
+    def test_message_callable_is_evaluated_when_the_write_starts(self):
+        """The relay toggle decides its target when it runs, so a toggle
+        queued behind another flips the state the first one left."""
+        pan, lbl = self._panel(), self._Label()
+        state = {"relay": 0}
+        for _ in range(2):
+            plan = {}
+            def describe(plan=plan):
+                plan["new"] = 1 - state["relay"]; return f"relay → {plan['new']}"
+            def apply(plan=plan):
+                state["relay"] = plan["new"]
+            pan._bg_submit("relay", lbl, lambda plan=plan: ("ok", f"relay → {plan['new']}"),
+                           describe, on_ok=apply)
+        self.assertTrue(self._pump(pan._bg, lambda: not pan._bg.busy("relay")))
+        self.assertEqual(state["relay"], 0, "two clicks are two toggles")
+        self.assertIn("✓ relay → 0", lbl.history)
+        self.assertIn("✓ relay → 1", lbl.history)
+
+    def test_on_done_runs_whatever_the_outcome(self):
+        pan, lbl = self._panel(), self._Label()
+        done = []
+        pan._bg_submit("magnet", lbl, lambda: ("err", "no answer"), "Demagnetizing…",
+                       on_done=done.append)
+        self.assertTrue(self._pump(pan._bg, lambda: bool(done)))
+        self.assertEqual(done, [("err", "no answer")])
+        self.assertEqual(lbl.text, "⚠ no answer")
 
 
 class TestAppVersion(unittest.TestCase):

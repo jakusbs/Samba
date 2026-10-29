@@ -1484,7 +1484,7 @@ class MainWindow(ScanHostMixin, QMainWindow):
             if dev:
                 sp = (dev, attr, float(hw_panel.field_spin.value()))
 
-        def _pre_start(cfgs, log):
+        def _pre_start(cfgs, log, aborted=lambda: False):
             if sp is not None:
                 dev, attr, val = sp
                 p, err = fresh_proxy(dev)
@@ -1506,6 +1506,10 @@ class MainWindow(ScanHostMixin, QMainWindow):
                             lambda: hw_panel._set_ok(
                                 hw_panel.mag_status,
                                 f"Sent {attr} = {val:.4f} A (scan start)"))
+            # An Abort during the setpoint write ends the run here (the
+            # worker reports it); the snapshot can take seconds more.
+            if aborted():
+                return
             # Hardware snapshot (written to HDF5 metadata + lab notebook)
             snap = _read_hw_snapshot(setup, scan_type)
             for c in cfgs:

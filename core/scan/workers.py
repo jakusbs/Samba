@@ -13,7 +13,7 @@ from config import X_TIME
 from hardware import (get_proxy, fresh_proxy, is_sim_proxy, safe_read,
                       safe_write, demagnetize_magnet, probe_alive,
                       TANGO_AVAILABLE)
-from core.scan.runner import ScanRunner
+from core.scan.runner import ScanRunner, ABORTED_BEFORE_START
 from current_sweep import refocus_due
 from polarity import (ORDER_AB, flip_phase, normalize_order, order_preview,
                       phase_label, switches_before)
@@ -45,13 +45,24 @@ class ScanWorker(QThread):
     def resume(self):    self._runner.resume()
     def is_paused(self): return self._runner._paused
 
+    def _aborted(self) -> bool:
+        return bool(getattr(self._runner, "_abort", False))
+
     def run(self):
         try:
-            if self._pre_start is not None:
+            # The pre-scan step can take seconds with a device down, and the
+            # window is responsive meanwhile, so Abort can arrive during it:
+            # honour it before the step, inside it (aborted=), and after it.
+            if self._pre_start is not None and not self._aborted():
                 try:
-                    self._pre_start([self._runner.cfg], self.log_msg.emit)
+                    self._pre_start([self._runner.cfg], self.log_msg.emit,
+                                    aborted=self._aborted)
                 except Exception as e:
                     self.log_msg.emit(f"⚠ pre-scan hardware step failed: {e}")
+            if self._aborted():
+                self.status_msg.emit(ABORTED_BEFORE_START)
+                self.scan_aborted.emit()
+                return
             fn = self._runner.run({
                 'point':         self.point_done.emit,
                 'point_retrace': self.point_retrace.emit,
@@ -171,11 +182,18 @@ class ScanlistWorker(QThread):
 
     def run(self):
         try:
-            if self._pre_start is not None:
+            if self._pre_start is not None and not self._abort:
                 try:
-                    self._pre_start(self.cfg_list, self.log_msg.emit)
+                    self._pre_start(self.cfg_list, self.log_msg.emit,
+                                    aborted=lambda: self._abort)
                 except Exception as e:
                     self.log_msg.emit(f"⚠ pre-scan hardware step failed: {e}")
+            if self._abort:
+                # Nothing measured yet: skip the polarity-device probes and
+                # relay read _run_list would do before noticing the abort.
+                self.status_msg.emit(ABORTED_BEFORE_START)
+                self.scan_aborted.emit()
+                return
             self._run_list()
         except Exception:
             self.error_msg.emit(traceback.format_exc())

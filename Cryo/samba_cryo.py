@@ -1505,7 +1505,9 @@ class CryoMainWindow(ScanHostMixin, QMainWindow):
         update every direction's config, not just the one the first worker
         was handed.
         """
-        def _pre_start(cfgs, log):
+        def _pre_start(cfgs, log, aborted=lambda: False):
+            if aborted():
+                return
             snap = _read_hw_snapshot(setup, scan_type, is_temp_sweep=is_temp_sweep)
             for c in (all_cfgs if all_cfgs is not None else cfgs):
                 c.update(snap)

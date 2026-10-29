@@ -97,6 +97,11 @@ def _make_filename(cfg: dict) -> str:
     return "_".join(parts) + ".h5"
 
 
+# Status line for an Abort that arrived before the first point (§89).
+ABORTED_BEFORE_START = ("■ Aborted before the first point — nothing was "
+                        "measured and no file was written")
+
+
 def _unique_path(path: str) -> str:
     """`path` itself, or `<stem>_2<ext>`, `<stem>_3<ext>`, … if it exists.
 
@@ -345,6 +350,23 @@ class ScanRunner:
         self._abort = True
         self._stop_event.set()
 
+    ABORTED_BEFORE_START = ABORTED_BEFORE_START
+
+    def _aborted_before_start(self, st) -> bool:
+        """True (and say so) if Abort arrived before any data was taken.
+
+        Connecting and probing the devices can take seconds when one is
+        down, and the window stays responsive meanwhile (the pre-scan step
+        and the runner both run on the worker thread).  Without these
+        checks an Abort pressed then was only noticed at the first point:
+        the run still wrote the integration times, sent DC-hyst parameters
+        and created an empty "aborted" HDF5 file.
+        """
+        if self._abort:
+            st(self.ABORTED_BEFORE_START)
+            return True
+        return False
+
     def _sleep(self, seconds) -> bool:
         """Sleep, but return at once if the scan is aborted.
 
@@ -382,6 +404,9 @@ class ScanRunner:
         scan_type = cfg.get("scan_type", "SPATIAL")
         scan_x    = cfg.get("scan_x",   True)
         scan_y    = cfg.get("scan_y",   False)
+
+        if self._aborted_before_start(st):
+            return None
 
         # DC Hysteresis is handled entirely by its own method — exit early.
         if scan_type == "DC_HYST":
@@ -539,6 +564,11 @@ class ScanRunner:
         data      = {s["label"]: np.full((n_y, n_x), np.nan) for s in active}
         x_actual  = np.zeros((n_y, n_x))
         t_actual  = np.zeros((n_y, n_x))
+
+        # Device connections are done; an Abort that arrived meanwhile must
+        # stop the run before the file exists and any setting is written.
+        if self._aborted_before_start(st):
+            return None
 
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))
         day_dir = os.path.join(base, datetime.now().strftime("%Y%m%d"))
@@ -1358,6 +1388,9 @@ class ScanRunner:
             st("No DC hysteresis channels enabled."); return None
 
         n_loop = 2 * npts   # full loop = positive half + negative half
+
+        if self._aborted_before_start(st):
+            return None
 
         # ── HDF5 setup ────────────────────────────────────────────────────────
         base    = os.path.expanduser(setup.get("save_dir", "~/moke_data"))

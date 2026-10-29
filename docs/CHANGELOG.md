@@ -5119,3 +5119,99 @@ configures harmonics under `/dev4855/…`.
   `samba_cryo.py` as planned work.
 - TANGO_Devices `CLAUDE.md`: a note on where the parked ZI consolidation lives.
 
+## 89. Recent Changes (October 2026) — Review Fixes: Dropped Panel Writes, Abort Before the First Point
+
+Branch `claude/trusting-darwin-zb18w0` (294 unit + 33 pytest tests).
+App version → **v13.42**.  The first three findings of the review of §86–88.
+All three were introduced by §87, which moved the hardware-panel writes and
+the scan-start I/O off the GUI thread: while the window was blocked neither
+could happen, because Qt queued the operator's clicks and Abort could not
+arrive mid-step.
+
+### Panel writes to one device were silently dropped
+`BackgroundCall` allowed one call per key and **dropped** a request made
+while another was in flight.  The keys are per device, not per setting, so:
+- all Keithley settings share `"keithley"` — a frequency, compliance or range
+  change made during a slow amplitude write was lost while the spinbox showed
+  the new value and the label later read "✓ amp → …" (both apps);
+- Cryo's field and temperature setpoints share `"attodry"` — a temperature
+  setpoint sent during a field write was never sent;
+- **Zero field** during a magnet write reset the field box to 0 A but never
+  demagnetized, so the window read 0 A with the magnet at the old current;
+  during a long demagnetization every field Enter was dropped.
+
+Fix (`core/bgcall.py`): calls with the same key now run **one at a time, in
+the order requested; a call made while another is in flight waits** and
+starts as soon as the previous one has delivered its result (`run()` returns
+True if it started, False if it was queued; `pending(key)`; an `on_start`
+callback runs on the GUI thread just before the call starts).  That is
+exactly what the synchronous code did, minus the frozen window.  Different
+devices still run in parallel.
+
+The status-label handling and `_bg_write` moved into a shared
+`BackgroundWriteMixin` used by Samba_main's `HardwarePanel` and Cryo's
+`KeithleyMixin` (the two had identical copies, and the fix would otherwise
+have had to be made twice).  The label shows the write in progress and
+`(+N queued)`; **a failure stays visible until that device's queue has
+drained** — "⚠ amplitude rejected · ✓ freq → 1000 Hz" — because the next
+queued write would otherwise overwrite it a moment later; the next burst
+starts clean.
+
+Per-handler details:
+- **Zero field / demagnetize** queue behind a magnet write instead of
+  returning; the button stays disabled until every queued demag is done.
+- **Relay toggle** decides its target when the toggle *starts*, not when it
+  is clicked (`_bg_submit` accepts a callable message evaluated at start), so
+  two clicks are two toggles — as with the synchronous code.  Computed at
+  click time, the second toggle would have re-written the first one's target.
+
+### Abort before the first point still started the scan
+The pre-scan step (§87: field setpoint + hardware snapshot, seconds with a
+device down) and the runner's device connections run on the worker thread
+with the window responsive, so Abort can arrive during either.  It was only
+checked at the first point: the run still connected and probed every
+device, wrote the integration time to each lock-in (DC-hyst: sent its
+parameters) and left an empty "aborted" HDF5 file.  Reproduced through the
+real window with a slow snapshot: one empty file, two lock-in connections.
+
+Fix:
+- `ScanWorker.run` / `ScanlistWorker.run` skip the pre-scan step if already
+  aborted, pass it a live `aborted()` check, and after it emit
+  `scan_aborted` with "■ Aborted before the first point — nothing was
+  measured and no file was written" instead of starting the run (the
+  scanlist also skips its polarity-device probes and relay read).
+- Samba_main's pre-scan step skips the snapshot when Abort arrives during
+  the field-setpoint write; Cryo's checks before its snapshot.
+- `ScanRunner.run` checks at entry and again after the device connections,
+  before the file and any setting; `_run_dc_hyst` checks before the file and
+  the parameter writes.  `runner.ABORTED_BEFORE_START` is the message.
+
+Eight DC-hysteresis tests had called `r.abort()` before `run()` as a way to
+stop after the configuration writes; that now (correctly) stops before them,
+so they abort when the run sends `Start` instead (`_abort_on_hyst_start`).
+
+### Tests / verification
+- `test_runner.py` 281 → **294**: `TestAbortBeforeFirstPoint` (pre-aborted
+  run contacts no device; Abort during device connection leaves no file and
+  writes no integration time; DC-hyst Abort during connect writes no
+  parameter and sends no Start; Abort during the worker's pre-scan step skips
+  the run and the scanlist; pre-scan step not run when already aborted;
+  `aborted()` is live; a normal start still runs) and `TestBackgroundCallQueue`
+  (the real `core/bgcall.py` against a fake QtCore whose signals deliver only
+  when pumped, like an event loop: same-key calls run in order and never
+  overlap, nothing dropped, previous result handled before the next starts,
+  different devices independent, exceptions delivered and the queue
+  continues, an earlier failure survives a later success, a message callable
+  is evaluated at start, `on_done` runs whatever the outcome).  Against the old
+  code 11 of the 13 fail; the other two guard unchanged behaviour.
+- Offscreen runs of both apps' **real** hardware panels against fake slow
+  devices (not committed): amplitude → frequency → compliance all reach the
+  device in order with "(+2 queued)" shown; a failed amplitude stays visible
+  behind a successful frequency; Zero field during a field write runs the
+  demag afterwards and re-enables the button; two relay clicks write 1 then 0;
+  Cryo field then temperature both sent; no two writes to one device ever
+  overlapped.
+- Offscreen real-window abort in both apps with a 1.5 s snapshot: no file, no
+  device connection, the abort line in the log, worker cleared, and a normal
+  scan afterwards writes its file.  The same harness against the old engine
+  shows the empty file and the lock-in connections.

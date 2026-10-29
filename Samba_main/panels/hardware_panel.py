@@ -16,10 +16,10 @@ from config import KEITHLEY_RANGES
 from hardware import (fresh_proxy, is_sim_proxy, safe_write, safe_read,
                       safe_read_str, demagnetize_magnet)
 from panels._widgets import NoScrollComboBox, NoScrollDoubleSpinBox
-from bgcall import BackgroundCall
+from bgcall import BackgroundWriteMixin
 
 
-class HardwarePanel(QGroupBox):
+class HardwarePanel(BackgroundWriteMixin, QGroupBox):
     # Signals for cross-thread UI updates (emitted from background I/O threads).
     # Qt signals are thread-safe; QTimer.singleShot from a plain threading.Thread
     # is not reliably delivered in PyQt6 without a context QObject on the thread.
@@ -371,55 +371,9 @@ class HardwarePanel(QGroupBox):
     # (10 s) plus a database round trip.  Widget values are read on the GUI
     # thread, the TANGO I/O runs on a daemon thread, and the status label is
     # set back on the GUI thread through BackgroundCall's queued signal.
-    @property
-    def _bg(self) -> BackgroundCall:
-        bg = getattr(self, "_bg_calls", None)
-        if bg is None:
-            bg = self._bg_calls = BackgroundCall(self)
-        return bg
-
-    def _set_busy(self, lbl: QLabel, msg: str):
-        lbl.setText(f"… {msg}"); lbl.setStyleSheet("color:#a6adc8;font-size:10px;")
-
-    def _finish_write(self, lbl: QLabel, res, on_ok=None, on_sim=None):
-        """GUI-thread half of a background write: res is (kind, msg)."""
-        if isinstance(res, Exception):
-            self._set_err(lbl, str(res)[:60]); return
-        kind, msg = res
-        if kind == "ok":
-            self._set_ok(lbl, msg)
-            if on_ok: on_ok()
-        elif kind == "sim":
-            self._set_sim(lbl)
-            if on_sim: on_sim()
-        else:
-            self._set_err(lbl, str(msg)[:60])
-
-    def _bg_write(self, key: str, lbl: QLabel, dev: str, writes, ok_msg: str,
-                  on_ok=None, on_sim=None):
-        """Connect to *dev* and perform the (attr, value) *writes* in order on
-        a background thread; report on *lbl* from the GUI thread.  A write
-        for the same *key* still in flight drops this one."""
-        if not dev:
-            self._set_err(lbl, "no device configured"); return
-        if self._bg.busy(key):
-            return
-        self._set_busy(lbl, ok_msg)
-
-        def _work():
-            p, conn_err = fresh_proxy(dev)
-            if conn_err:
-                return ("err", conn_err)
-            if is_sim_proxy(p):
-                return ("sim", "")
-            for attr, val in writes:
-                err = safe_write(p, attr, val)
-                if err:
-                    return ("err", err)
-            return ("ok", ok_msg)
-
-        self._bg.run(key, _work,
-                     lambda r: self._finish_write(lbl, r, on_ok, on_sim))
+    # _bg, _bg_submit, _bg_write and the status-label handling come from
+    # BackgroundWriteMixin (core/bgcall.py): writes to one device run in
+    # the order requested, none is dropped, failures stay visible.
 
     # ── Individual-attribute writes (called by Enter on each spinbox) ──────────
     def _write_range(self):
@@ -435,9 +389,6 @@ class HardwarePanel(QGroupBox):
         lbl = self.ks_status
         if not dev:
             self._set_err(lbl, "no device configured"); return
-        if self._bg.busy("keithley"):
-            return
-        self._set_busy(lbl, f"amp → {val:.4g} mA")
 
         def _work():
             p, conn_err = fresh_proxy(dev)
@@ -462,7 +413,7 @@ class HardwarePanel(QGroupBox):
             err = safe_write(p, a_amp, val)
             return ("err", err) if err else ("ok", f"amp → {val:.4g} mA")
 
-        self._bg.run("keithley", _work, lambda r: self._finish_write(lbl, r))
+        self._bg_submit("keithley", lbl, _work, f"amp → {val:.4g} mA")
 
     def _write_compliance(self):
         s = self._setup(); val = self.compl_spin.value()
@@ -579,10 +530,11 @@ class HardwarePanel(QGroupBox):
         self._update_dev_labels()
         if not dev:
             self._set_err(self.mag_status, "no device configured"); return
-        if self._bg.busy("magnet"):
-            return
+        # Queued behind a magnet write still in flight (it used to be
+        # dropped, leaving the window at 0 A and the magnet at the old
+        # current).  The button stays off until every queued demag is done.
+        self._demag_pending = getattr(self, "_demag_pending", 0) + 1
         self.zero_field_btn.setEnabled(False)
-        self._set_busy(self.mag_status, "Demagnetizing…")
 
         def _work():
             p, conn_err = fresh_proxy(dev)
@@ -595,28 +547,51 @@ class HardwarePanel(QGroupBox):
             bad = [m for m in msgs if m.startswith("⚠")]
             return ("err", bad[0]) if bad else ("ok", msgs[-1] if msgs else "Demagnetized")
 
-        def _done(res):
-            self.zero_field_btn.setEnabled(True)
-            self._finish_write(self.mag_status, res)
+        def _done(_res):
+            self._demag_pending -= 1
+            if self._demag_pending <= 0:
+                self._demag_pending = 0
+                self.zero_field_btn.setEnabled(True)
 
-        self._bg.run("magnet", _work, _done)
+        self._bg_submit("magnet", self.mag_status, _work, "Demagnetizing…",
+                        on_done=_done)
 
     # ── Relay ─────────────────────────────────────────────────────────────────
     def _toggle_relay(self):
         s = self._setup(); dev = s.get("relay_device", "")
         relay_attr = s.get("relay_attr", "switchvar")
-        new_state  = 1 - self._relay_state
+        if not dev:
+            self._set_err(self.relay_status, "no device configured"); return
+        # The target is decided when this toggle starts, not when it is
+        # clicked: a toggle queued behind another must flip the state that
+        # one left, so two clicks are two toggles — as they were when the
+        # write blocked the window.  The local state follows the hardware:
+        # it changes only once the write has succeeded (or in simulation).
+        plan = {}
+
+        def _describe():                        # GUI thread, at start
+            plan["new"] = new = 1 - self._relay_state
+            return f"{relay_attr} → {new}  ({'−1' if new else '+1'})"
+
+        def _work():
+            p, conn_err = fresh_proxy(dev)
+            if conn_err:
+                return ("err", conn_err)
+            if is_sim_proxy(p):
+                return ("sim", "")
+            err = safe_write(p, relay_attr, plan["new"])
+            if err:
+                return ("err", err)
+            new = plan["new"]
+            return ("ok", f"{relay_attr} → {new}  ({'−1' if new else '+1'})")
 
         def _apply():
-            self._relay_state = new_state
+            self._relay_state = plan["new"]
             self._update_relay_label()
-            self.relay_changed.emit(new_state)
+            self.relay_changed.emit(plan["new"])
 
-        # The local state follows the hardware: it changes only once the
-        # write has succeeded (or in simulation, where there is no hardware).
-        self._bg_write("relay", self.relay_status, dev, [(relay_attr, new_state)],
-                       f"{relay_attr} → {new_state}  ({'−1' if new_state else '+1'})",
-                       on_ok=_apply, on_sim=_apply)
+        self._bg_submit("relay", self.relay_status, _work, _describe,
+                        on_ok=_apply, on_sim=_apply)
 
     def _update_relay_label(self):
         if self._relay_state == 0:

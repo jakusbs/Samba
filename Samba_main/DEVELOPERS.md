@@ -133,7 +133,7 @@ widget.setStyleSheet("#action_bar { background: #12121f; }")
 Every panel that restores values in `load()` sets a `_loading` flag and funnels all its change signals through one `_emit_changed()` that consults it. A `changed` signal fired mid-load makes the main window save a half-restored panel over the setup file (this happened: Cryo's Keithley device became a lock-in).
 
 ### Background hardware write pattern
-Hardware-panel writes go through `BackgroundCall.run(key, fn, on_done)` (`core/bgcall.py`): `fn` runs on a daemon thread, `on_done` on the GUI thread via a queued signal, one call per key in flight. Never touch widgets from the worker thread; never `QTimer.singleShot` from a plain thread (delivery is Qt-version dependent) — emit a queued signal.
+Hardware-panel writes go through `BackgroundWriteMixin._bg_write` / `_bg_submit` (`core/bgcall.py`, shared by both apps' panels) on top of `BackgroundCall.run(key, fn, on_done, on_start)`: `fn` runs on a daemon thread, `on_done` on the GUI thread via a queued signal. Calls with the same key (one device) run one at a time **in the order requested — a call made while another is in flight waits, it is never dropped** (§89). A failed write stays visible on the status label until that device's queue has drained. Never touch widgets from the worker thread; never `QTimer.singleShot` from a plain thread (delivery is Qt-version dependent) — emit a queued signal.
 
 ---
 
